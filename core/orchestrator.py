@@ -339,7 +339,6 @@ class Orchestrator(Supervisor, Entity):
                         
                         # 2. Copie profonde des données résolues
                         if self.root_solver and hasattr(self.root_solver, 'variable_registry'):
-                            import copy
                             mission_cache.resolved_data = copy.deepcopy(self.root_solver.variable_registry)
                         
                         # 3. Statut et horodatage
