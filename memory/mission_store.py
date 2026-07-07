@@ -1,0 +1,221 @@
+# memory/mission_store.py
+# =====================================================
+# PHASE 2 – PERSISTANCE DES MISSIONS (MissionMemory)
+# Gère la table 'episodes' dans la base SQLite.
+# =====================================================
+
+# memory/mission_store.py
+import sqlite3
+import json
+from typing import Optional, List, Dict, Any
+from datetime import datetime
+from utils.logger import Logger
+from memory.session_memory import MissionCache
+
+
+class MissionStore:
+
+    def __init__(self, db_path: str = "memory.db"):
+        self.db_path = db_path
+        self._initialize_db()
+
+    def _get_connection(self):
+        return sqlite3.connect(self.db_path, check_same_thread=False)
+
+    def _initialize_db(self):
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                # Table episodes
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS episodes (
+                        mission_id TEXT PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        goal TEXT NOT NULL,
+                        environment TEXT DEFAULT 'simulated',
+                        status TEXT NOT NULL,
+                        execution_tree_json TEXT NOT NULL,
+                        resolved_data_json TEXT NOT NULL,
+                        presentator_result_json TEXT NULL,
+                        schema_version INTEGER DEFAULT 1,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        finished_at DATETIME,
+                        analyzed_at DATETIME NULL
+                    )
+                ''')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_episodes_analyzed ON episodes(analyzed_at)')
+
+                # --- MIGRATION : Ajout de la colonne analyzed_at si elle n'existe pas ---
+                try:
+                    cursor.execute('ALTER TABLE episodes ADD COLUMN analyzed_at DATETIME NULL')
+                    Logger.info("[MissionStore] Migration: colonne 'analyzed_at' ajoutée.")
+                except sqlite3.OperationalError:
+                    # La colonne existe déjà
+                    pass
+
+                # --- MIGRATION : Ajout de la colonne presentator_result_json si elle n'existe pas ---
+                try:
+                    cursor.execute('ALTER TABLE episodes ADD COLUMN presentator_result_json TEXT NULL')
+                    Logger.info("[MissionStore] Migration: colonne 'presentator_result_json' ajoutée.")
+                except sqlite3.OperationalError:
+                    pass
+
+                conn.commit()
+                Logger.info("[MissionStore] Base et table 'episodes' prêtes.")
+        except Exception as e:
+            Logger.error(f"[MissionStore] Erreur d'initialisation : {e}")
+
+    def save_episode(self, mission_cache: MissionCache, session_id: str, environment: str = "simulated") -> None:
+        """Sauvegarde (ou met à jour) un épisode."""
+        try:
+            tree_json = json.dumps(
+                mission_cache.execution_tree.model_dump(mode='json') if mission_cache.execution_tree else {},
+                indent=2, ensure_ascii=False
+            )
+            resolved_json = json.dumps(mission_cache.resolved_data, indent=2, ensure_ascii=False)
+            # ---> NOUVEAU : télémétrie Presentator, sérialisée séparément de l'ExecutionTree
+            # (le Presentator n'est pas un Solver, il n'a pas sa place dans cet arbre-là).
+            presentator_json = json.dumps(
+                mission_cache.presentator_result if mission_cache.presentator_result else {},
+                ensure_ascii=False
+            )
+            finished_at_iso = mission_cache.finished_at.isoformat() if mission_cache.finished_at else None
+
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT OR REPLACE INTO episodes (
+                        mission_id, session_id, goal, environment, status,
+                        execution_tree_json, resolved_data_json, presentator_result_json,
+                        schema_version, finished_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    mission_cache.mission_id, session_id, mission_cache.goal,
+                    environment, mission_cache.status, tree_json, resolved_json, presentator_json,
+                    1, finished_at_iso
+                ))
+                conn.commit()
+                Logger.info(f"[MissionStore] 💾 Épisode sauvegardé : {mission_cache.mission_id} (status={mission_cache.status})")
+        except Exception as e:
+            Logger.error(f"[MissionStore] Erreur sauvegarde {mission_cache.mission_id} : {e}")
+
+    # =====================================================
+    # PHASE 3 : Gestion des épisodes non analysés
+    # =====================================================
+
+    def get_unanalyzed_episodes(self) -> List[Dict[str, Any]]:
+        """
+        Retourne les épisodes non encore analysés qui contiennent quelque chose à analyser :
+        soit un arbre d'exécution non vide, soit un échec Presentator (qui vit hors de l'arbre).
+        """
+        try:
+            with self._get_connection() as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT * FROM episodes
+                    WHERE analyzed_at IS NULL
+                      AND (
+                            (execution_tree_json IS NOT NULL AND execution_tree_json != '{}')
+                         OR (presentator_result_json IS NOT NULL AND presentator_result_json NOT IN ('{}', 'null', ''))
+                      )
+                ''')
+                rows = cursor.fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            Logger.error(f"[MissionStore] Erreur get_unanalyzed_episodes : {e}")
+            return []
+
+    def update_presentator_result(self, mission_id: str, presentator_result: Dict[str, Any]) -> None:
+        """
+        Mise à jour ciblée de la télémétrie Presentator, sans resérialiser tout l'épisode.
+        Appelée après coup, une fois que le Presentator a effectivement été invoqué (succès ou
+        échec) — ce qui arrive APRÈS le save_episode initial dans le flux actuel de l'Orchestrateur.
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE episodes SET presentator_result_json = ? WHERE mission_id = ?",
+                    (json.dumps(presentator_result, ensure_ascii=False), mission_id)
+                )
+                conn.commit()
+        except Exception as e:
+            Logger.error(f"[MissionStore] Erreur update_presentator_result {mission_id} : {e}")
+
+    def reset_analyzed(self, mission_ids: Optional[List[str]] = None) -> int:
+        """
+        Réinitialise analyzed_at=NULL pour permettre une ré-analyse complète.
+        Sans argument : reset TOUS les épisodes (à utiliser consciemment après une évolution
+        de la logique de l'Analyzer, jamais automatiquement). Avec mission_ids : reset ciblé.
+        Retourne le nombre de lignes affectées.
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                if mission_ids:
+                    placeholders = ",".join("?" for _ in mission_ids)
+                    cursor.execute(
+                        f"UPDATE episodes SET analyzed_at = NULL WHERE mission_id IN ({placeholders})",
+                        tuple(mission_ids)
+                    )
+                else:
+                    cursor.execute("UPDATE episodes SET analyzed_at = NULL")
+                affected = cursor.rowcount
+                conn.commit()
+                Logger.info(f"[MissionStore] 🔄 Ré-analyse forcée : {affected} épisode(s) réinitialisé(s).")
+                return affected
+        except Exception as e:
+            Logger.error(f"[MissionStore] Erreur reset_analyzed : {e}")
+            return 0
+
+    def mark_analyzed(self, mission_id: str) -> None:
+        """Marque un épisode comme analysé."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE episodes SET analyzed_at = datetime('now') WHERE mission_id = ?",
+                    (mission_id,)
+                )
+                conn.commit()
+                Logger.info(f"[MissionStore] ✅ Épisode marqué analysé : {mission_id}")  # <-- INFO
+        except Exception as e:
+            Logger.error(f"[MissionStore] Erreur mark_analyzed {mission_id} : {e}")
+    # =====================================================
+    # LECTURE D'UN ÉPISODE
+    # =====================================================
+
+    def get_episode(self, mission_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Récupère un épisode complet depuis la base.
+        Retourne un dictionnaire ou None si non trouvé.
+        """
+        try:
+            with self._get_connection() as conn:
+                conn.row_factory = sqlite3.Row  # Permet d'accéder aux colonnes par nom
+                cursor = conn.cursor()
+                cursor.execute('SELECT * FROM episodes WHERE mission_id = ?', (mission_id,))
+                row = cursor.fetchone()
+                if row:
+                    return dict(row)
+                return None
+        except Exception as e:
+            Logger.error(f"[MissionStore] Erreur de lecture épisode {mission_id} : {e}")
+            return None
+
+    def get_episodes_by_session(self, session_id: str) -> List[Dict[str, Any]]:
+        """
+        Récupère tous les épisodes d'une session donnée.
+        """
+        try:
+            with self._get_connection() as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute('SELECT * FROM episodes WHERE session_id = ? ORDER BY created_at DESC', (session_id,))
+                rows = cursor.fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            Logger.error(f"[MissionStore] Erreur de lecture des épisodes pour session {session_id} : {e}")
+            return []

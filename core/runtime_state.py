@@ -1,0 +1,25 @@
+"""
+runtime_state.py
+================
+Stockage central de l'état runtime. Évite les variables globales 
+et permet la configuration dynamique depuis le frontend Qt.
+"""
+from core.i18n import _
+
+class RuntimeState:
+    """État central du runtime."""
+    def __init__(self):
+        self.system_prompt = _("You are a helpful AI assistant.")
+        self.is_configured = False
+        self.tools_manager = None
+        self.cancel_requested: bool = False  # Le vrai Kill Switch
+        self.language = "en"
+
+        # --- PHASE 3 & 4 : Apprentissage et environnement ---
+        self.learner = None  # Instance du Learner (initialisée dans orchestrator)
+        # Un seul flag, gouvernant à la fois ce qui est ÉCRIT (tag des épisodes) et ce qui est
+        # LU (filtre des leçons injectées) — toujours identiquement, sans exception ni override.
+        # "real" est une étiquette de confiance décidée consciemment côté front, pas une
+        # promesse technique sur la fiabilité des outils C++ : ne la passer à "real" que quand
+        # ils ne sont plus des générateurs aléatoires de test.
+        self.environment: str = "simulated"  # 'simulated' ou 'real'
