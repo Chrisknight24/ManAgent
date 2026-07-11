@@ -52,6 +52,16 @@ class ExecutionNode(BaseModel):
     expected_result: Optional[str] = Field(None, description=_("Critère de réussite attendu"))
     actual_result: Optional[str] = Field(None, description=_("Résultat réel obtenu"))
 
+    # --- A.3 (NOUVEAU) : le booléen BRUT renvoyé par l'outil C++, indépendamment de ce que
+    # l'analyse rigide en a fait. Sans ce champ, on ne pouvait pas distinguer "cette étape a
+    # réussi" de "cette étape a été TOLÉRÉE malgré un échec réel, parce que expected_result
+    # valait 'any'" — exactement l'ambiguïté rencontrée sur un kill_process en test, où
+    # personne (humain ou LLM) ne pouvait trancher sans deviner.
+    raw_tool_success: Optional[bool] = Field(
+        None,
+        description=_("Valeur brute 'result' renvoyée par l'outil C++ (avant tout jugement de convergence). None si non applicable (direct_answer, abstract_task).")
+    )
+
     # Statut et erreur
     status: str = Field(..., description=_("Statut final de l'étape (success, failed, skipped, pending)"))
     error_reason: Optional[str] = Field(None, description=_("Si échec, raison détaillée"))
@@ -124,6 +134,15 @@ class PlanAttempt(BaseModel):
     planner_feedback: Optional[str] = Field(
         None,
         description=_("Feedback du Planner en cas d'erreur de validation")
+    )
+
+    # --- A.4 (NOUVEAU) : le conseil du reranker existait déjà, mais uniquement en log
+    # éphémère (Logger.debug) — impossible à relire après coup. Ce champ le persiste
+    # avec la tentative elle-même : on peut désormais répondre à "quel conseil a
+    # influencé CE plan précis ?" en relisant l'épisode, pas en fouillant des logs.
+    advice_injected: Optional[str] = Field(
+        None,
+        description=_("Texte du conseil (leçons retenues par le reranker) effectivement injecté dans le prompt du Planner pour cette tentative, s'il y en a eu un.")
     )
 
     # Méthode utilitaire pour ajouter un nœud

@@ -98,6 +98,15 @@ class Executor:
                     # DIRECT_ANSWER ou TOOL_CALL
                     success, execution_output, supplemental_data = await self._execute_step_action(step, accumulated_context)
 
+                # --- A.3 (NOUVEAU) : capturer le booléen BRUT de l'outil dès maintenant, avant
+                # tout jugement de convergence — c'est la seule façon de distinguer plus tard
+                # "cette étape a réussi" de "cette étape a été TOLÉRÉE malgré un échec réel"
+                # (expected_result='any'). Uniquement pertinent pour un tool_call qui a pu
+                # être désérialisé (success=True au sens de _handle_tool_call, indépendamment
+                # de la convergence qui sera jugée juste après).
+                if step.type == StepType.TOOL_CALL and success and execution_output is not None:
+                    node.raw_tool_success = str(execution_output).strip().lower() == "true"
+
                 # --- CHECKPOINT ANNULATION ---
                 if self.solver.runtime_state.cancel_requested:
                     Logger.warning(f"[Executor] 🛑 Interruption après action de l'étape [{step.id}].")

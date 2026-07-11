@@ -65,7 +65,7 @@ class Presentator(Entity):
             advice=advice  # <--- injection
         )
         try:
-            report = await self.llm.generate_text(prompt=prompt)
+            report = await self.llm.generate_text(prompt=prompt, tag="Presentator_report")
             return report.strip()
         except Exception as e:
             Logger.error(f"[Presentator] ⚠️ Impossible de générer le rapport sémantique. Motif : {e}")
@@ -107,7 +107,7 @@ class Presentator(Entity):
             advice=advice  # <--- injection
         )
         try:
-            report = await self.llm.generate_text(prompt=prompt)
+            report = await self.llm.generate_text(prompt=prompt, tag="Presentator_error")
             return report.strip()
         except Exception as e:
             Logger.error(f"[Presentator] ⚠️ Échec de génération du rapport d'erreur : {e}")

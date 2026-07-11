@@ -137,6 +137,10 @@ class Solver(Supervisor, Entity):
                     )
                     # Stocker le plan sérialisé
                     self.current_attempt.proposed_plan = proposed_plan.model_dump(mode='json')
+                    # --- A.4 : le Planner a déjà mis en cache l'advice qu'il vient d'utiliser
+                    # (self.planner._cached_advice, peuplé lors de CET appel à propose_plan) —
+                    # on le recopie sur la tentative pour qu'il soit persisté avec elle.
+                    self.current_attempt.advice_injected = getattr(self.planner, "_cached_advice", None) or None
                 except ValueError as plan_error:
                     Logger.warning(f"[Solver:{self.id}] ⚠️ Plan invalide : {plan_error}")
                     self.current_attempt.ended_at = time.time()

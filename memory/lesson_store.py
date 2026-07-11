@@ -50,17 +50,33 @@ class LessonStore:
                 except sqlite3.OperationalError:
                     pass
 
+                # --- MIGRATION : source_episodes_json — quels mission_id ont contribué à cette
+                # leçon (créée puis confirmée). Nécessaire pour la traçabilité demandée dans la
+                # couche d'observabilité ("de quelle mission vient cette leçon ?").
+                try:
+                    cursor.execute("ALTER TABLE lessons ADD COLUMN source_episodes_json TEXT DEFAULT '[]'")
+                    Logger.info("[LessonStore] Migration: colonne 'source_episodes_json' ajoutée.")
+                except sqlite3.OperationalError:
+                    pass
+
                 conn.commit()
                 Logger.info("[LessonStore] Table 'lessons' prête.")
         except Exception as e:
             Logger.error(f"[LessonStore] Erreur d'initialisation : {e}")
+
+    # Plafonds défensifs — évitent la dérive observée en test réel (une leçon avec 55
+    # mots-clés accumulés au fil des confirmations, qui gonfle le prompt du reranker pour rien).
+    MAX_KEYWORDS_PER_CALL = 6
+    MAX_KEYWORDS_TOTAL = 20
+    MAX_SOURCE_EPISODES = 50
 
     # =====================================================
     # UPSERT (Clé = entity_type + scope + environment)
     # =====================================================
 
     def upsert_lesson(self, entity_type: str, scope: str, recommendation: str,
-                       environment: str = "simulated", keywords: Optional[List[str]] = None) -> None:
+                       environment: str = "simulated", keywords: Optional[List[str]] = None,
+                       mission_id: Optional[str] = None) -> None:
         """
         Ajoute ou met à jour une leçon.
         Clé d'unicité : (entity_type, scope, environment). `scope` doit rester une identité
@@ -68,20 +84,26 @@ class LessonStore:
         et permissif : c'est la couche de découvrabilité que consulte le reranker LLM, pas
         l'identité de la leçon. Les nouveaux mots-clés s'AJOUTENT à chaque confirmation
         (union, jamais d'écrasement) : chaque épisode peut révéler un angle différent de la
-        même situation.
+        même situation — mais bornés (voir MAX_KEYWORDS_*), sinon la liste grossit sans fin
+        (observé en test réel : une leçon avec 55 mots-clés après quelques confirmations).
+
+        `mission_id`, s'il est fourni, alimente `source_episodes_json` — la liste des missions
+        qui ont contribué à cette leçon, pour permettre de remonter de la leçon vers la mission
+        d'origine dans la couche d'observabilité.
         """
-        keywords = keywords or []
+        # Plafond appliqué dès la réception, indépendamment de ce que le LLM a proposé
+        keywords = (keywords or [])[:self.MAX_KEYWORDS_PER_CALL]
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT id, evidence_count, contradiction_count, keywords_json "
+                    "SELECT id, evidence_count, contradiction_count, keywords_json, source_episodes_json "
                     "FROM lessons WHERE entity_type = ? AND scope = ? AND environment = ?",
                     (entity_type, scope, environment)
                 )
                 row = cursor.fetchone()
                 if row:
-                    lesson_id, evidence_count, contradiction_count, existing_keywords_json = row
+                    lesson_id, evidence_count, contradiction_count, existing_keywords_json, existing_sources_json = row
                     new_evidence = evidence_count + 1
                     # Laplace : (evidence+1)/(evidence+contradiction+2)
                     new_confidence = (new_evidence + 1) / (new_evidence + contradiction_count + 2)
@@ -89,27 +111,40 @@ class LessonStore:
                         existing_keywords = json.loads(existing_keywords_json) if existing_keywords_json else []
                     except Exception:
                         existing_keywords = []
-                    merged_keywords = sorted(set(existing_keywords) | set(keywords))
+                    merged_keywords = sorted(set(existing_keywords) | set(keywords))[:self.MAX_KEYWORDS_TOTAL]
+
+                    try:
+                        existing_sources = json.loads(existing_sources_json) if existing_sources_json else []
+                    except Exception:
+                        existing_sources = []
+                    if mission_id and mission_id not in existing_sources:
+                        existing_sources.append(mission_id)
+                    merged_sources = existing_sources[-self.MAX_SOURCE_EPISODES:]
+
                     cursor.execute('''
                         UPDATE lessons
                         SET evidence_count = ?,
                             confidence = ?,
                             recommendation = ?,
                             keywords_json = ?,
+                            source_episodes_json = ?,
                             last_verified_at = ?
                         WHERE id = ?
                     ''', (new_evidence, new_confidence, recommendation,
                           json.dumps(merged_keywords, ensure_ascii=False),
+                          json.dumps(merged_sources, ensure_ascii=False),
                           datetime.now().isoformat(), lesson_id))
-                    Logger.debug(f"[LessonStore] Mise à jour leçon : {scope} (evidence={new_evidence}, conf={new_confidence:.2f}, keywords={merged_keywords})")
+                    Logger.debug(f"[LessonStore] Mise à jour leçon : {scope} (evidence={new_evidence}, conf={new_confidence:.2f}, keywords={len(merged_keywords)})")
                 else:
                     # Nouvelle leçon : confiance initiale 2/3 (Laplace avec ev=1, cont=0)
                     initial_confidence = 2 / 3
+                    sources = [mission_id] if mission_id else []
                     cursor.execute('''
-                        INSERT INTO lessons (entity_type, scope, recommendation, environment, confidence, evidence_count, keywords_json)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO lessons (entity_type, scope, recommendation, environment, confidence, evidence_count, keywords_json, source_episodes_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ''', (entity_type, scope, recommendation, environment, initial_confidence, 1,
-                          json.dumps(sorted(set(keywords)), ensure_ascii=False)))
+                          json.dumps(sorted(set(keywords)), ensure_ascii=False),
+                          json.dumps(sources, ensure_ascii=False)))
                     Logger.debug(f"[LessonStore] Nouvelle leçon : {scope} (keywords={keywords})")
                 conn.commit()
         except Exception as e:

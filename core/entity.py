@@ -40,6 +40,15 @@ class Entity(ABC):
         else:
             Logger.debug(formatted_message)
 
+    def log_event(self, event_type: str, **fields):
+        """
+        Proxy vers Logger.event() qui attache automatiquement l'identité de l'entité
+        (nom + rôle) — évite de répéter ces deux champs à chaque appel, et garantit que
+        la future couche d'observabilité peut toujours répondre à "quelle entité a fait
+        ça ?" sans ambiguïté.
+        """
+        Logger.event(event_type, entity_name=self.name, entity_role=self.role, **fields)
+
     def get_root(self) -> 'Entity':
         """Remonte la chaîne hiérarchique jusqu'au PDG (Root)."""
         current = self

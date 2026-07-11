@@ -92,7 +92,7 @@ class Analyzer:
             return
 
         # Parcourir l'arbre récursivement
-        await self._traverse_tree(tree, episode.get("environment", "simulated"))
+        await self._traverse_tree(tree, episode.get("environment", "simulated"), episode.get("mission_id"))
 
     async def _analyze_presentator_failure(self, episode: Dict[str, Any]) -> None:
         """
@@ -127,8 +127,9 @@ DÉTAIL DE L'ERREUR : {error_reason}
 Instructions :
 1. Identifie un mot-clé de scope STABLE et étroit résumant la situation (ex: 'generation_rapport_echec',
    'contexte_trop_long', 'donnees_manquantes').
-2. Propose des mots-clés LARGES de découvrabilité (types de mission, symptômes) qui permettront
-   de retrouver cette leçon plus tard.
+2. Propose 5 à 8 mots-clés LARGES de découvrabilité (types de mission, symptômes) qui
+   permettront de retrouver cette leçon plus tard — pas plus, la liste est plafonnée côté code
+   de toute façon (voir LessonStore.MAX_KEYWORDS_PER_CALL).
 3. Produis une règle impérative courte (1-2 phrases), adressée directement au Presentator.
 """
             extracted = await asyncio.wait_for(
@@ -152,21 +153,22 @@ Instructions :
             scope=scope,
             recommendation=recommendation,
             environment=environment,
-            keywords=keywords
+            keywords=keywords,
+            mission_id=episode.get("mission_id")
         )
 
-    async def _traverse_tree(self, tree: ExecutionTree, environment: str) -> None:
+    async def _traverse_tree(self, tree: ExecutionTree, environment: str, mission_id: Optional[str] = None) -> None:
         """
         Parcourt récursivement l'arbre et génère des leçons pour chaque tentative et nœud.
         """
         for attempt in tree.attempts:
-            await self._analyze_attempt(attempt, tree.goal, environment)
+            await self._analyze_attempt(attempt, tree.goal, environment, mission_id)
             # Parcourir les nœuds pour les sous-arbres
             for node in attempt.nodes:
                 if node.child_execution_tree:
-                    await self._traverse_tree(node.child_execution_tree, environment)
+                    await self._traverse_tree(node.child_execution_tree, environment, mission_id)
 
-    async def _analyze_attempt(self, attempt: PlanAttempt, goal: str, environment: str) -> None:
+    async def _analyze_attempt(self, attempt: PlanAttempt, goal: str, environment: str, mission_id: Optional[str] = None) -> None:
         """
         Analyse une tentative et génère des leçons si elle a échoué.
         Utilise le LLM pour extraire scope et recommandation.
@@ -220,10 +222,9 @@ Instructions :
    de l'échec (ex: 'keyboard_run_dialog_focus_loss'). Ce n'est pas forcément une application :
    ça peut être un type d'action ('lecture_fichier', 'connexion_reseau'), un composant, ou un
    contexte métier. N'invente pas une application si le contexte n'en mentionne aucune.
-2. Propose aussi une liste de mots-clés LARGES et variés (applications, actions, synonymes,
-   outils impliqués) qui permettront de retrouver cette leçon depuis un but de mission différent
-   de celui-ci — pense à toutes les façons dont un utilisateur pourrait formuler une mission qui
-   retomberait dans ce même piège.
+2. Propose 5 à 8 mots-clés LARGES et variés (applications, actions, synonymes, outils
+   impliqués) qui permettront de retrouver cette leçon depuis un but de mission différent de
+   celui-ci — pas plus (liste plafonnée côté code de toute façon), choisis les plus utiles.
 3. Produis une règle impérative courte (1-2 phrases), adressée directement à {entity_type}, pour
    éviter cette erreur à l'avenir compte tenu de son rôle ci-dessus.
 """
@@ -252,7 +253,8 @@ Instructions :
             scope=scope,
             recommendation=recommendation,
             environment=environment,
-            keywords=keywords
+            keywords=keywords,
+            mission_id=mission_id
         )
 
         # 3. Si l'échec est lié à un outil spécifique, on crée une leçon complémentaire (scope outil)
@@ -266,7 +268,8 @@ Instructions :
                         scope=tool_scope,
                         recommendation=tool_recommendation,
                         environment=environment,
-                        keywords=list(set(keywords + [node.tool_name]))
+                        keywords=list(set(keywords + [node.tool_name])),
+                        mission_id=mission_id
                     )
                     break
 
@@ -385,6 +388,14 @@ class Advisor:
             for c in candidates
         )
 
+        # --- A.2 : le raisonnement du reranker (champ "reasoning") est un log de debug lu
+        # directement par le développeur pour comprendre ce qui s'est passé — rien n'imposait
+        # sa langue jusqu'ici, et on l'a vu sortir en anglais une fois alors que tout le reste
+        # tourne en français. Ça ne change rien pour l'utilisateur final (le reasoning ne lui
+        # est jamais montré), mais ça sert directement l'objectif d'observabilité : des logs
+        # illisibles à moitié dans une langue, à moitié dans une autre, ne servent à rien.
+        lang = getattr(self.runtime_state, "language", "fr")
+
         prompt = f"""
 Tu juges la pertinence de leçons apprises pour une mission à venir.
 
@@ -399,16 +410,20 @@ Instructions :
 Sélectionne UNIQUEMENT les leçons dont la situation d'origine est réellement susceptible de se
 reproduire dans cette mission — pas un simple mot en commun, un vrai rapport sémantique.
 Une liste vide est une réponse parfaitement valide si rien ne s'applique réellement.
+Rédige le champ "reasoning" dans la langue de code ISO "{lang}".
 """
         try:
             reranked = await asyncio.wait_for(
-                self.llm.generate_structured(prompt=prompt, schema=RerankedLessons),
+                self.llm.generate_structured(prompt=prompt, schema=RerankedLessons, tag="RerankedLessons"),
                 timeout=20.0
             )
         except Exception as e:
             # Le RAG ne doit JAMAIS bloquer ni ralentir excessivement une mission :
             # en cas de doute (timeout, erreur LLM), on renvoie l'absence de conseil.
-            Logger.error(f"[Advisor] Échec du reranker LLM : {e}")
+            # --- A.1 : asyncio.TimeoutError a un str() vide — sans le nom du type, ce log
+            # semblait cassé ("Échec du reranker LLM : ", rien après). Le type seul suffit
+            # à comprendre "c'est un timeout" sans avoir à deviner depuis le timing.
+            Logger.error(f"[Advisor] Échec du reranker LLM : {type(e).__name__}: {e}")
             return ""
 
         Logger.debug(f"[Advisor] Reranker : {reranked.reasoning}")

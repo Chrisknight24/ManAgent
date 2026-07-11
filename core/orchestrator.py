@@ -6,6 +6,7 @@ RÔLE (Le PDG) : Centre de validation, de routage des paquets C++ et Superviseur
 """
 
 import asyncio
+import time
 from providers.provider_manager import ProviderManager
 from core.event_bus import EventBus
 from core.runtime_state import RuntimeState
@@ -63,6 +64,11 @@ class Orchestrator(Supervisor, Entity):
         self._heartbeat_task: Optional[asyncio.Task] = None
         self.session_memories: Dict[str, SessionMemory] = {}  # <--- NOUVEAU
         self.mission_store = MissionStore()  # <--- NOUVEAU
+
+        # --- NOUVEAU : couche d'observabilité structurée (Logger -> JSON) ---
+        # Un fichier séparé, à côté de memory.db — jamais sur stdout (protocole intouché).
+        # C'est ce fichier que le futur outil de visualisation HTML consommera.
+        Logger.configure_json_sink("observability/events.jsonl")
         
     async def process(self, packet: RequestPacket):
         """
@@ -199,13 +205,36 @@ class Orchestrator(Supervisor, Entity):
             Logger.info(f"[Orchestrator] Évaluation de la requête via ProviderManager ({forced_provider}/{forced_model})...")
 
             # 3. Appel UNIQUE pour obtenir la décision structurée (routage + réponse/contexte)
-            decision: OrchestratorDecision = await self.provider_manager.generate_structured_output(
-                prompt=orchestrator_prompt,
-                provider_id=forced_provider,
-                model_id=forced_model,
-                response_schema=OrchestratorDecision,
-                context=context_list
-            )
+            # --- NOUVEAU : cet appel passe directement par provider_manager, PAS par un
+            # wrapper Llm — donc l'instrumentation universelle de Llm.generate_structured()
+            # ne le capture pas. On l'instrumente ici à la main, avec le même format
+            # d'événement ("llm_call"), pour que la future vue d'observabilité n'ait pas à
+            # traiter ce point d'entrée différemment des autres.
+            routing_started = time.monotonic()
+            try:
+                decision: OrchestratorDecision = await self.provider_manager.generate_structured_output(
+                    prompt=orchestrator_prompt,
+                    provider_id=forced_provider,
+                    model_id=forced_model,
+                    response_schema=OrchestratorDecision,
+                    context=context_list
+                )
+                Logger.event(
+                    "llm_call", tag="OrchestratorDecision", kind="structured",
+                    schema="OrchestratorDecision", provider_id=forced_provider, model_id=forced_model,
+                    prompt=orchestrator_prompt, context=context_list,
+                    response=decision.model_dump(mode='json'),
+                    duration_ms=int((time.monotonic() - routing_started) * 1000), success=True
+                )
+            except Exception as e:
+                Logger.event(
+                    "llm_call", tag="OrchestratorDecision", kind="structured",
+                    schema="OrchestratorDecision", provider_id=forced_provider, model_id=forced_model,
+                    prompt=orchestrator_prompt, context=context_list,
+                    error=str(e), error_type=type(e).__name__,
+                    duration_ms=int((time.monotonic() - routing_started) * 1000), success=False
+                )
+                raise
 
             # SÉCURITÉ DE SORTIE : Validation immédiate après retour de l'évaluation
             if self.runtime_state.cancel_requested:
@@ -228,6 +257,16 @@ class Orchestrator(Supervisor, Entity):
                     provider_id=forced_provider
                 )
 
+                # --- NOUVEAU : un "direct" ne laisse AUCUNE trace dans la table `episodes`
+                # (elle n'existe que pour les missions) — sans cet événement, ce tour de
+                # conversation serait invisible depuis la couche d'observabilité, alors
+                # que c'est exactement l'autre moitié de "qui répond à l'utilisateur" (voir
+                # la remarque sur Orchestrator vs Presentator).
+                Logger.event(
+                    "session_turn", session_id=session_id, mode="direct",
+                    responder="Orchestrator", user_message=user_message, response=final_response
+                )
+
                 await self.propagate_event(Events.RESPONSE_COMPLETED, {"content": final_response})
                 return ResponsePacket(type="response", status="success", payload={"message": final_response})
 
@@ -241,7 +280,6 @@ class Orchestrator(Supervisor, Entity):
                 refined_goal = decision.output 
                 self.current_execution_context["refined_goal"] = refined_goal
                 self.active_sessions[session_id]["refined_goal"] = refined_goal
-
 
                 # --- PHASE 1 : INITIALISATION DE LA MÉMOIRE DE SESSION ---
                 if session_id not in self.session_memories:
@@ -257,6 +295,16 @@ class Orchestrator(Supervisor, Entity):
                 mission_cache = MissionCache(mission_id, session_id, refined_goal)
                 mission_cache.status = "running"
                 session_memory.add_mission(mission_cache)
+
+                # --- NOUVEAU : le pendant "mission" du session_turn direct plus haut. On
+                # l'émet ICI (mission_id connu) et pas juste après le routage, précisément
+                # pour que la vue d'observabilité puisse relier ce tour de conversation à
+                # l'épisode complet (arbre, tentatives, statut final) sans ambiguïté.
+                Logger.event(
+                    "session_turn", session_id=session_id, mode="mission",
+                    mission_id=mission_id, user_message=user_message, refined_goal=refined_goal
+                )
+
 
                 Logger.info(f"[Orchestrator] 📝 Mission cache créé : {mission_id} pour la session {session_id}")
 
@@ -339,6 +387,7 @@ class Orchestrator(Supervisor, Entity):
                         
                         # 2. Copie profonde des données résolues
                         if self.root_solver and hasattr(self.root_solver, 'variable_registry'):
+                            import copy
                             mission_cache.resolved_data = copy.deepcopy(self.root_solver.variable_registry)
                         
                         # 3. Statut et horodatage
