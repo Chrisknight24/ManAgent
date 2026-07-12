@@ -59,6 +59,9 @@ class Presentator(Entity):
         if hasattr(self.runtime_state, 'session_memory') and self.runtime_state.session_memory:
             mood = self.runtime_state.session_memory.context.mood
 
+                # Récupérer le niveau de détail depuis le runtime_state
+        detail_level = getattr(self.runtime_state, "presentator_detail_level", "detailed")
+
         loader = get_prompt_loader()
         prompt = loader.load(
             "presentator_report.md",
@@ -68,8 +71,10 @@ class Presentator(Entity):
             variable_registry=variable_registry,
             accumulated_response=accumulated_response,
             advice=advice,  # <--- injection
-            session_mood=mood  # <-- injection
+            session_mood=mood,  # <-- injection
+            detail_level= detail_level
         )
+
         try:
             report = await self.llm.generate_text(prompt=prompt, tag="Presentator_report")
             return report.strip()
@@ -108,6 +113,8 @@ class Presentator(Entity):
         if hasattr(self.runtime_state, 'session_memory') and self.runtime_state.session_memory:
             mood = self.runtime_state.session_memory.context.mood
 
+        detail_level = getattr(self.runtime_state, "presentator_detail_level", "detailed")
+
         loader = get_prompt_loader()
         prompt = loader.load(
             "presentator_error.md",
@@ -116,7 +123,8 @@ class Presentator(Entity):
             error_reason=error_reason,
             final_context=final_context,
             advice=advice,  # <--- injection
-            session_mood=mood  # <-- injection
+            session_mood=mood,  # <-- injection
+            detail_level = detail_level
         )
         try:
             report = await self.llm.generate_text(prompt=prompt, tag="Presentator_error")

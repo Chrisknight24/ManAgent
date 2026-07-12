@@ -24,3 +24,4 @@ class RuntimeState:
         # ils ne sont plus des générateurs aléatoires de test.
         self.environment: str = "simulated"  # 'simulated' ou 'real'
         self.session_memory = None   # Référence à SessionMemory (définie dans orchestrator)
+        self.presentator_detail_level = "brief"   # "brief" ou "detailed"

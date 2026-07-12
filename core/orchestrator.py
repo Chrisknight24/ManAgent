@@ -718,6 +718,8 @@ class Orchestrator(Supervisor, Entity):
         self.runtime_state.language = payload.get("language", "en")
         self.runtime_state.environment = payload.get("environment", "simulated")
         Logger.info(f"[Orchestrator] Environnement = {self.runtime_state.environment}")
+        self.runtime_state.presentator_detail_level = payload.get("presentator_detail_level",
+                                                                  "brief")
 
         from core.i18n import setup_i18n
         setup_i18n(self.runtime_state.language)

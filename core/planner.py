@@ -62,13 +62,22 @@ class Planner:
         loader = get_prompt_loader()
         # Dans Planner.propose_plan, après avoir récupéré le cache advice
         
+        enriched_registry = {}
+        for name, info in (variable_registry or {}).items():
+            enriched_registry[name] = {
+                "description": info.get("description", ""),
+                "timestamp": info.get("timestamp", "N/A"),
+                "source": info.get("source", "N/A"),
+            }
+
+        # Puis dans loader.load, remplacer variable_registry=variable_registry par variable_registry=enriched_registry
         prompt = loader.load(
             "planner.md",
             lang=self.runtime_state.language,
             goal=goal,
             context=context,
             strategy=strategy,
-            variable_registry=variable_registry,
+            variable_registry=enriched_registry,
             tools=tools_view,
             advice=advice
         )   

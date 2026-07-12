@@ -15,10 +15,12 @@ Tu es le PLANNER central. Ton rôle est de découper un objectif en un plan d’
 {% endif %}
 
 ---
-## REGISTRE DES VARIABLES
+## REGISTRE DES VARIABLES/POINTEURS (MÉTADONNÉES UNIQUEMENT)
 {% if variable_registry %}
-{% for name, info in variable_registry.items() %}
-- Pointeur : `$@_{{ name }}` | Description : {{ info.description }}
+{% for name, meta in variable_registry.items() %}
+- **`$@_{{ name }}`** : {{ meta.description }}
+  - Source : {{ meta.source }}
+  - Dernière mise à jour : {{ meta.timestamp }}
 {% endfor %}
 {% else %}
 [Le registre est actuellement vide.]
