@@ -3,7 +3,7 @@
 # PHASE 3 – STOCKAGE DES LEÇONS (KnowledgeBase)
 # Gère la table 'lessons' dans la base SQLite.
 # =====================================================
-# memory/lesson_store.py
+
 import sqlite3
 import json
 from typing import List, Dict, Any, Optional
@@ -36,6 +36,8 @@ class LessonStore:
                         contradiction_count INTEGER DEFAULT 0,
                         is_active BOOLEAN DEFAULT 1,
                         keywords_json TEXT DEFAULT '[]',
+                        source_episodes_json TEXT DEFAULT '[]',
+                        polarity TEXT DEFAULT 'avoid',
                         last_verified_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                     )
@@ -43,19 +45,22 @@ class LessonStore:
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_lessons_scope ON lessons(scope)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_lessons_entity ON lessons(entity_type)')
 
-                # --- MIGRATION : ajout de keywords_json si la table préexistait sans cette colonne ---
+                # --- MIGRATIONS (colonnes ajoutées progressivement) ---
                 try:
                     cursor.execute("ALTER TABLE lessons ADD COLUMN keywords_json TEXT DEFAULT '[]'")
                     Logger.info("[LessonStore] Migration: colonne 'keywords_json' ajoutée.")
                 except sqlite3.OperationalError:
                     pass
 
-                # --- MIGRATION : source_episodes_json — quels mission_id ont contribué à cette
-                # leçon (créée puis confirmée). Nécessaire pour la traçabilité demandée dans la
-                # couche d'observabilité ("de quelle mission vient cette leçon ?").
                 try:
                     cursor.execute("ALTER TABLE lessons ADD COLUMN source_episodes_json TEXT DEFAULT '[]'")
                     Logger.info("[LessonStore] Migration: colonne 'source_episodes_json' ajoutée.")
+                except sqlite3.OperationalError:
+                    pass
+
+                try:
+                    cursor.execute("ALTER TABLE lessons ADD COLUMN polarity TEXT DEFAULT 'avoid'")
+                    Logger.info("[LessonStore] Migration: colonne 'polarity' ajoutée.")
                 except sqlite3.OperationalError:
                     pass
 
@@ -64,8 +69,7 @@ class LessonStore:
         except Exception as e:
             Logger.error(f"[LessonStore] Erreur d'initialisation : {e}")
 
-    # Plafonds défensifs — évitent la dérive observée en test réel (une leçon avec 55
-    # mots-clés accumulés au fil des confirmations, qui gonfle le prompt du reranker pour rien).
+    # Plafonds défensifs
     MAX_KEYWORDS_PER_CALL = 6
     MAX_KEYWORDS_TOTAL = 20
     MAX_SOURCE_EPISODES = 50
@@ -76,37 +80,31 @@ class LessonStore:
 
     def upsert_lesson(self, entity_type: str, scope: str, recommendation: str,
                        environment: str = "simulated", keywords: Optional[List[str]] = None,
-                       mission_id: Optional[str] = None) -> None:
+                       mission_id: Optional[str] = None, polarity: str = "avoid") -> None:
         """
         Ajoute ou met à jour une leçon.
-        Clé d'unicité : (entity_type, scope, environment). `scope` doit rester une identité
-        STABLE et étroite (c'est la clé d'evidence) — `keywords` est volontairement plus large
-        et permissif : c'est la couche de découvrabilité que consulte le reranker LLM, pas
-        l'identité de la leçon. Les nouveaux mots-clés s'AJOUTENT à chaque confirmation
-        (union, jamais d'écrasement) : chaque épisode peut révéler un angle différent de la
-        même situation — mais bornés (voir MAX_KEYWORDS_*), sinon la liste grossit sans fin
-        (observé en test réel : une leçon avec 55 mots-clés après quelques confirmations).
-
-        `mission_id`, s'il est fourni, alimente `source_episodes_json` — la liste des missions
-        qui ont contribué à cette leçon, pour permettre de remonter de la leçon vers la mission
-        d'origine dans la couche d'observabilité.
+        Clé d'unicité : (entity_type, scope, environment).
+        `scope` est stable, `keywords` est large, `polarity` est 'avoid' ou 'prefer'.
+        Si la leçon existe déjà, on conserve la polarité initiale.
         """
-        # Plafond appliqué dès la réception, indépendamment de ce que le LLM a proposé
+        # Plafond appliqué dès la réception
         keywords = (keywords or [])[:self.MAX_KEYWORDS_PER_CALL]
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT id, evidence_count, contradiction_count, keywords_json, source_episodes_json "
+                    "SELECT id, evidence_count, contradiction_count, keywords_json, "
+                    "source_episodes_json, polarity "
                     "FROM lessons WHERE entity_type = ? AND scope = ? AND environment = ?",
                     (entity_type, scope, environment)
                 )
                 row = cursor.fetchone()
                 if row:
-                    lesson_id, evidence_count, contradiction_count, existing_keywords_json, existing_sources_json = row
+                    (lesson_id, evidence_count, contradiction_count,
+                     existing_keywords_json, existing_sources_json, existing_polarity) = row
                     new_evidence = evidence_count + 1
-                    # Laplace : (evidence+1)/(evidence+contradiction+2)
                     new_confidence = (new_evidence + 1) / (new_evidence + contradiction_count + 2)
+
                     try:
                         existing_keywords = json.loads(existing_keywords_json) if existing_keywords_json else []
                     except Exception:
@@ -121,6 +119,7 @@ class LessonStore:
                         existing_sources.append(mission_id)
                     merged_sources = existing_sources[-self.MAX_SOURCE_EPISODES:]
 
+                    # On conserve la polarité existante (ne pas écraser)
                     cursor.execute('''
                         UPDATE lessons
                         SET evidence_count = ?,
@@ -136,16 +135,21 @@ class LessonStore:
                           datetime.now().isoformat(), lesson_id))
                     Logger.debug(f"[LessonStore] Mise à jour leçon : {scope} (evidence={new_evidence}, conf={new_confidence:.2f}, keywords={len(merged_keywords)})")
                 else:
-                    # Nouvelle leçon : confiance initiale 2/3 (Laplace avec ev=1, cont=0)
+                    # Nouvelle leçon
                     initial_confidence = 2 / 3
                     sources = [mission_id] if mission_id else []
                     cursor.execute('''
-                        INSERT INTO lessons (entity_type, scope, recommendation, environment, confidence, evidence_count, keywords_json, source_episodes_json)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (entity_type, scope, recommendation, environment, initial_confidence, 1,
+                        INSERT INTO lessons (
+                            entity_type, scope, recommendation, environment,
+                            confidence, evidence_count, keywords_json,
+                            source_episodes_json, polarity
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (entity_type, scope, recommendation, environment,
+                          initial_confidence, 1,
                           json.dumps(sorted(set(keywords)), ensure_ascii=False),
-                          json.dumps(sources, ensure_ascii=False)))
-                    Logger.debug(f"[LessonStore] Nouvelle leçon : {scope} (keywords={keywords})")
+                          json.dumps(sources, ensure_ascii=False),
+                          polarity))
+                    Logger.debug(f"[LessonStore] Nouvelle leçon : {scope} (polarity={polarity}, keywords={keywords})")
                 conn.commit()
         except Exception as e:
             Logger.error(f"[LessonStore] Erreur upsert : {e}")
@@ -182,19 +186,6 @@ class LessonStore:
         """
         Retourne TOUTES les leçons actives pour les entity_types et l'environnement donnés,
         SANS filtre de confiance/evidence ni correspondance lexicale en amont.
-
-        C'est le remplacement volontaire de l'ancien get_lessons() (LIKE + seuils durs) :
-        le jugement de pertinence et de fiabilité est maintenant délégué à un LLM reranker
-        qui voit confidence/evidence_count/contradiction_count comme du CONTEXTE pour sa
-        décision, pas comme une porte binaire qui filtre avant même qu'il ne les voie —
-        c'était la cause du cercle vicieux (une leçon à evidence=1 n'était jamais montrée,
-        donc jamais confirmée, donc jamais promue).
-
-        Le seul filtre qui reste dur, non négociable, et JAMAIS délégué au LLM : environment.
-        Une leçon 'simulated' ne doit jamais apparaître dans une requête 'real', point final.
-
-        `limit` est un plafond défensif (garde le prompt du reranker borné) ; à revisiter avec
-        des embeddings le jour où ce plafond devient un vrai facteur limitant, pas avant.
         """
         if not entity_types:
             return []
@@ -205,7 +196,7 @@ class LessonStore:
                 placeholders = ",".join("?" for _ in entity_types)
                 cursor.execute(f'''
                     SELECT id, entity_type, scope, recommendation, confidence,
-                           evidence_count, contradiction_count, keywords_json
+                           evidence_count, contradiction_count, keywords_json, polarity
                     FROM lessons
                     WHERE entity_type IN ({placeholders})
                       AND environment = ?
@@ -221,6 +212,7 @@ class LessonStore:
                         d["keywords"] = json.loads(d.pop("keywords_json") or "[]")
                     except Exception:
                         d["keywords"] = []
+                    # polarity already present
                     results.append(d)
                 return results
         except Exception as e:
@@ -230,10 +222,7 @@ class LessonStore:
     def get_lessons(self, entity_type: str, scope_like: str, min_confidence: float = 0.6,
                     min_evidence: int = 3, environment: str = "simulated") -> List[Dict[str, Any]]:
         """
-        DÉPRÉCIÉ : conservé pour compatibilité mais plus appelé par Advisor (voir get_active_lessons).
-        Le filtre LIKE + seuils durs en amont est précisément ce qui cassait la découvrabilité
-        (vocabulaire scope != vocabulaire du but de mission) et créait un cercle vicieux sur
-        l'evidence. Ne pas rebrancher ce chemin sans revoir cette décision consciemment.
+        DÉPRÉCIÉ : conservé pour compatibilité mais plus appelé par Advisor.
         """
         try:
             with self._get_connection() as conn:

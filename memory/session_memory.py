@@ -31,8 +31,7 @@ class MissionCache:
         self.started_at: datetime = datetime.now()
         self.finished_at: Optional[datetime] = None
 
-        # ---> NOUVEAU : télémétrie du Presentator, hors ExecutionTree (appelé après coup par
-        # l'Orchestrateur, pas par un Solver/Executor). {"status": "success"|"failed", "error_reason": ...}
+        # Télémétrie du Presentator
         self.presentator_result: Optional[Dict[str, Any]] = None
 
         # Résumé (sera rempli en Phase 5)
@@ -62,7 +61,11 @@ class SessionContext:
     def __init__(self, session_id: str):
         self.session_id = session_id
 
-        # Objectif global de l'utilisateur (peut évoluer)
+        # --- NOUVEAU : empilement des objectifs raffinés ---
+        # Chaque élément : {"text": "...", "timestamp": "...", "status": "..."}
+        self.goal_stack: List[Dict[str, Any]] = []
+
+        # Objectif global de l'utilisateur (peut évoluer) – gardé pour compatibilité
         self.global_goal: Optional[str] = None
 
         # Historique des missions (liste des mission_id)
@@ -74,11 +77,15 @@ class SessionContext:
         # Problèmes récurrents (ex: "échec de keyboard")
         self.unresolved_issues: List[str] = []
 
+        # --- NOUVEAU : mood de la session (inféré, utilisé uniquement par le Presentator) ---
+        self.mood: Optional[str] = None
+
         # Résumé global de la session (vide pour l'instant)
         self.summary: str = ""
 
         # Dernière activité
         self.last_activity: datetime = datetime.now()
+        self.recurrent_themes: List[Dict[str, Any]] = []   # <-- NOUVEAU
 
     def touch(self):
         """Met à jour le timestamp de la dernière activité."""
@@ -87,10 +94,12 @@ class SessionContext:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "session_id": self.session_id,
+            "goal_stack": self.goal_stack,
             "global_goal": self.global_goal,
             "mission_count": len(self.mission_history),
             "last_mission_status": self.last_mission_status,
             "unresolved_issues": self.unresolved_issues,
+            "mood": self.mood,
             "summary": self.summary,
             "last_activity": self.last_activity.isoformat(),
         }

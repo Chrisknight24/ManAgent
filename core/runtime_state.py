@@ -23,3 +23,4 @@ class RuntimeState:
         # promesse technique sur la fiabilité des outils C++ : ne la passer à "real" que quand
         # ils ne sont plus des générateurs aléatoires de test.
         self.environment: str = "simulated"  # 'simulated' ou 'real'
+        self.session_memory = None   # Référence à SessionMemory (définie dans orchestrator)

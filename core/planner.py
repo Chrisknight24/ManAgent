@@ -60,6 +60,8 @@ class Planner:
         # Charger le template planner.md
         tools_view = await self.runtime_state.tools_manager.get_tools_view()
         loader = get_prompt_loader()
+        # Dans Planner.propose_plan, après avoir récupéré le cache advice
+        
         prompt = loader.load(
             "planner.md",
             lang=self.runtime_state.language,
@@ -68,13 +70,15 @@ class Planner:
             strategy=strategy,
             variable_registry=variable_registry,
             tools=tools_view,
-            advice=advice  # <--- conseil RAG + production fusionné
-        )    
+            advice=advice
+        )   
+         
         proposed_plan: Plan = await self.llm.generate_structured(
             prompt=prompt,
             schema=Plan
         )
-        
+
+                
         if not proposed_plan.steps:
             raise ValueError(_("Le plan généré par le LLM est structurellement valide mais ne contient aucune étape."))
             

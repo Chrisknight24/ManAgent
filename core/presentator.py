@@ -54,6 +54,11 @@ class Presentator(Entity):
             else:
                 Logger.debug("[Presentator] Aucun conseil reçu pour le rapport.")
 
+        # Récupérer le mood depuis le SessionContext (si disponible)
+        mood = None
+        if hasattr(self.runtime_state, 'session_memory') and self.runtime_state.session_memory:
+            mood = self.runtime_state.session_memory.context.mood
+
         loader = get_prompt_loader()
         prompt = loader.load(
             "presentator_report.md",
@@ -62,7 +67,8 @@ class Presentator(Entity):
             final_context=final_context,
             variable_registry=variable_registry,
             accumulated_response=accumulated_response,
-            advice=advice  # <--- injection
+            advice=advice,  # <--- injection
+            session_mood=mood  # <-- injection
         )
         try:
             report = await self.llm.generate_text(prompt=prompt, tag="Presentator_report")
@@ -97,6 +103,11 @@ class Presentator(Entity):
             else:
                 Logger.debug("[Presentator] Aucun conseil reçu pour le rapport d'échec.")
 
+        # Récupérer le mood depuis le SessionContext (si disponible)
+        mood = None
+        if hasattr(self.runtime_state, 'session_memory') and self.runtime_state.session_memory:
+            mood = self.runtime_state.session_memory.context.mood
+
         loader = get_prompt_loader()
         prompt = loader.load(
             "presentator_error.md",
@@ -104,7 +115,8 @@ class Presentator(Entity):
             goal=goal,
             error_reason=error_reason,
             final_context=final_context,
-            advice=advice  # <--- injection
+            advice=advice,  # <--- injection
+            session_mood=mood  # <-- injection
         )
         try:
             report = await self.llm.generate_text(prompt=prompt, tag="Presentator_error")

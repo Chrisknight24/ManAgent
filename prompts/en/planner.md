@@ -30,7 +30,7 @@ Tu es le PLANNER central. Ton rôle est de découper un objectif en un plan d’
   Arguments : {{ tool.parameters | tojson }}
 {% endfor %}
 
----
+--- 
 
 ## RÈGLES D'ENGAGEMENT (ANTI-HALLUCINATION ET REFUS)
 

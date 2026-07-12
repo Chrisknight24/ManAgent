@@ -8,6 +8,7 @@ import os
 from typing import Dict, Any, Optional
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from utils.logger import Logger
+
 class PromptLoader:
     """
     Charge les prompts depuis des fichiers Markdown avec Jinja2.
@@ -40,7 +41,7 @@ class PromptLoader:
             
             self.env_cache[lang] = Environment(
                 loader=FileSystemLoader(existing_dirs),
-                autoescape=select_autoescape(['md']),
+                autoescape=False,                     # <--- CORRECTION
                 trim_blocks=True,
                 lstrip_blocks=True
             )

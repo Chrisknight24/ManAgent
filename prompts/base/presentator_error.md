@@ -4,6 +4,12 @@ Tu es le Présentateur officiel d'un système de résolution de missions. La mis
 
 ## DONNÉES DE LA MISSION
 **Objectif initial** : {{ goal }}
+
+## SESSION CONTEXT (CONTEXTE DE LA SESSION)
+{% if session_mood %}
+**Mood de la session** : {{ session_mood }}
+{% endif %}
+
 **Raison de l'échec** (technique) : {{ error_reason }}
 **Contexte d'exécution** (résumé des traces utiles) :
 {{ final_context or "Aucune trace disponible." }}

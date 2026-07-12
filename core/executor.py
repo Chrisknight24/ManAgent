@@ -475,25 +475,34 @@ class Executor:
         
     def _build_failure_trace(self, executed_steps_trace: List[str], current_step: PlanStep, failure_type: str, details: str) -> str:
         """
-        Formate et retourne un historique chirurgical structuré de la session de traitement en cours.
-        Fournit au Planner le contexte nécessaire pour échafauder sa stratégie de correction au cycle suivant.
+        Formate un rapport d’échec structuré et lisible.
+        - Sections claires : étapes validées, étape de rupture, détails techniques.
+        - Inclut le nom de l’outil (si applicable), l’argument et la raison de l’échec.
         """
-        trace = _("\n=== [RAPPORT DE DIAGNOSTIC D'ÉCHEC POUR RE-PLANIFICATION] ===\n")
+        trace_lines = []
+        trace_lines.append("=== RAPPORT D’ÉCHEC POUR RE-PLANIFICATION ===")
+
         if executed_steps_trace:
-            trace += _("✅ ÉTAPES VALIDÉES AU COURS DE CETTE SESSION D'EXÉCUTION :\n")
-            trace += "\n".join(executed_steps_trace) + "\n"
+            trace_lines.append("✅ ÉTAPES RÉUSSIES AVANT L’ÉCHEC :")
+            trace_lines.extend(executed_steps_trace)
         else:
-            trace += _("❌ Aucune étape intermédiaire n'a pu être validée avant cette panne.\n")
-            
-        trace += _("\n💥 ÉTAPE DE RUPTURE DE CONVERGENCE CONSTATÉE :\n")
-        trace += _("- ID de l'Étape : {}\n").format(current_step.id)
-        trace += _("- Description de l'Action : {}\n").format(current_step.description)
-        trace += _("- Contexte Local Injecté : {}\n").format(current_step.step_context or _("Aucun (Espace Vide)"))
-        trace += _("- Critère de Réussite Attendu (Expected Output) : {}\n").format(current_step.expected_result)
-        trace += _("- Nature de la Défaillance : {}\n").format(failure_type)
-        trace += _("- Justification du Contrôleur de flux : {}\n").format(details)
-        trace += "==============================================================\n"
-        return trace
+            trace_lines.append("❌ Aucune étape n’a été validée avant l’échec.")
+
+        trace_lines.append("")
+        trace_lines.append("💥 ÉTAPE DE RUPTURE :")
+        trace_lines.append(f"- ID : {current_step.id}")
+        trace_lines.append(f"- Action : {current_step.description}")
+        if current_step.type == StepType.TOOL_CALL:
+            trace_lines.append(f"- Outil : {current_step.tool_name}")
+            trace_lines.append(f"- Arguments : {current_step.tool_args_json}")
+        trace_lines.append(f"- Résultat attendu : {current_step.expected_result}")
+        trace_lines.append(f"- Nature de l’échec : {failure_type}")
+        trace_lines.append(f"- Détail technique : {details}")
+
+        trace_lines.append("")
+        trace_lines.append("============================================")
+
+        return "\n".join(trace_lines)
     
 
     # def _interpolate_variables(self, raw_json: str) -> str:

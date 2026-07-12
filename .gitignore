@@ -6,4 +6,6 @@ __pycache__/
 .vscode/
 execution_trees/
 memory.db
-memory.db
+# Fichiers générés par l'observabilité
+observability/
+observability_report.html

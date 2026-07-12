@@ -40,6 +40,8 @@ class ExtractedLesson(BaseModel):
         description="Règle impérative et courte (1-2 phrases) pour éviter cette erreur à l'avenir."
     )
 
+    polarity: str = Field(..., description="avoid ou prefer")  # <--- NOUVEAU
+
 
 class RerankedLessons(BaseModel):
     """
@@ -157,107 +159,121 @@ Instructions :
             mission_id=episode.get("mission_id")
         )
 
+
     async def _traverse_tree(self, tree: ExecutionTree, environment: str, mission_id: Optional[str] = None) -> None:
         """
         Parcourt récursivement l'arbre et génère des leçons pour chaque tentative et nœud.
         """
+        previous_outcomes = []  # <--- NOUVEAU : track les outcomes précédents pour le contraste
         for attempt in tree.attempts:
-            await self._analyze_attempt(attempt, tree.goal, environment, mission_id)
-            # Parcourir les nœuds pour les sous-arbres
+            # On regarde si une tentative précédente a échoué
+            has_previous_failure = "failed" in previous_outcomes
+            await self._analyze_attempt(attempt, tree.goal, environment, mission_id, has_previous_failure)
+            previous_outcomes.append(attempt.outcome)  # on ajoute le résultat de cette tentative pour les suivantes
+            
+            # Parcourir les nœuds pour les sous-arbres (inchangé)
             for node in attempt.nodes:
                 if node.child_execution_tree:
                     await self._traverse_tree(node.child_execution_tree, environment, mission_id)
 
-    async def _analyze_attempt(self, attempt: PlanAttempt, goal: str, environment: str, mission_id: Optional[str] = None) -> None:
-        """
-        Analyse une tentative et génère des leçons si elle a échoué.
-        Utilise le LLM pour extraire scope et recommandation.
-        """
-        if attempt.outcome == "success":
-            return
 
+    async def _analyze_attempt(self, attempt: PlanAttempt, goal: str, environment: str, 
+                            mission_id: Optional[str] = None, has_previous_failure: bool = False) -> None:
+        """
+        Analyse une tentative et génère des leçons.
+        - Si échec -> leçon "avoid".
+        - Si succès après au moins un échec -> leçon "prefer".
+        - Si succès direct (pas d'échec avant) -> aucune leçon.
+        """
         failure_class = attempt.failure_class
         failure_reason = attempt.failure_reason or ""
 
-        # --- B3 : une annulation utilisateur n'est pas un pattern systémique, aucune leçon à en tirer ---
+        # --- B3 : annulation utilisateur = pas de leçon ---
         if failure_class == FailureClass.USER_CANCELLED:
             return
 
-        # --- Blâme explicite, jamais réinféré ---
-        # target_entity est posé à la SOURCE par Solver/Executor (voir execution_models.py).
-        # On ne reconstruit plus rien ici depuis failure_class : c'était backwards (failure_class décrit
-        # un mécanisme d'échec, pas une entité responsable) et ça ne pouvait de toute façon jamais désigner
-        # le Presentator ou l'Orchestrator, faute de valeur d'enum pour ça.
+        # --- Cas 1 : ÉCHEC ---
+        if attempt.outcome == "failed":
+            await self._generate_avoid_lesson(attempt, goal, environment, mission_id)
+            return
+
+        # --- Cas 2 : SUCCÈS ---
+        if attempt.outcome == "success":
+            # On ne crée une leçon de succès que s'il y a eu un échec avant (contraste)
+            if has_previous_failure:
+                await self._generate_prefer_lesson(attempt, goal, environment, mission_id)
+            # Sinon, on ignore (succès trivial, pas de valeur d'apprentissage)
+            return
+
+        # (Cas improbable, mais sécurité)
+        Logger.warning(f"[Analyzer] Outcome non reconnu : {attempt.outcome}")
+
+    async def _generate_avoid_lesson(self, attempt: PlanAttempt, goal: str, environment: str, 
+                                    mission_id: Optional[str] = None) -> None:
+        """
+        Génère une leçon de type 'avoid' à partir d'un échec.
+        (Code existant, légèrement refactorisé)
+        """
         entity_type = attempt.target_entity
         if not entity_type:
-            Logger.warning(
-                f"[Analyzer] Attempt sans target_entity (failure_class={failure_class.value}) — "
-                f"leçon ignorée plutôt que d'inventer un responsable."
-            )
+            Logger.warning(f"[Analyzer] Attempt sans target_entity — leçon avoid ignorée.")
             return
 
         role_description = get_entity_role(entity_type)
+        failure_class = attempt.failure_class
+        failure_reason = attempt.failure_reason or ""
 
-        # 1. Générer une recommandation via LLM (scope sémantique)
         scope: Optional[str] = None
         recommendation: Optional[str] = None
         keywords: List[str] = []
         try:
             pruned = self._prune_attempt_for_llm(attempt)
             prompt = f"""
-Tu analyses l'échec d'une entité précise d'un moteur agentique.
+    Tu analyses l'échec d'une entité précise d'un moteur agentique.
 
-ENTITÉ RESPONSABLE : {entity_type}
-RÔLE DE CETTE ENTITÉ : {role_description}
+    ENTITÉ RESPONSABLE : {entity_type}
+    RÔLE DE CETTE ENTITÉ : {role_description}
 
-OBJECTIF DE LA SOUS-TÂCHE : {goal}
-TYPE D'ERREUR : {failure_class.value}
-DÉTAIL DE L'ERREUR : {failure_reason}
+    OBJECTIF DE LA SOUS-TÂCHE : {goal}
+    TYPE D'ERREUR : {failure_class.value}
+    DÉTAIL DE L'ERREUR : {failure_reason}
 
-SÉQUENCE D'EXÉCUTION (prunée) :
-{pruned}
+    SÉQUENCE D'EXÉCUTION (prunée) :
+    {pruned}
 
-Instructions :
-1. Identifie un mot-clé de scope STABLE et étroit qui résume la SITUATION précise à l'origine
-   de l'échec (ex: 'keyboard_run_dialog_focus_loss'). Ce n'est pas forcément une application :
-   ça peut être un type d'action ('lecture_fichier', 'connexion_reseau'), un composant, ou un
-   contexte métier. N'invente pas une application si le contexte n'en mentionne aucune.
-2. Propose 5 à 8 mots-clés LARGES et variés (applications, actions, synonymes, outils
-   impliqués) qui permettront de retrouver cette leçon depuis un but de mission différent de
-   celui-ci — pas plus (liste plafonnée côté code de toute façon), choisis les plus utiles.
-3. Produis une règle impérative courte (1-2 phrases), adressée directement à {entity_type}, pour
-   éviter cette erreur à l'avenir compte tenu de son rôle ci-dessus.
-"""
+    Instructions :
+    1. Identifie un mot-clé de scope STABLE et étroit qui résume la SITUATION précise à l'origine
+    de l'échec (ex: 'keyboard_run_dialog_focus_loss'). Ce n'est pas forcément une application.
+    2. Propose 5 à 8 mots-clés LARGES et variés (applications, actions, synonymes, outils
+    impliqués) qui permettront de retrouver cette leçon depuis un but de mission différent.
+    3. Produis une règle impérative courte (1-2 phrases), adressée directement à {entity_type}, pour
+    ÉVITER cette erreur à l'avenir compte tenu de son rôle ci-dessus.
+    """
             extracted = await asyncio.wait_for(
                 self.llm.generate_structured(prompt=prompt, schema=ExtractedLesson),
                 timeout=30.0
             )
-            # --- B1 (complet) : les champs doivent être affectés sur le chemin de succès ---
             scope = extracted.scope
             recommendation = extracted.recommendation
             keywords = extracted.keywords
-        except asyncio.TimeoutError:
-            Logger.warning("[Analyzer] Timeout LLM, fallback statique.")
-            scope = f"{failure_class.value}_timeout"
-            recommendation = self._generate_recommendation_fallback(failure_class, failure_reason)
-            keywords = []
         except Exception as e:
-            Logger.error(f"[Analyzer] Échec du LLM pour l'extraction de leçon : {e}")
+            Logger.error(f"[Analyzer] Échec LLM pour la leçon avoid : {e}")
             scope = f"{failure_class.value}_fallback"
             recommendation = self._generate_recommendation_fallback(failure_class, failure_reason)
             keywords = []
 
-        # 2. Ajouter la leçon (scope sémantique, entité certaine)
+        # Upsert avec polarity='avoid'
         self.lesson_store.upsert_lesson(
             entity_type=entity_type,
             scope=scope,
             recommendation=recommendation,
             environment=environment,
             keywords=keywords,
-            mission_id=mission_id
+            mission_id=mission_id,
+            polarity="avoid"  # <--- explicite
         )
 
-        # 3. Si l'échec est lié à un outil spécifique, on crée une leçon complémentaire (scope outil)
+        # Leçon complémentaire outil (si applicable) - on conserve la polarité avoid
         if failure_class in (FailureClass.EXECUTION_FAILURE, FailureClass.CONVERGENCE_FAILURE):
             for node in attempt.nodes:
                 if node.status == "failed" and node.tool_name:
@@ -269,9 +285,82 @@ Instructions :
                         recommendation=tool_recommendation,
                         environment=environment,
                         keywords=list(set(keywords + [node.tool_name])),
-                        mission_id=mission_id
+                        mission_id=mission_id,
+                        polarity="avoid"
                     )
                     break
+
+
+    async def _generate_prefer_lesson(self, attempt: PlanAttempt, goal: str, environment: str,
+                                    mission_id: Optional[str] = None) -> None:
+        """
+        Génère une leçon de type 'prefer' à partir d'un succès SURVENU APRÈS UN ÉCHEC.
+        Le prompt est orienté "contraste" : qu'est-ce qui a permis de débloquer la situation ?
+        """
+        # On utilise l'entité ciblée par la tentative (déjà posée par le code, même si c'est un succès, 
+        # on hérite du contexte ou on prend "Planner" par défaut). 
+        # Dans un succès, target_entity peut être None. On met un fallback sur "Planner" car c'est lui qui choisit la stratégie.
+        entity_type = attempt.target_entity or "Planner"
+        role_description = get_entity_role(entity_type)
+
+        # Pour le contraste, on récupère l'erreur de la tentative précédente (si elle existe)
+        # On va se baser sur le failure_reason du PlanAttempt actuel (qui est vide ici) 
+        # ou on pourrait remonter l'historique. Mais comme on a passé `has_previous_failure`, 
+        # on sait juste qu'il y a eu un échec. On va faire un prompt générique.
+        # Idéalement, on voudrait le résumé de l'échec précédent. 
+        # Pour l'instant, on lui donne juste le contexte de la réussite, et on lui demande de déduire le contraste.
+        
+        # On récupère le plan proposé pour cette tentative (pour voir ce qui a été tenté avec succès)
+        proposed_plan_desc = json.dumps(attempt.proposed_plan, indent=2, ensure_ascii=False) if attempt.proposed_plan else "Aucun plan stocké."
+
+        try:
+            pruned = self._prune_attempt_for_llm(attempt)
+            prompt = f"""
+    Tu analyses une réussite INTERVENUE APRÈS UN ÉCHEC dans un moteur agentique.
+
+    ENTITÉ RESPONSABLE DE LA STRATÉGIE GAGNANTE : {entity_type}
+    RÔLE DE CETTE ENTITÉ : {role_description}
+
+    OBJECTIF DE LA SOUS-TÂCHE : {goal}
+
+    SÉQUENCE D'EXÉCUTION QUI A RÉUSSI (prunée) :
+    {pruned}
+
+    PLAN PROPOSÉ POUR CETTE TENTATIVE RÉUSSIE :
+    {proposed_plan_desc}
+
+    Instructions (contraste implicite avec les échecs précédents) :
+    1. Identifie un mot-clé de scope STABLE et étroit qui résume la STRATÉGIE GAGNANTE à l'origine
+    de ce succès (ex: 'keyboard_win_r_alternative', 'vision_based_ui_navigation').
+    2. Propose 5 à 8 mots-clés LARGES et variés.
+    3. Produis une règle impérative courte (1-2 phrases), adressée directement à {entity_type}, pour
+    PRIVILÉGIER cette approche à l'avenir, en mentionnant en quoi elle est plus robuste que l'approche
+    qui a échoué précédemment.
+    """
+            extracted = await asyncio.wait_for(
+                self.llm.generate_structured(prompt=prompt, schema=ExtractedLesson),
+                timeout=30.0
+            )
+            scope = extracted.scope
+            recommendation = extracted.recommendation
+            keywords = extracted.keywords
+
+        except Exception as e:
+            Logger.error(f"[Analyzer] Échec LLM pour la leçon prefer : {e}")
+            scope = "success_contrast_fallback"
+            recommendation = "Lorsqu'une méthode échoue, privilégier une approche alternative (ex: utiliser la vision ou la souris) plutôt que de répéter la même action."
+            keywords = ["alternative", "retry", "success"]
+
+        # Upsert avec polarity='prefer'
+        self.lesson_store.upsert_lesson(
+            entity_type=entity_type,
+            scope=scope,
+            recommendation=recommendation,
+            environment=environment,
+            keywords=keywords,
+            mission_id=mission_id,
+            polarity="prefer"  # <--- explicite
+        )
 
     def _prune_attempt_for_llm(self, attempt: PlanAttempt) -> str:
         """
@@ -415,15 +504,18 @@ Rédige le champ "reasoning" dans la langue de code ISO "{lang}".
         try:
             reranked = await asyncio.wait_for(
                 self.llm.generate_structured(prompt=prompt, schema=RerankedLessons, tag="RerankedLessons"),
-                timeout=20.0
+                timeout=35.0  # <-- 1. Augmenté à 35s
             )
         except Exception as e:
-            # Le RAG ne doit JAMAIS bloquer ni ralentir excessivement une mission :
-            # en cas de doute (timeout, erreur LLM), on renvoie l'absence de conseil.
-            # --- A.1 : asyncio.TimeoutError a un str() vide — sans le nom du type, ce log
-            # semblait cassé ("Échec du reranker LLM : ", rien après). Le type seul suffit
-            # à comprendre "c'est un timeout" sans avoir à deviner depuis le timing.
+            # --- 2. Fallback : top 3 leçons les plus confiantes ---
             Logger.error(f"[Advisor] Échec du reranker LLM : {type(e).__name__}: {e}")
+            if candidates:
+                fallback_selected = candidates[:3]  # déjà triées par confidence DESC
+                fallback_lines = ["⚠️ Reranker indisponible (timeout/erreur). Voici les conseils les plus confiants :"]
+                for c in fallback_selected:
+                    fallback_lines.append(f"- {c['recommendation']}")
+                Logger.warning(f"[Advisor] Fallback utilisé : {len(fallback_selected)} leçon(s) retournée(s).")
+                return "\n".join(fallback_lines)
             return ""
 
         Logger.debug(f"[Advisor] Reranker : {reranked.reasoning}")
@@ -433,25 +525,54 @@ Rédige le champ "reasoning" dans la langue de code ISO "{lang}".
             Logger.debug(f"[Advisor] Aucune leçon retenue par le reranker pour {entity_types}.")
             return ""
 
-        by_entity: Dict[str, List[Dict[str, Any]]] = {}
+        # --- NOUVEAU : Regrouper par polarité, puis par entité ---
+        by_polarity: Dict[str, Dict[str, List[Dict[str, Any]]]] = {
+            "avoid": {},
+            "prefer": {}
+        }
         for c in selected:
-            by_entity.setdefault(c["entity_type"], []).append(c)
+            polarity = c.get("polarity", "avoid")  # fallback pour les anciennes leçons
+            entity = c["entity_type"]
+            if entity not in by_polarity[polarity]:
+                by_polarity[polarity][entity] = []
+            by_polarity[polarity][entity].append(c)
 
         section_titles = {
-            "Planner": "Leçons sur la construction du plan",
-            "Executor": "Leçons sur la fiabilité des outils",
-            "Solver": "Leçons sur la stratégie de résolution",
-            "Presentator": "Leçons sur la rédaction du rapport",
+            "Planner": "Planner",
+            "Executor": "Executor",
+            "Solver": "Solver",
+            "Presentator": "Presentator",
         }
+        
         blocks = []
-        for entity_type, lessons in by_entity.items():
-            title = section_titles.get(entity_type, entity_type)
-            lines = [f"- {c['recommendation']}" for c in lessons]
-            blocks.append(f"### {title}\n" + "\n".join(lines))
+
+        # 1. Bloc AVOID
+        avoid_items = by_polarity.get("avoid", {})
+        if avoid_items:
+            avoid_lines = ["### 🚫 À éviter (Issus d'échecs)"]
+            for entity, lessons in avoid_items.items():
+                title = section_titles.get(entity, entity)
+                avoid_lines.append(f"#### {title}")
+                for l in lessons:
+                    avoid_lines.append(f"- {l['recommendation']}")
+            blocks.append("\n".join(avoid_lines))
+
+        # 2. Bloc PREFER
+        prefer_items = by_polarity.get("prefer", {})
+        if prefer_items:
+            prefer_lines = ["### ✅ À privilégier (Issus de succès après échec)"]
+            for entity, lessons in prefer_items.items():
+                title = section_titles.get(entity, entity)
+                prefer_lines.append(f"#### {title}")
+                for l in lessons:
+                    prefer_lines.append(f"- {l['recommendation']}")
+            blocks.append("\n".join(prefer_lines))
+
+        if not blocks:
+            return ""
 
         Logger.info(f"[Advisor] {len(selected)} leçon(s) retenue(s) par le reranker pour {entity_types}.")
         return "\n\n".join(blocks)
-
 
 # =====================================================
 # LEARNER (Entité principale)

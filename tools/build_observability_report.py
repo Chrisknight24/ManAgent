@@ -1,24 +1,14 @@
 #!/usr/bin/env python3
 """
-build_observability_report.py (v2)
+build_observability_report.py (v3)
 ====================================
-Assemble UN fichier HTML autonome (CSS + JS inline, zéro dépendance réseau,
-zéro serveur) — refonte complète suite au retour utilisateur sur le v1 :
+Assemble UN fichier HTML autonome (CSS + JS inline).
 
-  - Thème CLAIR (le v1 était sombre, contraste jugé fatigant à la lecture).
-  - Police nettement agrandie, affordance de clic explicite (les éléments
-    cliquables doivent SE VOIR comme cliquables — bordure, ombre, survol —
-    distincts des simples badges de statut).
-  - Navigation PAR SESSION en premier niveau (pas 4 onglets plats sans lien
-    entre eux) : on choisit une session, on voit le fil de conversation
-    (réponses directes ET missions mêlées, comme côté frontend C++).
-  - Les appels LLM ne sont plus dans un onglet séparé et déconnecté : ils
-    sont rattachés à l'endroit exact où ils se sont produits dans le récit
-    d'une mission (faisabilité -> Solver, plan -> Planner, convergence ->
-    Executor, rapport -> Presentator), via une corrélation temporelle
-    automatique entre les deux sources d'horodatage du système.
-  - Les leçons affichent désormais les missions qui les ont fait naître
-    (source_episodes), avec navigation directe vers la mission d'origine.
+Nouveautés v3 :
+  - Timestamps lisibles (format heure locale, ou date si différent du jour)
+  - Durées affichées en secondes / minutes
+  - Les tours de session sont affichés du plus récent au plus ancien
+  - Filtres de polarité fonctionnels
 
 Sources de données : memory.db (episodes, lessons) + events.jsonl (Logger.event).
 """
@@ -31,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 
 # =====================================================
-# CHARGEMENT DES DONNÉES (inchangé dans le principe)
+# CHARGEMENT DES DONNÉES (inchangé)
 # =====================================================
 
 def load_episodes(db_path: str) -> List[Dict[str, Any]]:
@@ -125,14 +115,8 @@ def load_events(events_path: str) -> List[Dict[str, Any]]:
 
 
 # =====================================================
-# CORRÉLATION TEMPORELLE (NOUVEAU)
+# CORRÉLATION TEMPORELLE (inchangée)
 # =====================================================
-# Deux sources d'horodatage coexistent dans le système : time.time() (epoch UTC,
-# utilisé par PlanAttempt/ExecutionNode) et Logger.event() (désormais UTC aussi,
-# mais d'anciens fichiers events.jsonl peuvent contenir de l'heure locale naïve
-# — c'est ce qui a été détecté en creusant les vraies données : 1h d'écart exact).
-# Plutôt que de supposer un fuseau horaire, on le DÉTECTE par optimisation : on
-# cherche le décalage qui maximise le nombre de correspondances plausibles.
 
 PRESENTATOR_TAGS = {"generate_text", "Presentator_report", "Presentator_error"}
 FEASIBILITY_TAGS = {"FeasibilityDecision"}
@@ -190,7 +174,6 @@ def _count_matches(episodes: List[Dict], llm_calls: List[Dict], offset: float) -
 
 
 def detect_clock_offset(episodes: List[Dict], llm_calls: List[Dict]) -> float:
-    """Recherche par pas de 15 min sur +/- 14h le décalage qui maximise les correspondances."""
     if not episodes or not llm_calls:
         return 0.0
     best_offset, best_score = 0.0, -1
@@ -203,7 +186,6 @@ def detect_clock_offset(episodes: List[Dict], llm_calls: List[Dict]) -> float:
 
 
 def correlate_tree(tree: Dict, all_calls: List[Dict], consumed: set, offset: float):
-    """Rattache récursivement à l'arbre les appels LLM qui lui appartiennent (mutation en place)."""
     def ts_of(call):
         raw = _parse_ts_raw(call.get("ts"))
         return None if raw is None else raw - offset
@@ -283,7 +265,6 @@ def attach_presentator_and_routing(episodes, sessions_turns, all_calls, consumed
                 consumed.add(i)
         ep["_presentator_calls"] = pres_calls
 
-    # OrchestratorDecision (routage) : rattaché au tour de session le plus proche en temps
     for turn in sessions_turns:
         turn_ts_raw = _parse_ts_raw(turn.get("ts"))
         turn_ts = None if turn_ts_raw is None else turn_ts_raw - offset
@@ -316,15 +297,14 @@ def build_data(db_path: str, events_path: str) -> Dict[str, Any]:
         correlate_tree(ep["execution_tree"], llm_calls, consumed, offset)
     attach_presentator_and_routing(episodes, session_turns, llm_calls, consumed, offset)
 
-    # Ce qui reste (essentiellement les analyses du Learner, ExtractedLesson) : pas perdu,
-    # juste rangé à part — ces appels ne concernent aucune mission précise.
     unattached_calls = [c for i, c in enumerate(llm_calls) if i not in consumed]
 
     sessions: Dict[str, List[Dict[str, Any]]] = {}
     for turn in session_turns:
         sessions.setdefault(turn.get("session_id", "?"), []).append(turn)
     for turns in sessions.values():
-        turns.sort(key=lambda t: t.get("ts") or "")
+        # On trie par date décroissante pour que les plus récents apparaissent en haut
+        turns.sort(key=lambda t: t.get("ts") or "", reverse=True)
 
     return {
         "episodes": episodes,
@@ -334,8 +314,9 @@ def build_data(db_path: str, events_path: str) -> Dict[str, Any]:
         "clock_offset_detected": offset,
     }
 
+
 # =====================================================
-# GABARIT HTML — thème clair, grande police, affordance de clic explicite
+# GABARIT HTML – version finale avec timestamps lisibles
 # =====================================================
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -385,7 +366,7 @@ a { color: var(--accent); }
 
 .app { display: flex; height: 100vh; }
 
-/* --- SIDEBAR : sessions en premier niveau --- */
+/* --- SIDEBAR --- */
 .sidebar {
   width: 320px; flex-shrink: 0; background: var(--surface); border-right: 1px solid var(--border);
   display: flex; flex-direction: column; overflow-y: auto;
@@ -427,7 +408,7 @@ a { color: var(--accent); }
 h2.section-title { font-size: 26px; margin: 0 0 22px; font-weight: 800; }
 h3.sub-title { font-size: 15px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); margin: 22px 0 10px; }
 
-/* --- Badges (statut = FLAT, jamais cliquables, pas d'ombre) --- */
+/* --- Badges --- */
 .badge {
   display: inline-block; padding: 4px 11px; border-radius: 999px; font-size: 12.5px;
   font-weight: 800; font-family: var(--mono); letter-spacing: 0.01em; white-space: nowrap;
@@ -439,6 +420,23 @@ h3.sub-title { font-size: 15px; font-weight: 800; text-transform: uppercase; let
 .badge--entity { background: var(--accent-bg); color: var(--accent); }
 .badge--env-real { background: var(--failure-bg); color: var(--failure); }
 .badge--env-simulated { background: var(--pending-bg); color: var(--pending); }
+.badge--avoid { background: var(--failure-bg); color: var(--failure); }
+.badge--prefer { background: var(--success-bg); color: var(--success); }
+
+.lesson-card.polarity-avoid { border-left: 6px solid var(--failure); }
+.lesson-card.polarity-prefer { border-left: 6px solid var(--success); }
+
+.filter-btn {
+  padding: 6px 16px;
+  border-radius: 8px;
+  border: 1.5px solid var(--border);
+  background: var(--surface);
+  font-weight: 700;
+  cursor: pointer;
+  transition: all .12s ease;
+}
+.filter-btn:hover { border-color: var(--accent); }
+.filter-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 
 .dot { display: inline-block; width: 11px; height: 11px; border-radius: 50%; margin-right: 9px; flex-shrink: 0; }
 .dot--success { background: var(--success); }
@@ -446,7 +444,7 @@ h3.sub-title { font-size: 15px; font-weight: 800; text-transform: uppercase; let
 .dot--skipped { background: var(--skipped); }
 .dot--pending { background: var(--pending); }
 
-/* --- Éléments CLIQUABLES : affordance forte et cohérente partout --- */
+/* --- Éléments cliquables --- */
 .clickable {
   cursor: pointer; background: var(--surface); border: 1.5px solid var(--border);
   border-radius: 10px; box-shadow: var(--shadow-sm); transition: all .12s ease;
@@ -454,7 +452,7 @@ h3.sub-title { font-size: 15px; font-weight: 800; text-transform: uppercase; let
 .clickable:hover { border-color: var(--accent); box-shadow: var(--shadow-lift); transform: translateY(-1px); }
 .clickable:active { transform: translateY(0); box-shadow: var(--shadow-sm); }
 
-/* --- Fil de session (style chat) --- */
+/* --- Fil de session --- */
 .thread-turn { margin-bottom: 22px; }
 .thread-turn__user {
   background: var(--surface-alt); border-radius: 14px 14px 4px 14px; padding: 13px 18px;
@@ -468,7 +466,7 @@ h3.sub-title { font-size: 15px; font-weight: 800; text-transform: uppercase; let
 .thread-turn__badge-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .responder-tag { font-family: var(--mono); font-size: 12px; font-weight: 800; color: var(--accent); }
 
-/* --- Carte de mission (cliquable, dans le fil) --- */
+/* --- Mission card --- */
 .mission-card {
   padding: 16px 20px; margin-top: 8px; max-width: 85%;
 }
@@ -477,13 +475,16 @@ h3.sub-title { font-size: 15px; font-weight: 800; text-transform: uppercase; let
 .mission-card__hint { margin-top: 10px; font-size: 13.5px; color: var(--accent); font-weight: 700; }
 .mission-card__hint::after { content: " →"; }
 
-/* --- Vue mission détaillée : narration par entité --- */
+/* --- Mission detail --- */
 .mission-detail { background: var(--surface); border: 1.5px solid var(--border); border-radius: 14px; padding: 24px 28px; box-shadow: var(--shadow-sm); }
 .back-link { display: inline-block; margin-bottom: 16px; font-weight: 700; cursor: pointer; color: var(--accent); }
 .back-link:hover { text-decoration: underline; }
 
 .mission-header__goal { font-size: 22px; font-weight: 800; margin-bottom: 8px; }
-.mission-header__meta { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--text-faint); font-family: var(--mono); margin-bottom: 18px; padding-bottom: 18px; border-bottom: 1.5px solid var(--border); }
+.mission-header__meta {
+  display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--text-faint);
+  font-family: var(--mono); margin-bottom: 18px; padding-bottom: 18px; border-bottom: 1.5px solid var(--border);
+}
 
 .entity-block {
   border-left: 4px solid var(--border-strong); padding: 4px 0 4px 18px; margin: 14px 0 14px 6px;
@@ -559,7 +560,7 @@ details[open] > summary .chevron { transform: rotate(90deg); }
 <div class="app">
   <div class="sidebar">
     <div class="sidebar__header">
-      <div class="sidebar__title">Observabilité</div>
+      <div class="sidebar__title">Observabilité - ManAgent</div>
       <div class="sidebar__subtitle" id="generated-at"></div>
     </div>
     <div class="top-nav">
@@ -581,6 +582,50 @@ let currentNav = 'sessions';
 let currentSessionId = DATA.sessions[0] ? DATA.sessions[0].session_id : null;
 let currentMissionId = null;
 
+// =====================================================
+// FONCTIONS DE FORMATAGE DE TEMPS
+// =====================================================
+
+/**
+ * Convertit un timestamp (ISO ou Unix en secondes) en chaîne lisible.
+ * - Si la date est aujourd'hui -> "HH:MM:SS"
+ * - Sinon -> "DD/MM/YYYY HH:MM"
+ */
+function formatTimestamp(ts) {
+  if (!ts) return '—';
+  let d;
+  if (typeof ts === 'number' || (typeof ts === 'string' && !isNaN(parseFloat(ts)) && isFinite(ts))) {
+    // timestamp Unix en secondes
+    d = new Date(parseFloat(ts) * 1000);
+  } else {
+    // chaîne ISO
+    d = new Date(ts);
+  }
+  if (isNaN(d.getTime())) return String(ts);
+  const now = new Date();
+  const isToday = d.getFullYear() === now.getFullYear() &&
+                  d.getMonth() === now.getMonth() &&
+                  d.getDate() === now.getDate();
+  if (isToday) {
+    return d.toTimeString().slice(0, 8);
+  } else {
+    return d.toLocaleDateString('fr-FR') + ' ' + d.toTimeString().slice(0, 5);
+  }
+}
+
+/**
+ * Formate une durée en millisecondes en chaîne lisible (ex: "2.3s" ou "1m 23s").
+ */
+function formatDuration(ms) {
+  if (!ms || ms < 0) return '—';
+  if (ms < 1000) return Math.round(ms) + 'ms';
+  const sec = ms / 1000;
+  if (sec < 60) return sec.toFixed(1) + 's';
+  const min = Math.floor(sec / 60);
+  const reste = Math.round(sec % 60);
+  return min + 'm ' + reste + 's';
+}
+
 function esc(s) {
   if (s === null || s === undefined) return '';
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -601,16 +646,17 @@ function envBadge(env) {
 function findEpisode(missionId) { return DATA.episodes.find(e => e.mission_id === missionId); }
 
 // =====================================================
-// APPELS LLM (rendu générique, réutilisé partout où on en affiche)
+// APPELS LLM (rendu générique)
 // =====================================================
 function renderLlmCall(c) {
   const ok = c.success !== false;
+  const durationStr = c.duration_ms ? formatDuration(c.duration_ms) : '';
   return `<details class="llm-call">
     <summary>
       <span class="chevron">▸</span>
       <span class="llm-call__tag" style="color:${ok ? 'var(--accent)' : 'var(--failure)'}">${esc(c.tag || c.schema || '?')}</span>
       ${statusBadge(ok ? 'success' : 'failed')}
-      <span class="llm-call__duration">${c.duration_ms !== undefined ? c.duration_ms + ' ms' : ''}</span>
+      <span class="llm-call__duration">${durationStr}</span>
     </summary>
     <div class="llm-call-body">
       ${!ok ? `<div style="color:var(--failure);font-weight:700">${esc(c.error_type||'Erreur')} : ${esc(c.error||'(message vide)')}</div>` : ''}
@@ -712,14 +758,17 @@ function renderSolverBlock(tree) {
 function renderMissionDetail(missionId) {
   const ep = findEpisode(missionId);
   if (!ep) return '<div class="empty-state">Mission introuvable.</div>';
+  const created = formatTimestamp(ep.created_at);
+  const finished = ep.finished_at ? formatTimestamp(ep.finished_at) : '—';
+  const analyzed = ep.analyzed_at ? formatTimestamp(ep.analyzed_at) : 'pas encore analysée';
   let html = `<div class="back-link" onclick="backToSession()">← Retour au fil de la session</div>`;
   html += `<div class="mission-detail">
     <div class="mission-header__goal">${esc(ep.goal)}</div>
     <div class="mission-header__meta">
       ${statusBadge(ep.status)} ${envBadge(ep.environment)}
-      <span>créée : ${esc(ep.created_at)}</span>
-      <span>finie : ${esc(ep.finished_at || '—')}</span>
-      <span>${ep.analyzed_at ? 'analysée le ' + esc(ep.analyzed_at) : 'pas encore analysée'}</span>
+      <span>créée : ${created}</span>
+      <span>finie : ${finished}</span>
+      <span>${analyzed}</span>
     </div>`;
   html += renderSolverBlock(ep.execution_tree);
 
@@ -738,17 +787,67 @@ function renderMissionDetail(missionId) {
 }
 
 // =====================================================
-// FIL DE SESSION (style chat)
+// FIL DE SESSION (style chat, trié du plus récent au plus ancien)
 // =====================================================
+
+// =====================================================
+// THÈMES RÉCURRENTS (affichés sous chaque session)
+// =====================================================
+function renderRecurrentThemes(sessionId) {
+    // Récupérer tous les mission_id de cette session
+    const missionIds = new Set();
+    const session = DATA.sessions.find(s => s.session_id === sessionId);
+    if (!session) return '';
+    session.turns.forEach(t => {
+        if (t.mission_id) missionIds.add(t.mission_id);
+    });
+
+    // Compter les scopes des leçons qui référencent ces missions
+    const scopeCount = {};
+    DATA.lessons.forEach(l => {
+        const sources = l.source_episodes || [];
+        let count = 0;
+        sources.forEach(mid => {
+            if (missionIds.has(mid)) count++;
+        });
+        if (count > 0) {
+            scopeCount[l.scope] = (scopeCount[l.scope] || 0) + count;
+        }
+    });
+
+    // Trier par occurrence décroissante et prendre les 5 premiers
+    const sorted = Object.entries(scopeCount)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5);
+
+    if (sorted.length === 0) return '';
+
+    let html = `<div style="margin-top:20px; background:var(--surface-alt); border-radius:10px; padding:14px 18px; border:1.5px solid var(--border);">`;
+    html += `<h3 style="font-size:15px; font-weight:800; margin:0 0 8px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.05em;">📊 Thèmes récurrents (scopes les plus fréquents)</h3>`;
+    html += `<ul style="margin:0; padding:0; list-style:none;">`;
+    sorted.forEach(([scope, count]) => {
+        html += `<li style="padding:4px 0; border-bottom:1px solid var(--border); display:flex; justify-content:space-between;">`;
+        html += `<span style="font-family:var(--mono); font-size:13.5px;">${esc(scope)}</span>`;
+        html += `<span style="font-family:var(--mono); font-size:12.5px; color:var(--text-faint);">${count} mission(s)</span>`;
+        html += `</li>`;
+    });
+    html += `</ul></div>`;
+    return html;
+}
+
 function renderSessionThread(sessionId) {
   const session = DATA.sessions.find(s => s.session_id === sessionId);
   if (!session) return '<div class="empty-state">Aucune session sélectionnée.</div>';
 
+  // On copie et inverse l'ordre des tours pour afficher les plus récents en premier
+  const turns = session.turns.slice().reverse();
+
   let html = `<h2 class="section-title">Session <span style="font-family:var(--mono);font-size:18px;color:var(--text-faint)">${esc(sessionId)}</span></h2>`;
-  session.turns.forEach(t => {
+  turns.forEach(t => {
+    const tsStr = formatTimestamp(t.ts);
     html += `<div class="thread-turn">
       <div class="thread-turn__user">${esc(t.user_message || '')}</div>
-      <div class="thread-turn__meta">${esc(t.ts || '')}</div>`;
+      <div class="thread-turn__meta">${tsStr}</div>`;
     if (t._routing_call) {
       html += `<div style="max-width:85%;margin-top:6px">
         <div class="field-label" style="margin-top:0">🧭 Orchestrator — décision de routage (direct ou mission ?)</div>
@@ -764,12 +863,14 @@ function renderSessionThread(sessionId) {
       const ep = findEpisode(t.mission_id);
       html += `<div class="thread-turn__response mission-card clickable" onclick="openMission('${esc(t.mission_id)}')">
         <div class="thread-turn__badge-row"><span class="responder-tag">MISSION</span> ${ep ? statusBadge(ep.status) : statusBadge('pending')}</div>
-        <div class="mission-card__title">${esc(t.refined_goal || ep && ep.goal || '')}</div>
+        <div class="mission-card__title">${esc(t.refined_goal || (ep && ep.goal) || '')}</div>
         <div class="mission-card__hint">Voir le déroulé complet (Planner, Executor, Presentator)</div>
       </div>`;
     }
     html += `</div>`;
   });
+  // Ajouter les thèmes récurrents après la conversation
+  html += renderRecurrentThemes(sessionId);
   document.getElementById('view-sessions').innerHTML = html;
 }
 
@@ -783,34 +884,63 @@ function backToSession() {
 }
 
 // =====================================================
-// LEÇONS
+// LEÇONS — avec polarités visibles et filtres
 // =====================================================
-function renderLessonsView() {
+function renderLessonsView(filter) {
+  if (typeof filter === 'undefined') filter = 'all';
   const el = document.getElementById('view-lessons');
   if (DATA.lessons.length === 0) {
     el.innerHTML = '<h2 class="section-title">Leçons</h2><div class="empty-state">Aucune leçon en base.</div>';
     return;
   }
-  let html = `<h2 class="section-title">Base de leçons (${DATA.lessons.length})</h2>`;
-  DATA.lessons.forEach(l => {
+
+  const avoidCount = DATA.lessons.filter(l => l.polarity === 'avoid').length;
+  const preferCount = DATA.lessons.filter(l => l.polarity === 'prefer').length;
+  const total = DATA.lessons.length;
+
+  let html = `<h2 class="section-title">Base de leçons (${total})</h2>
+    <div style="display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap;">
+      <button class="filter-btn ${filter === 'all' ? 'active' : ''}" data-filter="all">Toutes (${total})</button>
+      <button class="filter-btn ${filter === 'avoid' ? 'active' : ''}" data-filter="avoid">🚫 Avoid (${avoidCount})</button>
+      <button class="filter-btn ${filter === 'prefer' ? 'active' : ''}" data-filter="prefer">✅ Prefer (${preferCount})</button>
+    </div>
+    <div id="lesson-list">`;
+
+  const filtered = filter === 'all' ? DATA.lessons : DATA.lessons.filter(l => l.polarity === filter);
+
+  filtered.forEach(l => {
     const kws = (l.keywords || []).map(k => `<span class="kw-tag">${esc(k)}</span>`).join('');
     const sources = (l.source_episodes || []).map(mid => {
       const ep = findEpisode(mid);
       const label = ep ? ep.goal : mid;
       return `<span class="source-ep-link" onclick="goToMissionFromLessons('${esc(mid)}')">↳ ${esc((label||'').slice(0,40))}</span>`;
     }).join('');
-    html += `<div class="lesson-card clickable">
+    const polarityBadge = l.polarity === 'prefer'
+      ? `<span class="badge badge--prefer">✅ prefer</span>`
+      : `<span class="badge badge--avoid">🚫 avoid</span>`;
+    const polarityClass = l.polarity === 'prefer' ? 'polarity-prefer' : 'polarity-avoid';
+    html += `<div class="lesson-card clickable ${polarityClass}">
       <div class="lesson-card__head">
         <div><span class="badge badge--entity">${esc(l.entity_type)}</span> <span class="lesson-card__scope">${esc(l.scope)}</span></div>
-        <div class="lesson-card__stats">conf. ${(l.confidence||0).toFixed(2)} · ${l.evidence_count} confirm. · ${l.contradiction_count||0} contrad. · ${esc(l.environment)}</div>
+        <div class="lesson-card__stats">${polarityBadge} conf. ${(l.confidence||0).toFixed(2)} · ${l.evidence_count} confirm. · ${l.contradiction_count||0} contrad. · ${esc(l.environment)}</div>
       </div>
       <div class="lesson-card__reco">${esc(l.recommendation)}</div>
       <div>${kws}</div>
       ${sources ? `<div class="field-label">Créée / confirmée par</div><div>${sources}</div>` : ''}
     </div>`;
   });
+
+  html += `</div>`;
   el.innerHTML = html;
+
+  // Attacher les événements de filtre
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.onclick = function(e) {
+      renderLessonsView(this.dataset.filter);
+    };
+  });
 }
+
 function goToMissionFromLessons(missionId) {
   const ep = findEpisode(missionId);
   if (!ep) { alert("Cette mission n'est plus en base (purge ou session différente)."); return; }
@@ -827,14 +957,22 @@ function renderSidebar() {
   const el = document.getElementById('session-list');
   if (currentNav !== 'sessions') { el.innerHTML = ''; return; }
   let html = '';
-  DATA.sessions.forEach(s => {
+  // Trier les sessions par date du premier turn (le plus récent en premier)
+  const sortedSessions = DATA.sessions.slice().sort((a, b) => {
+    const aTime = a.turns[0] ? new Date(a.turns[0].ts).getTime() : 0;
+    const bTime = b.turns[0] ? new Date(b.turns[0].ts).getTime() : 0;
+    return bTime - aTime; // décroissant
+  });
+  sortedSessions.forEach(s => {
     const active = s.session_id === currentSessionId;
     const missionCount = s.turns.filter(t => t.mode === 'mission').length;
     const directCount = s.turns.length - missionCount;
+    // On prend le premier turn (le plus récent)
+    const firstTs = s.turns[0] ? formatTimestamp(s.turns[0].ts) : '';
     html += `<div class="session-item ${active ? 'active' : ''}" onclick="selectSession('${esc(s.session_id)}')">
       <div class="session-item__id">${esc(s.session_id).slice(0, 24)}</div>
       <div class="session-item__count">${s.turns.length} tour(s) — ${missionCount} mission(s), ${directCount} direct(s)</div>
-      <div class="session-item__time">${esc((s.turns[0]||{}).ts || '')}</div>
+      <div class="session-item__time">${firstTs}</div>
     </div>`;
   });
   el.innerHTML = html || '<div class="empty-state">Aucune session enregistrée.</div>';
@@ -857,7 +995,8 @@ function selectNav(nav) {
 }
 document.querySelectorAll('.top-nav__btn').forEach(b => b.addEventListener('click', () => selectNav(b.dataset.nav)));
 
-document.getElementById('generated-at').textContent = DATA.generated_at || '';
+const genDate = DATA.generated_at ? new Date(DATA.generated_at) : null;
+document.getElementById('generated-at').textContent = genDate ? 'Généré le ' + genDate.toLocaleDateString('fr-FR') + ' à ' + genDate.toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit'}) : '';
 renderSidebar();
 if (currentSessionId) renderSessionThread(currentSessionId);
 renderLessonsView();
@@ -876,7 +1015,7 @@ def render_html(data: Dict[str, Any]) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Génère le rapport d'observabilité HTML autonome (v2).")
+    parser = argparse.ArgumentParser(description="Génère le rapport d'observabilité HTML autonome (v3).")
     parser.add_argument("--db", default="memory.db")
     parser.add_argument("--events", default="observability/events.jsonl")
     parser.add_argument("--out", default="observability_report.html")
@@ -892,7 +1031,7 @@ def main():
     print(f"  {len(data['episodes'])} mission(s), {len(data['lessons'])} leçon(s), "
           f"{len(data['sessions'])} session(s).")
     print(f"  Décalage d'horloge détecté et compensé : {data['clock_offset_detected']/3600:.2f}h")
-    print(f"  Appels LLM non rattachés à une mission précise (analyse Learner, etc.) : {len(data['unattached_calls'])}")
+    print(f"  Appels LLM non rattachés à une mission précise : {len(data['unattached_calls'])}")
 
 
 if __name__ == "__main__":

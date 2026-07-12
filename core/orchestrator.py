@@ -29,7 +29,7 @@ from core.entity import Entity
 from core.llm import Llm
 from pydantic import ValidationError
 from .presentator import Presentator
-from typing import Optional, Dict,List, Tuple
+from typing import Optional, Dict, List, Tuple
 
 from core.prompt_loader import get_prompt_loader
 from core.i18n import _
@@ -42,11 +42,17 @@ from memory.mission_store import MissionStore
 from core.learner import Learner
 
 import json
-class Orchestrator(Supervisor, Entity):
-    # Limite de sécurité pour la récursion des Solvers
-    
+from memory.session_store import SessionStore
 
-    def __init__(self, provider_manager: ProviderManager, event_bus: EventBus, runtime_state: RuntimeState):  
+
+class Orchestrator(Supervisor, Entity):
+    """
+    Orchestrateur central – Point d'entrée unique du runtime.
+    Gère le routage, la validation des plans, la supervision des Solvers,
+    la persistance des sessions et l'observabilité.
+    """
+
+    def __init__(self, provider_manager: ProviderManager, event_bus: EventBus, runtime_state: RuntimeState):
         # Initialisation des parents (ordre : Supervisor d'abord)
         Supervisor.__init__(self)
         Entity.__init__(self, name="orchestrator", role="CEO", llm=None, parent=None)
@@ -55,26 +61,22 @@ class Orchestrator(Supervisor, Entity):
         self.event_bus = event_bus
         self.runtime_state = runtime_state
         self.memory = ConversationMemory()
-        
+
         self.active_sessions = {}
         self.current_execution_context = {}
-        self.root_solver = None 
-        
-        self.pending_tool_calls = {} 
-        self._heartbeat_task: Optional[asyncio.Task] = None
-        self.session_memories: Dict[str, SessionMemory] = {}  # <--- NOUVEAU
-        self.mission_store = MissionStore()  # <--- NOUVEAU
+        self.root_solver = None
 
-        # --- NOUVEAU : couche d'observabilité structurée (Logger -> JSON) ---
-        # Un fichier séparé, à côté de memory.db — jamais sur stdout (protocole intouché).
-        # C'est ce fichier que le futur outil de visualisation HTML consommera.
+        self.pending_tool_calls = {}
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        self.session_memories: Dict[str, SessionMemory] = {}
+        self.mission_store = MissionStore()
+        self.session_store = SessionStore()
+
+        # Observabilité structurée (Logger -> JSON)
         Logger.configure_json_sink("observability/events.jsonl")
-        
+
     async def process(self, packet: RequestPacket):
-        """
-        Implémentation de la méthode abstraite de Entity.
-        Point d'entrée générique pour toute entité.
-        """
+        """Implémentation de la méthode abstraite de Entity."""
         return await self.handle_request(packet)
 
     # =====================================================
@@ -91,7 +93,7 @@ class Orchestrator(Supervisor, Entity):
             elif packet.action == Actions.CHAT_SEND:
                 return await self._handle_chat_send(packet)
             elif packet.action == Actions.TOOL_RESULT:
-                return await self._handle_tool_result(packet)  
+                return await self._handle_tool_result(packet)
             elif packet.action == Actions.CHAT_STOP:
                 return await self._handle_chat_stop()
             elif packet.action == Actions.LEARNER_ANALYZE:
@@ -106,38 +108,145 @@ class Orchestrator(Supervisor, Entity):
                     return ErrorPacket(type="error", message=f"Échec analyse : {str(e)}")
                 await self.propagate_event(Events.LEARNER_ANALYZE_FINISHED, {"count": analyzed})
                 return ResponsePacket(type="response", status="success",
-                                    payload={"message": f"Analyse terminée : {analyzed} épisodes traités."})
+                                      payload={"message": f"Analyse terminée : {analyzed} épisodes traités."})
             elif packet.action == Actions.SESSION_DELETE:
                 session_id = packet.payload.get("session_id")
                 if session_id:
                     self.memory.clear_session(session_id)
-                    # --- PHASE 1 : nettoyage de la mémoire session ---
                     if session_id in self.session_memories:
                         del self.session_memories[session_id]
-                        Logger.info(f"[Orchestrator] SessionMemory supprimée pour {session_id}")
+                    await asyncio.to_thread(self.session_store.delete_session, session_id)
+                    Logger.info(f"[Orchestrator] Session supprimée (RAM + base) : {session_id}")
                 return ResponsePacket(type="response", status="success",
-                                    payload={"message": _("Session purged")})
+                                      payload={"message": _("Session purged")})
             else:
-                return ErrorPacket(type="error", message=_("Unknown action: {}").format(packet.action)) # <-- Changement ici
+                return ErrorPacket(type="error", message=_("Unknown action: {}").format(packet.action))
         except Exception as e:
-            Logger.error(f"Orchestrator critical error: {str(e)}") # Log reste en f""
+            Logger.error(f"Orchestrator critical error: {str(e)}")
             await self.propagate_event(Events.RUNTIME_ERROR, {"message": str(e)})
             return ErrorPacket(type="error", message=str(e))
-    
+
+    # =====================================================
+    # MÉTHODE PRINCIPALE – CHAT SEND (refactorisée)
+    # =====================================================
     async def _handle_chat_send(self, packet: RequestPacket):
+        """
+        Point d'entrée pour les messages utilisateur.
+        Orchestre le chargement du contexte, le routage, l'exécution des missions
+        et la génération des réponses (directes ou après mission).
+        """
         payload = packet.payload
         user_message = payload.get("content", "")
         forced_provider = payload.get("forced_provider", "")
         forced_model = payload.get("forced_model", "")
         session_id = payload.get("session_id", "")
 
-        # 1. On réarme le système pour la nouvelle requête
+        # 1. Charger / créer le contexte de session
+        session_memory = await self._load_session_context(session_id)
+        self.runtime_state.session_memory = session_memory   # <-- partout
+
+        # 2. Réarmer le système
         self.runtime_state.cancel_requested = False
 
         if not forced_provider or not forced_model:
             raise ValueError(_("Missing forced_provider or forced_model."))
 
-        # --- PHASE 3 : Initialisation du Learner (une seule fois) ---
+        # 3. Initialiser le Learner (une seule fois)
+        await self._ensure_learner_initialized(forced_provider, forced_model)
+
+        # 4. Préparer les contextes d'exécution
+        self._prepare_execution_context(session_id, forced_provider, forced_model)
+
+        await self.propagate_event(Events.THINKING_STARTED, {})
+
+        try:
+            # 5. Récupérer l'historique de conversation
+            context_list = self.memory.get_context_for_llm(session_id) or []
+            context_str = "\n".join([f"{msg['role']}: {msg['content']}" for msg in context_list]) if context_list else ""
+
+            # 6. Récupérer les conseils pour l'Orchestrateur (routage)
+            advice_orchestrator = await self._get_orchestrator_advice(user_message)
+
+            # 7. Construire le prompt d'orchestration
+            loader = get_prompt_loader()
+            
+            # Avant l'appel à loader.load("orchestrator.md", ...)
+            session_context_vars = {
+                "session_goal_stack": session_memory.context.goal_stack,
+                "session_unresolved_issues": session_memory.context.unresolved_issues,
+                "session_last_mission_status": session_memory.context.last_mission_status,
+                "session_mood": session_memory.context.mood,  # pour plus tard
+            }
+            orchestrator_prompt = loader.load(
+                "orchestrator.md",
+                lang=self.runtime_state.language,
+                user_message=user_message,
+                history=context_str,
+                advice=advice_orchestrator,
+                **session_context_vars  # <-- injection
+            )
+
+            # 8. Appeler le LLM pour la décision de routage
+            decision = await self._route_orchestrator(
+                orchestrator_prompt,
+                context_list,
+                forced_provider,
+                forced_model
+            )
+
+            # 9. Vérifier l'annulation
+            if self.runtime_state.cancel_requested:
+                Logger.info("[Orchestrator] Stop demandé pendant l'évaluation, réponse ignorée.")
+                await self.propagate_event(Events.THINKING_FINISHED, {})
+                return ErrorPacket(type="error", message=_("Génération annulée"))
+
+            # 10. Traiter selon le mode
+            if decision.type == OrchestratorMode.DIRECT:
+                return await self._handle_direct_decision(
+                    decision, session_id, user_message, forced_provider
+                )
+            elif decision.type == OrchestratorMode.MISSION:
+                return await self._handle_mission_decision(
+                    decision, session_id, user_message, forced_provider, forced_model, session_memory
+                )
+            else:
+                raise ValueError(f"Unknown OrchestratorMode: {decision.type}")
+
+        except Exception as e:
+            Logger.error(f"[Orchestrator] Critical failure during agent loop: {str(e)}")
+            await self.propagate_event(Events.RUNTIME_ERROR, {"message": str(e)})
+            return ErrorPacket(type="error", message=str(e))
+        finally:
+            await self.propagate_event(Events.THINKING_FINISHED, {})
+
+    # =====================================================
+    # SOUS‑MÉTHODES DE CHAT SEND
+    # =====================================================
+
+    async def _load_session_context(self, session_id: str) -> SessionMemory:
+        """
+        Charge le contexte de session depuis la base (si existant) et le restaure
+        dans la mémoire RAM. Retourne l'objet SessionMemory correspondant.
+        """
+        session_data = self.session_store.get_session(session_id)
+        if session_id not in self.session_memories:
+            self.session_memories[session_id] = SessionMemory(session_id)
+        session_memory = self.session_memories[session_id]
+
+        if session_data:
+            session_memory.context.goal_stack = session_data.get("goal_stack", [])
+            session_memory.context.global_goal = session_data["goal_stack"][-1]["text"] if session_data.get("goal_stack") else None
+            session_memory.context.mission_history = session_data.get("mission_history", [])
+            session_memory.context.unresolved_issues = session_data.get("unresolved_issues", [])
+            session_memory.context.mood = session_data.get("mood")
+            session_memory.context.last_mission_status = session_data.get("last_mission_status")
+            Logger.info(f"[Orchestrator] Contexte restauré pour session {session_id} ({len(session_memory.context.goal_stack)} objectifs, {len(session_memory.context.mission_history)} missions)")
+        else:
+            Logger.debug(f"[Orchestrator] Nouvelle session : {session_id}")
+        return session_memory
+
+    async def _ensure_learner_initialized(self, forced_provider: str, forced_model: str):
+        """Initialise le Learner s'il ne l'est pas déjà."""
         if not self.runtime_state.learner:
             llm_for_learner = Llm(
                 provider_manager=self.provider_manager,
@@ -152,597 +261,429 @@ class Orchestrator(Supervisor, Entity):
                 parent=self
             )
             self.runtime_state.learner = self.learner
-            Logger.info(f"[Orchestrator] Learner instancié avec {forced_provider}/{forced_model}.")        
-        # Préparation initiale des contextes d'exécution
+            Logger.info(f"[Orchestrator] Learner instancié avec {forced_provider}/{forced_model}.")
+
+    def _prepare_execution_context(self, session_id: str, forced_provider: str, forced_model: str):
+        """Initialise les dictionnaires de contexte d'exécution pour la session."""
         self.active_sessions[session_id] = {
-            "provider_id": forced_provider, 
+            "provider_id": forced_provider,
             "model_id": forced_model,
-            "refined_goal": None  # Sera hydraté après l'appel LLM
+            "refined_goal": None
         }
         self.current_execution_context = {
-            "session_id": session_id, 
+            "session_id": session_id,
             "provider_id": forced_provider,
             "model_id": forced_model,
             "refined_goal": None
         }
 
-        await self.propagate_event(Events.THINKING_STARTED, {})
-
-        try:
-            # 2. Extraction sécurisée de l'historique
-            context_list = self.memory.get_context_for_llm(session_id) or []
-            context_str = "\n".join([f"{msg['role']}: {msg['content']}" for msg in context_list]) if context_list else ""
-
-            # Formatage du prompt d'orchestration combinant les consignes système et l'entrée utilisateur
-            #orchestrator_prompt = f"{SysPrompt.ORCHESTRATOR_ROUTING}\n\nUtilisateur: {user_message}"
-            
-            # --- Conseil pour l'Orchestrateur (routage) : pas encore de "goal" de mission à ce
-            # stade (la mission n'est identifiée qu'après ce routage) — on utilise user_message
-            # comme meilleur proxy disponible pour juger la pertinence des leçons de routage.
-            advice_orchestrator = ""
-            if hasattr(self.runtime_state, 'learner') and self.runtime_state.learner:
-                try:
-                    advice_orchestrator = await self.runtime_state.learner.get_advice(
-                        entity_types=["Orchestrator"], goal=user_message
-                    )
-                except Exception as e:
-                    Logger.error(f"[Orchestrator] Erreur récupération conseils routage : {e}")
-                    advice_orchestrator = ""
-                if advice_orchestrator:
-                    Logger.debug("[Orchestrator] Conseils reçus pour le routage.")
-                else:
-                    Logger.debug("[Orchestrator] Aucun conseil reçu pour le routage.")
-
-            loader = get_prompt_loader()
-            orchestrator_prompt = loader.load(
-                "orchestrator.md",
-                lang=self.runtime_state.language,
-                user_message=user_message,
-                history=context_str,
-                advice=advice_orchestrator  # <--- injection
-            )
-
-            Logger.info(f"[Orchestrator] Évaluation de la requête via ProviderManager ({forced_provider}/{forced_model})...")
-
-            # 3. Appel UNIQUE pour obtenir la décision structurée (routage + réponse/contexte)
-            # --- NOUVEAU : cet appel passe directement par provider_manager, PAS par un
-            # wrapper Llm — donc l'instrumentation universelle de Llm.generate_structured()
-            # ne le capture pas. On l'instrumente ici à la main, avec le même format
-            # d'événement ("llm_call"), pour que la future vue d'observabilité n'ait pas à
-            # traiter ce point d'entrée différemment des autres.
-            routing_started = time.monotonic()
+    async def _get_orchestrator_advice(self, user_message: str) -> str:
+        """Récupère les conseils pour l'Orchestrateur (routage) depuis le Learner."""
+        advice = ""
+        if hasattr(self.runtime_state, 'learner') and self.runtime_state.learner:
             try:
-                decision: OrchestratorDecision = await self.provider_manager.generate_structured_output(
-                    prompt=orchestrator_prompt,
-                    provider_id=forced_provider,
-                    model_id=forced_model,
-                    response_schema=OrchestratorDecision,
-                    context=context_list
-                )
-                Logger.event(
-                    "llm_call", tag="OrchestratorDecision", kind="structured",
-                    schema="OrchestratorDecision", provider_id=forced_provider, model_id=forced_model,
-                    prompt=orchestrator_prompt, context=context_list,
-                    response=decision.model_dump(mode='json'),
-                    duration_ms=int((time.monotonic() - routing_started) * 1000), success=True
+                advice = await self.runtime_state.learner.get_advice(
+                    entity_types=["Orchestrator"], goal=user_message
                 )
             except Exception as e:
-                Logger.event(
-                    "llm_call", tag="OrchestratorDecision", kind="structured",
-                    schema="OrchestratorDecision", provider_id=forced_provider, model_id=forced_model,
-                    prompt=orchestrator_prompt, context=context_list,
-                    error=str(e), error_type=type(e).__name__,
-                    duration_ms=int((time.monotonic() - routing_started) * 1000), success=False
+                Logger.error(f"[Orchestrator] Erreur récupération conseils routage : {e}")
+                advice = ""
+            if advice:
+                Logger.debug("[Orchestrator] Conseils reçus pour le routage.")
+            else:
+                Logger.debug("[Orchestrator] Aucun conseil reçu pour le routage.")
+        return advice
+
+    async def _route_orchestrator(
+        self,
+        prompt: str,
+        context_list: list,
+        forced_provider: str,
+        forced_model: str
+    ) -> OrchestratorDecision:
+        """
+        Appelle le ProviderManager pour obtenir une décision structurée (direct/mission).
+        Instrumente l'appel pour l'observabilité.
+        """
+        routing_started = time.monotonic()
+        try:
+            decision = await self.provider_manager.generate_structured_output(
+                prompt=prompt,
+                provider_id=forced_provider,
+                model_id=forced_model,
+                response_schema=OrchestratorDecision,
+                context=context_list
+            )
+            Logger.event(
+                "llm_call", tag="OrchestratorDecision", kind="structured",
+                schema="OrchestratorDecision", provider_id=forced_provider, model_id=forced_model,
+                prompt=prompt, context=context_list,
+                response=decision.model_dump(mode='json'),
+                duration_ms=int((time.monotonic() - routing_started) * 1000), success=True
+            )
+            return decision
+        except Exception as e:
+            Logger.event(
+                "llm_call", tag="OrchestratorDecision", kind="structured",
+                schema="OrchestratorDecision", provider_id=forced_provider, model_id=forced_model,
+                prompt=prompt, context=context_list,
+                error=str(e), error_type=type(e).__name__,
+                duration_ms=int((time.monotonic() - routing_started) * 1000), success=False
+            )
+            raise
+
+    async def _handle_direct_decision(
+        self,
+        decision: OrchestratorDecision,
+        session_id: str,
+        user_message: str,
+        forced_provider: str
+    ) -> ResponsePacket:
+        """Traite une réponse directe (pas de mission)."""
+        Logger.info("[Orchestrator] Requête traitée en direct answer.")
+        final_response = decision.output.strip()
+
+        self.memory.add_interaction(
+            session_id=session_id,
+            user_msg=user_message,
+            ai_msg=final_response,
+            provider_id=forced_provider
+        )
+
+        Logger.event(
+            "session_turn", session_id=session_id, mode="direct",
+            responder="Orchestrator", user_message=user_message, response=final_response
+        )
+
+        await self.propagate_event(Events.RESPONSE_COMPLETED, {"content": final_response})
+        return ResponsePacket(type="response", status="success", payload={"message": final_response})
+
+    async def _handle_mission_decision(
+        self,
+        decision: OrchestratorDecision,
+        session_id: str,
+        user_message: str,
+        forced_provider: str,
+        forced_model: str,
+        session_memory: SessionMemory
+    ) -> ResponsePacket:
+        """
+        Traite une mission : prépare le contexte, exécute le Solver, gère le résultat,
+        appelle le Presentator, sauvegarde l'épisode et le contexte de session.
+        """
+        Logger.info(f"[Orchestrator] Mission identifiée. Initialisation du RootSolver.")
+
+        # 1. Récupérer l'objectif raffiné
+        refined_goal = decision.output
+        self.current_execution_context["refined_goal"] = refined_goal
+        self.active_sessions[session_id]["refined_goal"] = refined_goal
+
+        # 2. Mettre à jour la mémoire de session
+        session_memory.context.global_goal = refined_goal
+        session_memory.context.goal_stack.append({
+            "text": refined_goal,
+            "timestamp": datetime.now().isoformat(),
+            "status": "pending"
+        })
+        session_memory.context.touch()
+
+        # 3. Créer le cache de mission
+        mission_id = str(uuid.uuid4())
+        mission_cache = MissionCache(mission_id, session_id, refined_goal)
+        mission_cache.status = "running"
+        session_memory.add_mission(mission_cache)
+
+        Logger.event(
+            "session_turn", session_id=session_id, mode="mission",
+            mission_id=mission_id, user_message=user_message, refined_goal=refined_goal
+        )
+        Logger.info(f"[Orchestrator] 📝 Mission cache créé : {mission_id} pour la session {session_id}")
+
+        # 4. Prévenir le frontend
+        await self.propagate_event(Events.MISSION_STARTED, {"goal": refined_goal})
+
+        # 5. Instancier le Solver racine
+        self.root_solver = Solver(
+            solver_id="root",
+            goal=refined_goal,
+            parent=self,
+            provider_manager=self.provider_manager,
+            runtime_state=self.runtime_state,
+            provider_id=forced_provider,
+            model_id=forced_model,
+        )
+
+        # 6. Exécuter le Solver (avec gestion d'exception)
+        try:
+            result = await self.root_solver.run()
+        except Exception as e:
+            Logger.error(f"[Orchestrator] Erreur critique pendant l'exécution du Solver : {e}")
+            # Mettre à jour le cache en erreur
+            mission_cache = session_memory.get_active_mission()
+            if mission_cache:
+                mission_cache.status = "failed"
+                mission_cache.finished_at = datetime.now()
+                mission_cache.execution_tree = self.root_solver.execution_tree if self.root_solver else None
+                mission_cache.resolved_data = copy.deepcopy(self.root_solver.variable_registry) if self.root_solver else {}
+                session_memory.context.last_mission_status = "failed"
+                session_memory.context.unresolved_issues.append(
+                    f"Mission {mission_cache.mission_id} interrompue suite à une erreur système!"
                 )
-                raise
+            raise
 
-            # SÉCURITÉ DE SORTIE : Validation immédiate après retour de l'évaluation
-            if self.runtime_state.cancel_requested:
-                Logger.info("[Orchestrator] Stop demandé pendant l'évaluation, réponse ignorée.")
-                await self.propagate_event(Events.THINKING_FINISHED, {})
-                return ErrorPacket(type="error", message= _("Génération annulée"))
+        # 7. Sauvegarder l'arbre d'exécution (via ExecutionSerializer)
+        from core.execution_serializer import ExecutionSerializer
+        sid = self.current_execution_context.get("session_id")
+        pid = self.current_execution_context.get("provider_id")
+        mid = self.current_execution_context.get("model_id")
 
-            # ---------------------------------------------------------
-            # BRANCHE A : RÉPONSE DIRECTE (Bypass complet du RootSolver)
-            # ---------------------------------------------------------
-            if decision.type == OrchestratorMode.DIRECT:
-                Logger.info("[Orchestrator] Requête traitée en direct answer.")
-                final_response = decision.output.strip()
+        ExecutionSerializer.save_mission(
+            mission_id=self.root_solver.id,
+            goal=refined_goal,
+            execution_tree=result.execution_tree,
+            resolved_data=self.root_solver.variable_registry,
+            status=result.status.value,
+            final_response=result.response if result.status == ExecutionStatus.SUCCESS else None,
+            final_context=result.final_context,
+            session_id=sid,
+            provider_id=pid,
+            model_id=mid,
+            parent_step_id=self.root_solver.parent_step_id,
+            depth=self.root_solver.depth
+        )
 
-                # Enregistrement immédiat dans l'historique de session
-                self.memory.add_interaction(
-                    session_id=session_id,
-                    user_msg=user_message,
-                    ai_msg=final_response,
-                    provider_id=forced_provider
+        # 8. Mettre à jour le cache mission
+        mission_cache = session_memory.get_active_mission()
+        if mission_cache:
+            mission_cache.execution_tree = result.execution_tree
+            if self.root_solver and hasattr(self.root_solver, 'variable_registry'):
+                mission_cache.resolved_data = copy.deepcopy(self.root_solver.variable_registry)
+            mission_cache.finished_at = datetime.now()
+            if result.status == ExecutionStatus.SUCCESS:
+                mission_cache.status = "success"
+            elif self.runtime_state.cancel_requested:
+                mission_cache.status = "cancelled"
+            else:
+                mission_cache.status = "failed"
+
+            session_memory.context.mission_history.append(mission_cache.mission_id)
+            session_memory.context.last_mission_status = mission_cache.status
+            session_memory.context.touch()
+
+            if mission_cache.status in ("failed", "cancelled"):
+                issue = f"Mission {mission_cache.mission_id} terminée en {mission_cache.status}"
+                if result.error_reason:
+                    issue += f" - {result.error_reason}"
+                session_memory.context.unresolved_issues.append(issue)
+
+            Logger.info(f"[Orchestrator] ✅ Mission cache mis à jour : {mission_cache.mission_id} (status={mission_cache.status})")
+
+            # Sauvegarde de l'épisode en base
+            try:
+                await asyncio.to_thread(
+                    self.mission_store.save_episode,
+                    mission_cache,
+                    session_id,
+                    self.runtime_state.environment
                 )
+            except Exception as e:
+                Logger.error(f"[Orchestrator] Échec sauvegarde base : {e}")
 
-                # --- NOUVEAU : un "direct" ne laisse AUCUNE trace dans la table `episodes`
-                # (elle n'existe que pour les missions) — sans cet événement, ce tour de
-                # conversation serait invisible depuis la couche d'observabilité, alors
-                # que c'est exactement l'autre moitié de "qui répond à l'utilisateur" (voir
-                # la remarque sur Orchestrator vs Presentator).
-                Logger.event(
-                    "session_turn", session_id=session_id, mode="direct",
-                    responder="Orchestrator", user_message=user_message, response=final_response
-                )
+            # Sauvegarde du contexte de session
+            context_dict = {
+                "goal_stack": session_memory.context.goal_stack,
+                "unresolved_issues": session_memory.context.unresolved_issues,
+                "mission_history": session_memory.context.mission_history,
+                "mood": session_memory.context.mood,
+                "last_mission_status": session_memory.context.last_mission_status
+            }
+            asyncio.create_task(self._save_session_context(session_id, context_dict))
 
-                await self.propagate_event(Events.RESPONSE_COMPLETED, {"content": final_response})
-                return ResponsePacket(type="response", status="success", payload={"message": final_response})
+            # Dans orchestrator.py, après la sauvegarde de l'épisode (dans _handle_mission_decision)
+            themes = self.session_store.get_recurrent_themes(session_id, limit=5)
+            if themes:
+                session_memory.context.recurrent_themes = themes   # il faudra ajouter cet attribut dans SessionContext
+                Logger.info(f"[Orchestrator] Thèmes récurrents : {themes}")
 
-            # ---------------------------------------------------------
-            # BRANCHE B : MISSION COMPLEXE (Instanciation de l'arbre HTN)
-            # ---------------------------------------------------------
-            elif decision.type == OrchestratorMode.MISSION:
-                Logger.info(f"[Orchestrator] Mission identifiée. Initialisation du RootSolver.")
-                
-                # TRUC PLUS PRO : On capture et on verrouille l'objectif raffiné par l'Orchestrateur
-                refined_goal = decision.output 
-                self.current_execution_context["refined_goal"] = refined_goal
-                self.active_sessions[session_id]["refined_goal"] = refined_goal
+        # 9. Vérifier l'annulation
+        if self.runtime_state.cancel_requested:
+            Logger.info("[Orchestrator] Stop demandé pendant le RootSolver, réponse finale ignorée.")
+            await self.propagate_event(Events.THINKING_FINISHED, {})
+            return ErrorPacket(type="error", message=_("Génération annulée"))
 
-                # --- PHASE 1 : INITIALISATION DE LA MÉMOIRE DE SESSION ---
-                if session_id not in self.session_memories:
-                    self.session_memories[session_id] = SessionMemory(session_id)
-                session_memory = self.session_memories[session_id]
-
-                # Mise à jour du contexte global
-                session_memory.context.global_goal = refined_goal
-                session_memory.context.touch()
-
-                # Création du cache de mission
-                mission_id = str(uuid.uuid4())
-                mission_cache = MissionCache(mission_id, session_id, refined_goal)
-                mission_cache.status = "running"
-                session_memory.add_mission(mission_cache)
-
-                # --- NOUVEAU : le pendant "mission" du session_turn direct plus haut. On
-                # l'émet ICI (mission_id connu) et pas juste après le routage, précisément
-                # pour que la vue d'observabilité puisse relier ce tour de conversation à
-                # l'épisode complet (arbre, tentatives, statut final) sans ambiguïté.
-                Logger.event(
-                    "session_turn", session_id=session_id, mode="mission",
-                    mission_id=mission_id, user_message=user_message, refined_goal=refined_goal
-                )
-
-
-                Logger.info(f"[Orchestrator] 📝 Mission cache créé : {mission_id} pour la session {session_id}")
-
-                # --- 1.2 : L'appel à prepare_advice() a été retiré ici. Son résultat était stocké
-                # dans Advisor.advice_cache["Planner"], mais plus rien ne le lit depuis que
-                # Planner.propose_plan() fait son propre appel get_advice() à la demande (avec le
-                # goal exact de CHAQUE Solver, racine ou enfant — plus précis que le goal racine
-                # seul). Cet appel ne faisait donc plus qu'un appel LLM complet (~8s dans nos
-                # tests) par mission, pour un résultat jeté. Voir Advisor.prepare_advice() /
-                # Learner.prepare_advice() : ces méthodes restent en place (utilité potentielle
-                # pour un déclenchement manuel depuis le frontend), seul cet appel automatique
-                # a été retiré.
-                # ---> NOUVEAU : On prévient le C++ de préparer le Widget Mission Control
-                await self.propagate_event(Events.MISSION_STARTED, {
-                    "goal": refined_goal
-                })
-                
-                # 4. Instanciation et isolation du Solver Racine avec le but raffiné
-                self.root_solver = Solver(
-                    solver_id="root",
-                    goal=refined_goal, 
-                    parent=self,
+        # 10. Générer le rapport final (Présentateur)
+        final_response = ""
+        if result.status == ExecutionStatus.SUCCESS:
+            try:
+                presentator = Presentator(
                     provider_manager=self.provider_manager,
                     runtime_state=self.runtime_state,
                     provider_id=forced_provider,
-                    model_id=forced_model,
+                    model_id=forced_model
                 )
-
-                # 5. Exécution de la réflexion HTN
-                try:
-                    result = await self.root_solver.run()
-                except Exception as e:
-                    Logger.error(f"[Orchestrator] Erreur critique pendant l'exécution du Solver : {e}")
-                    # Mise à jour du cache en erreur
-                    if session_id in self.session_memories:
-                        session_memory = self.session_memories[session_id]
-                        mission_cache = session_memory.get_active_mission()
-                        if mission_cache:
-                            mission_cache.status = "failed"
-                            mission_cache.finished_at = datetime.now()
-                            mission_cache.execution_tree = self.root_solver.execution_tree if self.root_solver else None
-                            mission_cache.resolved_data = copy.deepcopy(self.root_solver.variable_registry) if self.root_solver else {}
-                            session_memory.context.last_mission_status = "failed"
-                            session_memory.context.unresolved_issues.append(f"Mission {mission_cache.mission_id} interrompue suite a une erreur systeme!")
-                    # On relève l'exception pour que le bloc parent la traite
-                    raise
-
-                # --- Sauvegarde de l'arbre d'exécution ---
-                from core.execution_serializer import ExecutionSerializer
-
-                # Récupération des métadonnées depuis le contexte
-                session_id = self.current_execution_context.get("session_id")
-                provider_id = self.current_execution_context.get("provider_id")
-                model_id = self.current_execution_context.get("model_id")
-
-                ExecutionSerializer.save_mission(
-                    mission_id=self.root_solver.id,
-                    goal=refined_goal,  # ou self.root_solver.goal
-                    execution_tree=result.execution_tree,
-                    resolved_data=self.root_solver.variable_registry,
-                    status=result.status.value,
-                    final_response=result.response if result.status == ExecutionStatus.SUCCESS else None,
+                final_response = await presentator.generate_mission_report(
+                    goal=refined_goal,
                     final_context=result.final_context,
-                    session_id=session_id,
-                    provider_id=provider_id,
-                    model_id=model_id,
-                    # extra_metadata possibles
-                    parent_step_id=self.root_solver.parent_step_id,
-                    depth=self.root_solver.depth
-                )# SÉCURITÉ DE SORTIE : Si l'utilisateur a annulé pendant les actions de l'agent
-
-                # --- PHASE 1 : MISE À JOUR DU CACHE MISSION ---
-                if session_id in self.session_memories:
-                    session_memory = self.session_memories[session_id]
-                    mission_cache = session_memory.get_active_mission()
-                    
-                    if mission_cache:
-                        # 1. Attacher l'arbre d'exécution
-                        mission_cache.execution_tree = result.execution_tree
-                        
-                        # 2. Copie profonde des données résolues
-                        if self.root_solver and hasattr(self.root_solver, 'variable_registry'):
-                            import copy
-                            mission_cache.resolved_data = copy.deepcopy(self.root_solver.variable_registry)
-                        
-                        # 3. Statut et horodatage
-                        mission_cache.finished_at = datetime.now()
-                        if result.status == ExecutionStatus.SUCCESS:
-                            mission_cache.status = "success"
-                        elif self.runtime_state.cancel_requested:
-                            mission_cache.status = "cancelled"
-                        else:
-                            mission_cache.status = "failed"
-                        
-                        # 4. Mise à jour du contexte global
-                        session_memory.context.mission_history.append(mission_cache.mission_id)
-                        session_memory.context.last_mission_status = mission_cache.status
-                        session_memory.context.touch()
-                        
-                        # 5. Si échec, ajouter une note dans unresolved_issues (sans troncature)
-                        if mission_cache.status in ("failed", "cancelled"):
-                            issue = f"Mission {mission_cache.mission_id} terminée en {mission_cache.status}"
-                            if result.error_reason:
-                                issue += f" - {result.error_reason}"
-                            session_memory.context.unresolved_issues.append(issue)
-                        
-                        Logger.info(f"[Orchestrator] ✅ Mission cache mis à jour : {mission_cache.mission_id} (status={mission_cache.status})")
-                        
-                        # --- PHASE 2 : SAUVEGARDE EN BASE DE DONNÉES (asynchrone) ---
-                        try:
-                            await asyncio.to_thread(
-                                self.mission_store.save_episode,
-                                mission_cache,
-                                session_id,
-                                self.runtime_state.environment  # <--- on passe l'environnement
-                            )
-                        except Exception as e:
-                            Logger.error(f"[Orchestrator] Échec sauvegarde base : {e}")
-
-                        # Logs debug (toujours affichés si niveau DEBUG)
-                        Logger.debug(f"[Orchestrator] Contexte session : {session_memory.context.to_dict()}")
-                        Logger.debug(f"[Orchestrator] Détail mission : {mission_cache.to_dict()}")
-                
-                if self.runtime_state.cancel_requested:
-                    Logger.info("[Orchestrator] Stop demandé pendant le RootSolver, réponse finale ignorée.")
-                    await self.propagate_event(Events.THINKING_FINISHED, {})
-                    return ErrorPacket(type="error", message= _("Génération annulée"))
-
-
-                # 6. Phase de Commit (Consolidation de la mémoire à la suite du Solver)
-                if result.status == ExecutionStatus.SUCCESS:
-                    
-                    # =================================================================
-                    # INTERCEPTION PAR LE PRÉSENTATEUR (Génération du résumé propre)
-                    # =================================================================
-                    try:
-                        presentator = Presentator(
-                            provider_manager=self.provider_manager,
-                            runtime_state=self.runtime_state,
-                            provider_id=forced_provider,
-                            model_id=forced_model
-                        )
-                        
-                        final_response = await presentator.generate_mission_report(
-                            goal=refined_goal,
-                            final_context=result.final_context,
-                            variable_registry=self.root_solver.variable_registry,
-                            accumulated_response=result.response
-                        )
-                        # ---> NOUVEAU : télémétrie Presentator (succès) — le Presentator existe enfin
-                        # dans les données que le Learner peut lire, plus seulement dans les logs.
-                        if mission_cache:
-                            mission_cache.presentator_result = {"status": "success", "error_reason": None}
-                            await asyncio.to_thread(
-                                self.mission_store.update_presentator_result,
-                                mission_cache.mission_id, mission_cache.presentator_result
-                            )
-                    except Exception as e:
-                        Logger.error(f"[Orchestrator] ⚠️ Échec du Presentator. Motif: {e}")
-                        final_response = ""
-                        # ---> NOUVEAU : on capture aussi l'échec, c'est la donnée la plus utile pour le Learner
-                        if mission_cache:
-                            mission_cache.presentator_result = {"status": "failed", "error_reason": str(e)}
-                            await asyncio.to_thread(
-                                self.mission_store.update_presentator_result,
-                                mission_cache.mission_id, mission_cache.presentator_result
-                            )
-
-                    # --- FALLBACK DE SÉCURITÉ ---
-                    # Si le LLM a échoué (ou si le plan s'est terminé sur un tool_call sans texte)
-                    if not final_response or not final_response.strip():
-                        fallback_ctx = result.final_context[-500:] if result.final_context else "Aucun contexte disponible."
-                        final_response = _("Mission achevée techniquement, mais le rapport final n'a pas pu être généré.\n\n**Dernier état :**\n```\n{}\n```").format(fallback_ctx)
-                    # =================================================================
-                    
-                    # Consigne de l'interaction dans l'historique
-                    self.memory.add_interaction(
-                        session_id=session_id, 
-                        user_msg=user_message, 
-                        ai_msg=final_response, 
-                        provider_id=forced_provider
+                    variable_registry=self.root_solver.variable_registry,
+                    accumulated_response=result.response
+                )
+                if mission_cache:
+                    mission_cache.presentator_result = {"status": "success", "error_reason": None}
+                    await asyncio.to_thread(
+                        self.mission_store.update_presentator_result,
+                        mission_cache.mission_id, mission_cache.presentator_result
                     )
-                    
-                    Logger.info(f"[Orchestrator] ✅ Interaction consolidée en mémoire pour la session {session_id}")
-                    
-                    # EMISSION OBLIGATOIRE (Évite le freeze du C++)
-                    await self.propagate_event(Events.RESPONSE_COMPLETED, {"content": final_response})
-        
-                    return ResponsePacket(type="response", status="success", payload={"message": final_response})
-                
-                else:
-                    Logger.warning(f"[Orchestrator] ⚠️ Résolution avortée. Aucun commit en mémoire. Raison : {result.error_reason}")
-                    await self.propagate_event(Events.MISSION_FAILED, {"reason": result.error_reason})
-
-                    # Générer un message d'échec digeste via le Presentator
-                    try:
-                        presentator = Presentator(
-                            provider_manager=self.provider_manager,
-                            runtime_state=self.runtime_state,
-                            provider_id=forced_provider,
-                            model_id=forced_model
-                        )
-                        final_response = await presentator.generate_error_report(
-                            goal=refined_goal,
-                            error_reason=result.error_reason,
-                            final_context=result.final_context
-                        )
-                        if mission_cache:
-                            mission_cache.presentator_result = {"status": "success", "error_reason": None}
-                            await asyncio.to_thread(
-                                self.mission_store.update_presentator_result,
-                                mission_cache.mission_id, mission_cache.presentator_result
-                            )
-                    except Exception as e:
-                        Logger.error(f"[Orchestrator] ⚠️ Échec du Presentator pour l'erreur : {e}")
-                        final_response = _("❌ La mission a échoué : {}").format(result.error_reason)
-                        if mission_cache:
-                            mission_cache.presentator_result = {"status": "failed", "error_reason": str(e)}
-                            await asyncio.to_thread(
-                                self.mission_store.update_presentator_result,
-                                mission_cache.mission_id, mission_cache.presentator_result
-                            )
-
-                    # Commit de l'échec dans l'historique
-                    self.memory.add_interaction(
-                        session_id=session_id,
-                        user_msg=user_message,
-                        ai_msg=final_response,
-                        provider_id=forced_provider
+            except Exception as e:
+                Logger.error(f"[Orchestrator] ⚠️ Échec du Presentator. Motif: {e}")
+                if mission_cache:
+                    mission_cache.presentator_result = {"status": "failed", "error_reason": str(e)}
+                    await asyncio.to_thread(
+                        self.mission_store.update_presentator_result,
+                        mission_cache.mission_id, mission_cache.presentator_result
                     )
-                    Logger.info(f"[Orchestrator] Échec logique enregistré dans l'historique.")
+                final_response = ""
 
-                    await self.propagate_event(Events.RESPONSE_COMPLETED, {"content": final_response})
-                    return ResponsePacket(type="response", status="success", payload={"message": final_response})
+            # Fallback si le rapport est vide
+            if not final_response or not final_response.strip():
+                fallback_ctx = result.final_context[-500:] if result.final_context else "Aucun contexte disponible."
+                final_response = _("Mission achevée techniquement, mais le rapport final n'a pas pu être généré.\n\n**Dernier état :**\n```\n{}\n```").format(fallback_ctx)
 
-        except Exception as e:
-            Logger.error(f"[Orchestrator] Critical failure during agent loop: {str(e)}")
-            await self.propagate_event(Events.RUNTIME_ERROR, {"message": str(e)})
-            return ErrorPacket(type="error", message=str(e))
-        finally:
-            await self.propagate_event(Events.THINKING_FINISHED, {})
-            
+        else:
+            # Échec de la mission
+            Logger.warning(f"[Orchestrator] ⚠️ Résolution avortée. Raison : {result.error_reason}")
+            await self.propagate_event(Events.MISSION_FAILED, {"reason": result.error_reason})
+
+            try:
+                presentator = Presentator(
+                    provider_manager=self.provider_manager,
+                    runtime_state=self.runtime_state,
+                    provider_id=forced_provider,
+                    model_id=forced_model
+                )
+                final_response = await presentator.generate_error_report(
+                    goal=refined_goal,
+                    error_reason=result.error_reason,
+                    final_context=result.final_context
+                )
+                if mission_cache:
+                    mission_cache.presentator_result = {"status": "success", "error_reason": None}
+                    await asyncio.to_thread(
+                        self.mission_store.update_presentator_result,
+                        mission_cache.mission_id, mission_cache.presentator_result
+                    )
+            except Exception as e:
+                Logger.error(f"[Orchestrator] ⚠️ Échec du Presentator pour l'erreur : {e}")
+                final_response = _("❌ La mission a échoué : {}").format(result.error_reason)
+                if mission_cache:
+                    mission_cache.presentator_result = {"status": "failed", "error_reason": str(e)}
+                    await asyncio.to_thread(
+                        self.mission_store.update_presentator_result,
+                        mission_cache.mission_id, mission_cache.presentator_result
+                    )
+
+        # 11. Enregistrer l'interaction dans l'historique
+        self.memory.add_interaction(
+            session_id=session_id,
+            user_msg=user_message,
+            ai_msg=final_response,
+            provider_id=forced_provider
+        )
+        Logger.info(f"[Orchestrator] ✅ Interaction consolidée en mémoire pour la session {session_id}")
+
+        # 12. Émettre la réponse finale
+        await self.propagate_event(Events.RESPONSE_COMPLETED, {"content": final_response})
+        return ResponsePacket(type="response", status="success", payload={"message": final_response})
+
     # =====================================================
-    # IMPLÉMENTATION DE SUPERVISOR (Le sommet de la pyramide)
+    # MÉTHODE DE SAUVEGARDE DU SESSION CONTEXT
+    # =====================================================
+    async def _save_session_context(self, session_id: str, context_dict: dict):
+        """Sauvegarde asynchrone du contexte de session en base."""
+        try:
+            await asyncio.to_thread(self.session_store.upsert_session, session_id, context_dict)
+        except Exception as e:
+            Logger.error(f"[Orchestrator] Erreur sauvegarde session {session_id} : {e}")
+
+    # =====================================================
+    # IMPLÉMENTATION DE SUPERVISOR
     # =====================================================
     async def validate_plan(self, plan: Plan, child_solver_id: str) -> bool:
-        """
-        Le PDG valide le plan global remonté par le RootSolver.
-        Vérifie la convergence entre le plan tactique et l'objectif stratégique raffiné.
-        """
+        """Valide un plan (actuellement toujours accepté)."""
         Logger.info(f"[Orchestrator] ⚖️ Validation du plan du Solver '{child_solver_id}'")
-        
-        # Récupération de l'objectif raffiné depuis le contexte d'exécution
-        # (On fallback sur plan.goal si jamais le contexte n'était pas défini)
         target_goal = self.current_execution_context.get("refined_goal") or plan.goal
-        
-        Logger.info(f"[Orchestrator] [CONVERGENCE CHECK] Objectif cible attendu : '{target_goal}'")
-        Logger.info(f"[Orchestrator] Plan proposé pour atteindre cet objectif :")
+        Logger.info(f"[Orchestrator] [CONVERGENCE CHECK] Objectif cible : '{target_goal}'")
         for step in plan.steps:
             Logger.info(f"   -> Étape : {step.description} [{step.type.value}]")
-            
-        # =========================================================================
-        # ÉTAPE FUTURE PRO : C'est ici que tu injecteras ton "LLM Judge" de sécurité.
-        # Exemple conceptuel :
-        # is_convergent = await self.judge_manager.check_plan_safety(target_goal, plan)
-        # if not is_convergent: 
-        #     Logger.warning("[Orchestrator] ❌ Plan rejeté : Non-convergence ou risque détecté.")
-        #     return False
-        # =========================================================================
-        
-        Logger.info("[Orchestrator] ✅ Le plan converge vers l'objectif raffiné. Feu vert pour exécution.")
+        # Ici sera ajouté le LLM Judge plus tard
+        Logger.info("[Orchestrator] ✅ Le plan converge vers l'objectif raffiné. Feu vert.")
         return True
 
     async def report_critical_failure(self, error_context: str, child_solver_id: str):
-        """
-        Intercepte une alerte critique qui a traversé tout l'arbre jusqu'au sommet.
-        """
         Logger.error(f"[Orchestrator] 🚨 ALERTE CRITIQUE du Solver '{child_solver_id}' : {error_context}")
-        # On émet un événement d'erreur pour que le frontend puisse afficher une popup ou stopper les actions en cours
-        await self.propagate_event(Events.RUNTIME_ERROR, {"message": _("Alerte critique de la branche {}: {}").format(child_solver_id, error_context)})
+        await self.propagate_event(Events.RUNTIME_ERROR, {
+            "message": _("Alerte critique de la branche {}: {}").format(child_solver_id, error_context)
+        })
 
     # =====================================================
-    # RETOUR RESEAU FRONTEND -> ORCHESTRATOR
+    # GESTION DES OUTILS
     # =====================================================
     async def _handle_tool_result(self, packet: RequestPacket):
-        """
-        Réceptionne le résultat brut de l'outil envoyé par le frontend.
-        Débloque le Solver en attente.
-        """
+        """Réception du résultat d'un outil depuis le frontend."""
         payload = packet.payload
         call_id = payload.get("call_id")
-        tool_result = payload.get("result", "") # Le contexte textuel ou JSON renvoyé par l'outil
-        
-        Logger.info(f"[Orchestrator] 📥 Retour matériel reçu du frontend pour l'ID: {call_id}")
-        
+        tool_result = payload.get("result", "")
+        Logger.info(f"[Orchestrator] 📥 Retour matériel reçu pour l'ID: {call_id}")
+
         if call_id in self.pending_tool_calls:
-            # On injecte le résultat dans le Future, ce qui réveille instantanément la ligne d'attente
             self.pending_tool_calls[call_id].set_result(tool_result)
             return ResponsePacket(type="response", status="success", payload={"message": _("Result routed to solver.")})
         else:
-            Logger.error(f"[Orchestrator] Aucun solver en attente pour l'ID d'outil: {call_id}")
+            Logger.error(f"[Orchestrator] Aucun solver en attente pour l'ID: {call_id}")
             return ErrorPacket(type="error", message=_("No pending context found for call_id: {}").format(call_id))
-        
+
     async def _handle_chat_stop(self):
         Logger.info("[Orchestrator] 🛑 ARRET D'URGENCE DEMANDE PAR L'UI")
         self.runtime_state.cancel_requested = True
-        
-        # CORRECTIF DEADLOCK : Débloquer immédiatement tous les Solvers figés sur un outil
         for call_id, future in self.pending_tool_calls.items():
             if not future.done():
-                # On simule une réponse de l'outil au format rigide JSON
                 future.set_result(_('{"result": false, "message": "Exécution interrompue par l\'utilisateur."}'))
-        
         self.pending_tool_calls.clear()
-
         return ResponsePacket(type="response", status="success", payload={"message": _("Stop signal broadcasted")})
-    
-    async def _handle_runtime_configure(self, packet: RequestPacket):
-        Logger.info("Runtime configuration started")
-        payload = packet.payload
-        self.runtime_state.system_prompt = payload.get("system_prompt", "")
-        self.runtime_state.language = payload.get("language", "en")
-        # --- Environnement : un seul flag, contrôlé exclusivement par le front ---
-        self.runtime_state.environment = payload.get("environment", "simulated")
-        Logger.info(f"[Orchestrator] Environnement = {self.runtime_state.environment}")
-         # ---> Initialisation de gettext avec la langue reçue <---
-        from core.i18n import setup_i18n
-        setup_i18n(self.runtime_state.language)
-        # ------------------------------------------------------
-        
-        # ---> Initialisation et peuplement du ToolsManager <---
-        from tools.tools_manager import ToolsManager
-        
-        # 1. On crée l'instance vide dans le state
-        self.runtime_state.tools_manager = ToolsManager()
-        
-        # 2. On lui passe la liste brute envoyée par le C++ pour qu'il s'auto-configure
-        raw_tools = payload.get("tools", [])
-        self.runtime_state.tools_manager.load_tools_from_payload(raw_tools)
-        
-        # ------------------------------------------------------
 
-        api_keys = payload.get("api_keys", {})
-        models_registry = payload.get("models_registry", {})
-        
-        self.provider_manager.clear()
-        validated_models = []
-
-        registry_providers = models_registry.get("providers", {})
-        for provider_key, provider_data in registry_providers.items():
-            normalized_key = provider_key.lower()
-            if normalized_key not in api_keys or not api_keys[normalized_key]: 
-                continue
-                
-            api_key = api_keys[normalized_key]
-            for model in provider_data.get("models", []):
-                enriched_model = dict(model)
-                enriched_model["provider_id"] = normalized_key
-                if "display_name" not in enriched_model: 
-                    enriched_model["display_name"] = enriched_model["id"]
-                validated_models.append(enriched_model)
-            
-            if normalized_key == Providers.GEMINI:
-                p = GeminiProvider(api_key, "default", self.runtime_state.system_prompt)
-                p.provider_id = Providers.GEMINI
-                self.provider_manager.register_provider(p)
-            elif normalized_key == Providers.GROQ:
-                p = GroqProvider(api_key, "default", self.runtime_state.system_prompt)
-                p.provider_id = Providers.GROQ
-                self.provider_manager.register_provider(p)
-            elif normalized_key == Providers.OPENAI:  # <- On ajoute le nouveau bloc ici
-                p = OpenAIProvider(api_key, "default", self.runtime_state.system_prompt)
-                p.provider_id = Providers.OPENAI
-                self.provider_manager.register_provider(p)  
-            elif normalized_key == Providers.OPENROUTER:
-                p = OpenRouterProvider(api_key, "default", self.runtime_state.system_prompt)
-                p.provider_id = Providers.OPENROUTER
-                self.provider_manager.register_provider(p)  
-            
-
-        await self.provider_manager.initialize()
-        self.runtime_state.is_configured = True
-
-        await self.propagate_event(Events.RUNTIME_CONFIGURED, {"available_models": validated_models})
-        return ResponsePacket(type="response", status="success", payload={"models_count": len(validated_models)})
-    
-    # =====================================================
-    # MÉTHODE DE SUPERVISION : EXÉCUTION DES OUTILS
-    # =====================================================
     async def execute_tool(self, tool_name: str, arguments: dict) -> str:
-        """
-        Reçoit la demande d'outil du RootSolver, génère un call_id,
-        notifie le frontend et se met en attente asynchrone stricte.
-        """
-
-        # ---> NOUVEAU : Validation par le ToolsManager
+        """Demande d'exécution d'un outil (dispatch vers le frontend)."""
         is_valid = self.runtime_state.tools_manager.validate_tool_call(tool_name, arguments)
-        
         if not is_valid:
-            return json.dumps({"result": False, "data": None, "message": "Tool not found"})    
-        
-        import uuid
+            return json.dumps({"result": False, "data": None, "message": "Tool not found"})
+
         call_id = str(uuid.uuid4())
-        
-        # Création d'un verrou asynchrone (Future)
         loop = asyncio.get_running_loop()
         future = loop.create_future()
         self.pending_tool_calls[call_id] = future
-        
-        Logger.info(f"[Orchestrator] 📤 Dispatch de l'outil vers le frontend [{tool_name}] (ID: {call_id}) (Argument = {arguments})")
-        
-        # Émission de l'événement vers la couche de transport réseau pour le frontend
-        # Remplace 'Events.REQUEST_RECEIVED' ou utilise une constante dédiée si tu en as une (ex: Events.TOOL_CALL_TRIGGERED)
+
+        Logger.info(f"[Orchestrator] 📤 Dispatch outil [{tool_name}] (ID: {call_id})")
         await self.propagate_event(Events.TOOL_REQUESTED, {
             "call_id": call_id,
             "tool_name": tool_name,
             "arguments": arguments
         })
-        
+
         try:
-            # L'orchestrateur suspend cette ligne d'exécution jusqu'à ce que .set_result() soit appelé
-            result_context = await future
-            return result_context
+            result = await future
+            return result
         finally:
-            # Nettoyage de sécurité
             self.pending_tool_calls.pop(call_id, None)
 
-
+    # =====================================================
+    # PROPAGATION D'ÉVÉNEMENTS ET HEARTBEAT
+    # =====================================================
     async def propagate_event(self, event_name: str, payload: dict):
-        # Gestion du Heartbeat
+        """Propagation des événements vers le C++ (via event_bus)."""
         if event_name == Events.THINKING_STARTED:
-            # Démarrer le heartbeat si ce n'est pas déjà fait
             if self._heartbeat_task is None or self._heartbeat_task.done():
                 self._heartbeat_task = asyncio.create_task(self._send_heartbeat())
                 Logger.debug("[Orchestrator] Heartbeat started.")
-        
         elif event_name in (Events.THINKING_FINISHED, Events.RUNTIME_ERROR, Events.MISSION_FAILED):
-            # Arrêter le heartbeat s'il est en cours
             if self._heartbeat_task and not self._heartbeat_task.done():
                 self._heartbeat_task.cancel()
                 try:
@@ -752,15 +693,13 @@ class Orchestrator(Supervisor, Entity):
                 self._heartbeat_task = None
                 Logger.debug("[Orchestrator] Heartbeat stopped.")
 
-        # Ajout du session_id (comme avant)
         if "session_id" not in payload and self.current_execution_context.get("session_id"):
             payload["session_id"] = self.current_execution_context["session_id"]
-        
+
         await self.event_bus.emit(event_name, payload)
 
-
     async def _send_heartbeat(self):
-        """Émet un événement HEARTBEAT toutes les 30 secondes tant que la mission est active."""
+        """Envoie un événement HEARTBEAT toutes les 30 secondes."""
         try:
             while not self.runtime_state.cancel_requested:
                 await asyncio.sleep(30)
@@ -768,3 +707,64 @@ class Orchestrator(Supervisor, Entity):
         except asyncio.CancelledError:
             Logger.debug("[Orchestrator] Heartbeat task cancelled.")
             raise
+
+    # =====================================================
+    # CONFIGURATION RUNTIME
+    # =====================================================
+    async def _handle_runtime_configure(self, packet: RequestPacket):
+        Logger.info("Runtime configuration started")
+        payload = packet.payload
+        self.runtime_state.system_prompt = payload.get("system_prompt", "")
+        self.runtime_state.language = payload.get("language", "en")
+        self.runtime_state.environment = payload.get("environment", "simulated")
+        Logger.info(f"[Orchestrator] Environnement = {self.runtime_state.environment}")
+
+        from core.i18n import setup_i18n
+        setup_i18n(self.runtime_state.language)
+
+        from tools.tools_manager import ToolsManager
+        self.runtime_state.tools_manager = ToolsManager()
+        raw_tools = payload.get("tools", [])
+        self.runtime_state.tools_manager.load_tools_from_payload(raw_tools)
+
+        api_keys = payload.get("api_keys", {})
+        models_registry = payload.get("models_registry", {})
+
+        self.provider_manager.clear()
+        validated_models = []
+
+        registry_providers = models_registry.get("providers", {})
+        for provider_key, provider_data in registry_providers.items():
+            normalized_key = provider_key.lower()
+            if normalized_key not in api_keys or not api_keys[normalized_key]:
+                continue
+            api_key = api_keys[normalized_key]
+            for model in provider_data.get("models", []):
+                enriched_model = dict(model)
+                enriched_model["provider_id"] = normalized_key
+                if "display_name" not in enriched_model:
+                    enriched_model["display_name"] = enriched_model["id"]
+                validated_models.append(enriched_model)
+
+            if normalized_key == Providers.GEMINI:
+                p = GeminiProvider(api_key, "default", self.runtime_state.system_prompt)
+                p.provider_id = Providers.GEMINI
+                self.provider_manager.register_provider(p)
+            elif normalized_key == Providers.GROQ:
+                p = GroqProvider(api_key, "default", self.runtime_state.system_prompt)
+                p.provider_id = Providers.GROQ
+                self.provider_manager.register_provider(p)
+            elif normalized_key == Providers.OPENAI:
+                p = OpenAIProvider(api_key, "default", self.runtime_state.system_prompt)
+                p.provider_id = Providers.OPENAI
+                self.provider_manager.register_provider(p)
+            elif normalized_key == Providers.OPENROUTER:
+                p = OpenRouterProvider(api_key, "default", self.runtime_state.system_prompt)
+                p.provider_id = Providers.OPENROUTER
+                self.provider_manager.register_provider(p)
+
+        await self.provider_manager.initialize()
+        self.runtime_state.is_configured = True
+
+        await self.propagate_event(Events.RUNTIME_CONFIGURED, {"available_models": validated_models})
+        return ResponsePacket(type="response", status="success", payload={"models_count": len(validated_models)})
