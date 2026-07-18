@@ -44,6 +44,8 @@ from core.learner import Learner
 import json
 from memory.session_store import SessionStore
 
+from core.embedding_service import get_embedding_service
+from memory.mission_profile_store import MissionProfileStore
 
 class Orchestrator(Supervisor, Entity):
     """
@@ -193,6 +195,20 @@ class Orchestrator(Supervisor, Entity):
                 forced_provider,
                 forced_model
             )
+
+            # Stocker les signatures dans le contexte d'exécution pour les utiliser plus tard
+            self.current_execution_context["signatures"] = decision.signatures
+
+            # Récupérer les signatures (peut être vide)
+            signatures = decision.signatures or [] 
+            if signatures:
+                Logger.info(f"[Orchestrator] Signatures extraites : {[f'{s.action} {s.object}' for s in signatures]}")
+            else:
+                Logger.debug("[Orchestrator] Aucune signature extraite.")
+
+            # Ensuite, dans le cas MISSION, on peut passer ces signatures au Solver
+            # (par exemple en les ajoutant à un contexte ou en les stockant dans l'exécution)
+            # Pour le moment, on les logge simplement.
 
             # 9. Vérifier l'annulation
             if self.runtime_state.cancel_requested:
@@ -488,6 +504,28 @@ class Orchestrator(Supervisor, Entity):
                 )
             except Exception as e:
                 Logger.error(f"[Orchestrator] Échec sauvegarde base : {e}")
+
+            # --- Stockage des signatures comme MissionProfiles ---
+            signatures = self.current_execution_context.get("signatures", [])
+            if signatures:
+                embedder = get_embedding_service()
+                store = MissionProfileStore()
+                for idx, sig in enumerate(signatures):
+                    signature_text = f"{sig.action} {sig.object}"
+                    embedding = embedder.embed(signature_text)
+                    store.insert_profile(
+                        mission_id=mission_cache.mission_id,  # ou mission_id selon où on en est
+                        signature_text=signature_text,
+                        embedding=embedding,
+                        action=sig.action,
+                        object=sig.object,
+                        desired_state=sig.desired_state,
+                        signature_index=idx,
+                        signature_count=len(signatures),
+                        embedding_model=embedder.model_name,
+                        embedding_dimension=embedder.dimension
+                    )
+                Logger.info(f"[Orchestrator] ✅ {len(signatures)} embedding(s) stocké(s) pour la mission {mission_cache.mission_id}")
 
             # Sauvegarde du contexte de session
             context_dict = {

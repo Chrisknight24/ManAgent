@@ -60,7 +60,7 @@ class Presentator(Entity):
             mood = self.runtime_state.session_memory.context.mood
 
                 # Récupérer le niveau de détail depuis le runtime_state
-        detail_level = getattr(self.runtime_state, "presentator_detail_level", "detailed")
+        detail_level = getattr(self.runtime_state, "presentator_detail_level", "brief")
 
         loader = get_prompt_loader()
         prompt = loader.load(

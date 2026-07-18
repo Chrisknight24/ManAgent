@@ -147,9 +147,21 @@ class SolverResult(BaseModel):
         description=_("Entité tenue pour responsable, fixée par le code au point d'échec exact (Executor pour EXECUTION_FAILURE/CONVERGENCE_FAILURE).")
     )
 
+class MissionSignature(BaseModel):
+    """Représente une mission simple extraite du message utilisateur."""
+    action: str = Field(..., description="L'action à effectuer (ex: ouvrir, fermer, lancer)")
+    object: str = Field(..., description="L'objet de l'action (ex: chrome, excel, notepad)")
+    desired_state: Optional[str] = Field(None, description="État final souhaité (optionnel, ex: ouvert, fermé)")
+
+
 class OrchestratorDecision(BaseModel):
     type: OrchestratorMode = Field(..., description=_("Mode de traitement : direct ou mission"))
     output: str = Field(..., description=_("Réponse utilisateur directe OU description analytique de la mission."))
+    # NOUVEAU : liste des signatures extraites (peut être vide)
+    signatures: List[MissionSignature] = Field(
+        default_factory=list,
+        description=_("Liste des missions simples extraites de la demande, si applicable.")
+    )
 
 class ConvergenceDecision(BaseModel):
     """Contrat de données strict pour l'évaluation de la convergence d'une étape par le LLM."""
