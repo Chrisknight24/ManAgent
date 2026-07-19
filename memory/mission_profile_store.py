@@ -185,14 +185,6 @@ class MissionProfileStore:
 
     def get_similar_profiles(self, query_embedding: List[float], top_k: int = 20,
                               threshold: float = 0.0) -> List[Dict[str, Any]]:
-        """
-        Recherche les K profils les plus proches du vecteur donné.
-
-        Retourne une liste de dictionnaires contenant :
-            - id, mission_id, signature_text, action, object, desired_state
-            - distance, similarity
-            - embedding_model, embedding_dimension (pour traçabilité)
-        """
         try:
             with self._get_connection() as conn:
                 self._ensure_extension_loaded(conn)
@@ -200,7 +192,7 @@ class MissionProfileStore:
 
                 query_blob = self._serialize_embedding(query_embedding)
 
-                # Utilisation de MATCH pour la recherche KNN
+                # Utiliser 'k = ?' dans la clause WHERE pour respecter sqlite-vec
                 cursor.execute(f"""
                     SELECT
                         p.id,
@@ -214,9 +206,8 @@ class MissionProfileStore:
                         v.distance
                     FROM {VEC_TABLE_NAME} v
                     JOIN {TABLE_NAME} p ON p.id = v.rowid
-                    WHERE v.embedding MATCH ?
+                    WHERE v.embedding MATCH ? AND k = ?
                     ORDER BY v.distance ASC
-                    LIMIT ?
                 """, (query_blob, top_k))
 
                 rows = cursor.fetchall()

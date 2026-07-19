@@ -17,6 +17,19 @@ Tu es le module d'évaluation stratégique principal du système. Analyse cette 
 ## CONTEXTE D'EXÉCUTION
 {{ context or "Aucun contexte." }}
 
+{% if similar_missions %}
+## MISSIONS SIMILAIRES SUSCEPTIBLES D'AIDER
+
+Voici des missions passées qui partagent des caractéristiques avec la demande actuelle. Elles peuvent t'inspirer pour structurer ta stratégie, même si l'objectif global diffère.
+
+{% for item in similar_missions %}
+- **Mission** : {{ item.goal }}
+  **Résumé** : {{ item.summary }}
+  **Score de similarité** : {{ item.score }}
+{% endfor %}
+
+{% endif %}
+
 ## OUTILS DISPONIBLES
 {{ tools }}
 

@@ -206,6 +206,8 @@ class Orchestrator(Supervisor, Entity):
             else:
                 Logger.debug("[Orchestrator] Aucune signature extraite.")
 
+            self.runtime_state.current_signatures = signatures  # <-- Ajout
+
             # Ensuite, dans le cas MISSION, on peut passer ces signatures au Solver
             # (par exemple en les ajoutant à un contexte ou en les stockant dans l'exécution)
             # Pour le moment, on les logge simplement.
@@ -374,6 +376,7 @@ class Orchestrator(Supervisor, Entity):
         await self.propagate_event(Events.RESPONSE_COMPLETED, {"content": final_response})
         return ResponsePacket(type="response", status="success", payload={"message": final_response})
 
+    
     async def _handle_mission_decision(
         self,
         decision: OrchestratorDecision,
@@ -384,8 +387,8 @@ class Orchestrator(Supervisor, Entity):
         session_memory: SessionMemory
     ) -> ResponsePacket:
         """
-        Traite une mission : prépare le contexte, exécute le Solver, gère le résultat,
-        appelle le Presentator, sauvegarde l'épisode et le contexte de session.
+        Traite une mission. Sauvegarde l'épisode (même en échec) puis relève l'exception
+        pour que le front reçoive le message technique réel.
         """
         Logger.info(f"[Orchestrator] Mission identifiée. Initialisation du RootSolver.")
 
@@ -409,6 +412,9 @@ class Orchestrator(Supervisor, Entity):
         mission_cache.status = "running"
         session_memory.add_mission(mission_cache)
 
+        # Stocker le cache dans le contexte pour le récupérer en cas d'exception
+        self.current_execution_context["mission_cache"] = mission_cache
+
         Logger.event(
             "session_turn", session_id=session_id, mode="mission",
             mission_id=mission_id, user_message=user_message, refined_goal=refined_goal
@@ -420,7 +426,7 @@ class Orchestrator(Supervisor, Entity):
 
         # 5. Instancier le Solver racine
         self.root_solver = Solver(
-            solver_id="root",
+            solver_id=mission_id,   # <-- UUID au lieu de "root"
             goal=refined_goal,
             parent=self,
             provider_manager=self.provider_manager,
@@ -429,25 +435,78 @@ class Orchestrator(Supervisor, Entity):
             model_id=forced_model,
         )
 
-        # 6. Exécuter le Solver (avec gestion d'exception)
+        # Récupérer les signatures (déjà extraites par l'Orchestrateur)
+        signatures = self.current_execution_context.get("signatures", [])
+        if signatures:
+            self.root_solver.assign_signatures(signatures)
+            Logger.info(f"[Orchestrator] Signatures assignées au root Solver : {len(signatures)}")
+
+        # ============================================================
+        # BLOC PROTÉGÉ : exécution du Solver, sauvegarde, Presentator
+        # ============================================================
+        result = None
+        final_response = ""
         try:
+            # 6. Exécuter le Solver
             result = await self.root_solver.run()
         except Exception as e:
-            Logger.error(f"[Orchestrator] Erreur critique pendant l'exécution du Solver : {e}")
-            # Mettre à jour le cache en erreur
+            # ---------------------------------------------------------
+            # CAS 1 : ERREUR CRITIQUE DANS LE SOLVER (API, timeout, etc.)
+            # ---------------------------------------------------------
+            Logger.error(f"[Orchestrator] Erreur critique dans le Solver : {e}")
+
+            # Récupérer le cache mission (doit exister)
             mission_cache = session_memory.get_active_mission()
             if mission_cache:
+                # Marquer comme failed
                 mission_cache.status = "failed"
                 mission_cache.finished_at = datetime.now()
-                mission_cache.execution_tree = self.root_solver.execution_tree if self.root_solver else None
-                mission_cache.resolved_data = copy.deepcopy(self.root_solver.variable_registry) if self.root_solver else {}
+
+                # Récupérer l'arbre partiel si le solver a été instancié
+                if self.root_solver:
+                    mission_cache.execution_tree = self.root_solver.execution_tree
+                    mission_cache.resolved_data = copy.deepcopy(self.root_solver.variable_registry)
+                else:
+                    # Le solver n'a même pas été créé (cas très rare)
+                    mission_cache.execution_tree = {"error": "Solver not instantiated"}
+                    mission_cache.resolved_data = {}
+
+                # Sauvegarder l'épisode en base (même en échec)
+                try:
+                    await asyncio.to_thread(
+                        self.mission_store.save_episode,
+                        mission_cache,
+                        self.current_execution_context.get("session_id"),
+                        self.runtime_state.environment
+                    )
+                    Logger.info(f"[Orchestrator] Épisode d'échec sauvegardé pour {mission_cache.mission_id}")
+                except Exception as save_err:
+                    Logger.error(f"[Orchestrator] Échec de la sauvegarde de l'épisode d'échec : {save_err}")
+
+                # Mettre à jour le contexte de session
                 session_memory.context.last_mission_status = "failed"
                 session_memory.context.unresolved_issues.append(
-                    f"Mission {mission_cache.mission_id} interrompue suite à une erreur système!"
+                    f"Mission {mission_cache.mission_id} interrompue par une erreur système."
                 )
-            raise
+                context_dict = {
+                    "goal_stack": session_memory.context.goal_stack,
+                    "unresolved_issues": session_memory.context.unresolved_issues,
+                    "mission_history": session_memory.context.mission_history,
+                    "mood": session_memory.context.mood,
+                    "last_mission_status": session_memory.context.last_mission_status
+                }
+                await self._save_session_context(
+                    self.current_execution_context.get("session_id"), context_dict
+                )
 
-        # 7. Sauvegarder l'arbre d'exécution (via ExecutionSerializer)
+            # ---> RELANCER L'EXCEPTION pour que le front reçoive le message technique
+            raise   # lève la même exception
+
+        # ============================================================
+        # SUITE NORMALE : le Solver a retourné un résultat (succès ou échec fonctionnel)
+        # ============================================================
+
+        # 7. Sauvegarder l'arbre d'exécution (via ExecutionSerializer) - même en échec
         from core.execution_serializer import ExecutionSerializer
         sid = self.current_execution_context.get("session_id")
         pid = self.current_execution_context.get("provider_id")
@@ -494,7 +553,7 @@ class Orchestrator(Supervisor, Entity):
 
             Logger.info(f"[Orchestrator] ✅ Mission cache mis à jour : {mission_cache.mission_id} (status={mission_cache.status})")
 
-            # Sauvegarde de l'épisode en base
+            # Sauvegarde de l'épisode en base (obligatoire même en échec)
             try:
                 await asyncio.to_thread(
                     self.mission_store.save_episode,
@@ -505,29 +564,30 @@ class Orchestrator(Supervisor, Entity):
             except Exception as e:
                 Logger.error(f"[Orchestrator] Échec sauvegarde base : {e}")
 
-            # --- Stockage des signatures comme MissionProfiles ---
-            signatures = self.current_execution_context.get("signatures", [])
-            if signatures:
-                embedder = get_embedding_service()
-                store = MissionProfileStore()
-                for idx, sig in enumerate(signatures):
-                    signature_text = f"{sig.action} {sig.object}"
-                    embedding = embedder.embed(signature_text)
-                    store.insert_profile(
-                        mission_id=mission_cache.mission_id,  # ou mission_id selon où on en est
-                        signature_text=signature_text,
-                        embedding=embedding,
-                        action=sig.action,
-                        object=sig.object,
-                        desired_state=sig.desired_state,
-                        signature_index=idx,
-                        signature_count=len(signatures),
-                        embedding_model=embedder.model_name,
-                        embedding_dimension=embedder.dimension
-                    )
-                Logger.info(f"[Orchestrator] ✅ {len(signatures)} embedding(s) stocké(s) pour la mission {mission_cache.mission_id}")
+            # --- Stockage des signatures comme MissionProfiles (seulement si succès) ---
+            if result.status == ExecutionStatus.SUCCESS:
+                signatures = self.current_execution_context.get("signatures", [])
+                if signatures:
+                    embedder = get_embedding_service()
+                    store = MissionProfileStore()
+                    for idx, sig in enumerate(signatures):
+                        signature_text = f"{sig.action} {sig.object}"
+                        embedding = await embedder.embed(signature_text)
+                        store.insert_profile(
+                            mission_id=mission_cache.mission_id,
+                            signature_text=signature_text,
+                            embedding=embedding,
+                            action=sig.action,
+                            object=sig.object,
+                            desired_state=sig.desired_state,
+                            signature_index=idx,
+                            signature_count=len(signatures),
+                            embedding_model=embedder.model_name,
+                            embedding_dimension=await embedder.dimension
+                        )
+                    Logger.info(f"[Orchestrator] ✅ {len(signatures)} embedding(s) stocké(s) pour la mission {mission_cache.mission_id}")
 
-            # Sauvegarde du contexte de session
+            # Sauvegarde du contexte de session (toujours)
             context_dict = {
                 "goal_stack": session_memory.context.goal_stack,
                 "unresolved_issues": session_memory.context.unresolved_issues,
@@ -537,10 +597,10 @@ class Orchestrator(Supervisor, Entity):
             }
             asyncio.create_task(self._save_session_context(session_id, context_dict))
 
-            # Dans orchestrator.py, après la sauvegarde de l'épisode (dans _handle_mission_decision)
+            # Thèmes récurrents (si tu veux les garder)
             themes = self.session_store.get_recurrent_themes(session_id, limit=5)
             if themes:
-                session_memory.context.recurrent_themes = themes   # il faudra ajouter cet attribut dans SessionContext
+                session_memory.context.recurrent_themes = themes
                 Logger.info(f"[Orchestrator] Thèmes récurrents : {themes}")
 
         # 9. Vérifier l'annulation
@@ -549,10 +609,11 @@ class Orchestrator(Supervisor, Entity):
             await self.propagate_event(Events.THINKING_FINISHED, {})
             return ErrorPacket(type="error", message=_("Génération annulée"))
 
-        # 10. Générer le rapport final (Présentateur)
-        final_response = ""
-        if result.status == ExecutionStatus.SUCCESS:
-            try:
+        # ============================================================
+        # 10. GÉNÉRATION DU RAPPORT FINAL (Presentator) – protégé
+        # ============================================================
+        try:
+            if result.status == ExecutionStatus.SUCCESS:
                 presentator = Presentator(
                     provider_manager=self.provider_manager,
                     runtime_state=self.runtime_state,
@@ -571,27 +632,11 @@ class Orchestrator(Supervisor, Entity):
                         self.mission_store.update_presentator_result,
                         mission_cache.mission_id, mission_cache.presentator_result
                     )
-            except Exception as e:
-                Logger.error(f"[Orchestrator] ⚠️ Échec du Presentator. Motif: {e}")
-                if mission_cache:
-                    mission_cache.presentator_result = {"status": "failed", "error_reason": str(e)}
-                    await asyncio.to_thread(
-                        self.mission_store.update_presentator_result,
-                        mission_cache.mission_id, mission_cache.presentator_result
-                    )
-                final_response = ""
+            else:
+                # Échec fonctionnel (le solver a retourné un échec sans exception)
+                Logger.warning(f"[Orchestrator] ⚠️ Résolution avortée. Raison : {result.error_reason}")
+                await self.propagate_event(Events.MISSION_FAILED, {"reason": result.error_reason})
 
-            # Fallback si le rapport est vide
-            if not final_response or not final_response.strip():
-                fallback_ctx = result.final_context[-500:] if result.final_context else "Aucun contexte disponible."
-                final_response = _("Mission achevée techniquement, mais le rapport final n'a pas pu être généré.\n\n**Dernier état :**\n```\n{}\n```").format(fallback_ctx)
-
-        else:
-            # Échec de la mission
-            Logger.warning(f"[Orchestrator] ⚠️ Résolution avortée. Raison : {result.error_reason}")
-            await self.propagate_event(Events.MISSION_FAILED, {"reason": result.error_reason})
-
-            try:
                 presentator = Presentator(
                     provider_manager=self.provider_manager,
                     runtime_state=self.runtime_state,
@@ -609,15 +654,21 @@ class Orchestrator(Supervisor, Entity):
                         self.mission_store.update_presentator_result,
                         mission_cache.mission_id, mission_cache.presentator_result
                     )
-            except Exception as e:
-                Logger.error(f"[Orchestrator] ⚠️ Échec du Presentator pour l'erreur : {e}")
-                final_response = _("❌ La mission a échoué : {}").format(result.error_reason)
-                if mission_cache:
-                    mission_cache.presentator_result = {"status": "failed", "error_reason": str(e)}
-                    await asyncio.to_thread(
-                        self.mission_store.update_presentator_result,
-                        mission_cache.mission_id, mission_cache.presentator_result
-                    )
+
+        except Exception as e:
+            # Si le Presentator lui-même plante, on le catch et on produit un fallback
+            Logger.error(f"[Orchestrator] ⚠️ Échec du Presentator. Motif: {e}")
+            if mission_cache:
+                mission_cache.presentator_result = {"status": "failed", "error_reason": str(e)}
+                await asyncio.to_thread(
+                    self.mission_store.update_presentator_result,
+                    mission_cache.mission_id, mission_cache.presentator_result
+                )
+            if result.status == ExecutionStatus.SUCCESS:
+                fallback_ctx = result.final_context[-500:] if result.final_context else "Aucun contexte disponible."
+                final_response = _("Mission achevée techniquement, mais le rapport final n'a pas pu être généré.\n\n**Dernier état :**\n```\n{}\n```").format(fallback_ctx)
+            else:
+                final_response = _("❌ La mission a échoué : {} (rapport final indisponible)").format(result.error_reason or "erreur inconnue")
 
         # 11. Enregistrer l'interaction dans l'historique
         self.memory.add_interaction(
@@ -631,7 +682,7 @@ class Orchestrator(Supervisor, Entity):
         # 12. Émettre la réponse finale
         await self.propagate_event(Events.RESPONSE_COMPLETED, {"content": final_response})
         return ResponsePacket(type="response", status="success", payload={"message": final_response})
-
+        
     # =====================================================
     # MÉTHODE DE SAUVEGARDE DU SESSION CONTEXT
     # =====================================================

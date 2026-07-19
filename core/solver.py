@@ -1,9 +1,9 @@
-from typing import Optional, Any
+from typing import Optional, Any, Dict, List
 from utils.logger import Logger
 from core.entity import Entity
 from core.constants import Events
 from .supervisor import Supervisor
-from .plan_models import FeasibilityDecision, Plan, SolverResult, ExecutionStatus
+from .plan_models import FeasibilityDecision, Plan, SolverResult, ExecutionStatus, MissionSignature
 from .planner import Planner
 from .executor import Executor
 from core.llm import Llm
@@ -13,18 +13,14 @@ from core.i18n import _
 from core.id_generator import make_step_id
 import time
 from core.execution_models import ExecutionTree, PlanAttempt, FailureClass
-
+from core.retriever import Retriever
+from core.signature_extractor import SignatureExtractor   # <--- NOUVEAU
+from core.constants import RETRIEVAL_TOP_K, RETRIEVAL_THRESHOLD, RETRIEVAL_MAX_RESULTS_INJECTED
 MAX_DEPTH = 10
 
 # --- 1.4 : Budgets de tentatives DÉCOUPLÉS ---
-# Avant ce correctif, un rejet de plan (validation statique OU superviseur) consommait le MÊME
-# slot que les échecs d'EXÉCUTION réelle (max_tries=3 pour les deux confondus) — alors qu'un
-# rejet de plan ne coûte qu'un appel LLM, rien n'a touché le monde réel. Résultat observé en
-# test : une mission pouvait épuiser son budget sur 2 plans invalides + 1 vraie tentative,
-# quand une autre l'épuisait sur 3 vraies tentatives — même "3 essais" en apparence, expérience
-# très différente. Les deux budgets sont maintenant indépendants.
-MAX_EXECUTION_TRIES = 3        # Vraies tentatives (le plan a été validé ET dispatché à l'Executor)
-MAX_PREEXECUTION_FAILURES = 3  # Plans rejetés AVANT toute exécution (validation ou superviseur)
+MAX_EXECUTION_TRIES = 3
+MAX_PREEXECUTION_FAILURES = 3
 
 class Solver(Supervisor, Entity):
     
@@ -42,9 +38,10 @@ class Solver(Supervisor, Entity):
         self.context = context
         self.id = solver_id  
         self.parent_step_id = parent_step_id 
-        self._preexecution_failures = 0  # Renommé (ex _validation_failures) : couvre aussi les rejets superviseur
-        self.execution_tree = None  # sera créé dans run()
-        self.current_attempt = None  # sera défini dans run()
+        self._preexecution_failures = 0
+        self.execution_tree = None
+        self.current_attempt = None
+        self.signatures = []  # <--- NOUVEAU : stockage local des signatures
 
         if not self.llm and provider_id and model_id:
             self.llm = Llm(
@@ -56,9 +53,8 @@ class Solver(Supervisor, Entity):
         if not self.llm:
             raise ValueError(_("Solver requires a Llm instance or provider/model identifiers."))
 
-        # ---> NOUVEAU : Isolation du Registre (Bac à sable) <---
+        # Isolation du Registre (Bac à sable)
         if isinstance(parent, Solver):
-            # Le child hérite des variables existantes (lecture) mais aura son propre espace local
             self.variable_registry = dict(parent.variable_registry)
         else:
             self.variable_registry = {}
@@ -67,8 +63,19 @@ class Solver(Supervisor, Entity):
         self.executor = Executor(solver_node=self)
 
     # =====================================================
-    # BOUCLE CENTRALE D'INFÉRENCE (Think -> Plan -> Execute)
+    # ASSIGNATION DES SIGNATURES (appelée par l'Orchestrateur pour le root)
     # =====================================================
+    def assign_signatures(self, signatures: List[MissionSignature]) -> None:
+        """
+        Assigne des signatures à ce solver et les enregistre dans le registre runtime.
+        """
+        self.signatures = signatures
+        self.runtime_state.solver_registry[self.id] = {
+            "signatures": signatures,
+            "similar_missions": None  # sera rempli plus tard
+        }
+        Logger.debug(f"[Solver:{self.id}] Signatures assignées : {len(signatures)}")
+        
     # =====================================================
     # BOUCLE CENTRALE D'INFÉRENCE (Think -> Plan -> Execute)
     # =====================================================
@@ -80,7 +87,7 @@ class Solver(Supervisor, Entity):
                 error_reason=_("Génération annulée")
             )
 
-        # Initialisation de l'arbre d'exécution pour ce solver
+        # Initialisation de l'arbre d'exécution
         self.execution_tree = ExecutionTree(
             solver_id=self.id,
             goal=self.goal,
@@ -88,15 +95,66 @@ class Solver(Supervisor, Entity):
             parent_step_id=self.parent_step_id,
             depth=self.depth,
             started_at=time.time(),
-            status="failed"  # sera mis à jour
+            status="failed"
         )
 
         try:
-            # 1. PHASE DE RÉFLEXION (Feasibility Check)
-            decision = await self._check_feasibility()
+            # --------------------------------------------
+            # 1. Gestion des signatures et du cache retrieval
+            # --------------------------------------------
+            
+            # 1a. Si le solver n'a pas encore de signatures, on les génère
+            if not self.signatures:
+                try:
+                    extractor = SignatureExtractor(llm=self.llm, runtime_state=self.runtime_state)
+                    signatures = await extractor.extract(self.goal, self.context)
+                    self.assign_signatures(signatures)
+                    Logger.info(f"[Solver:{self.id}] {len(signatures)} signature(s) générée(s) via SignatureExtractor.")
+                except Exception as e:
+                    Logger.error(f"[Solver:{self.id}] Échec de SignatureExtractor : {e}")
+                    # On continue sans signatures (le retrieval ne sera pas fait)
+
+            # 1b. Récupérer ou faire le retrieval
+            similar_missions_context = ""
+            if self.signatures:
+                registry_entry = self.runtime_state.solver_registry.get(self.id)
+                if registry_entry and registry_entry.get("similar_missions") is not None:
+                    # Cache existant
+                    similar = registry_entry["similar_missions"]
+                    if similar:
+                        similar_missions_context = similar  # on passe la liste brute
+                        Logger.info(f"[Solver:{self.id}] Cache utilisé : {len(similar)} mission(s) similaire(s).")
+                else:
+                    # Pas de cache : on fait le retrieval
+                    try:
+                        retriever = Retriever(top_k=20, threshold=0.85)
+                        similar = await retriever.retrieve(
+                            self.signatures,
+                            query_mission_id=self.id  # <--- le solver courant est celui qui interroge
+                        )# Stocker dans le registre
+                        if registry_entry:
+                            registry_entry["similar_missions"] = similar
+                        else:
+                            # Cas improbable (si assign_signatures n'a pas été appelé)
+                            self.runtime_state.solver_registry[self.id] = {
+                                "signatures": self.signatures,
+                                "similar_missions": similar
+                            }
+                        # Dans run(), après le retrieval
+                        if similar:
+                            similar_missions_context = similar  # on passe la liste brute
+                        else:
+                            similar_missions_context = None  # <--- important : None, pas ""
+                    except Exception as e:
+                        Logger.error(f"[Solver:{self.id}] Échec du retrieval : {e}")
+
+            # --------------------------------------------
+            # 2. PHASE DE RÉFLEXION (Feasibility Check)
+            # --------------------------------------------
+            decision = await self._check_feasibility(similar_missions_context)
 
             if not decision.is_possible:
-                Logger.warning(f"[Solver:{self.id}] 🛑 Objectif impossible. Raison générée pour l'utilisateur : {decision.reason}")
+                Logger.warning(f"[Solver:{self.id}] 🛑 Objectif impossible. Raison : {decision.reason}")
                 self.execution_tree.ended_at = time.time()
                 self.execution_tree.status = "failed"
                 return SolverResult(
@@ -108,16 +166,18 @@ class Solver(Supervisor, Entity):
 
             Logger.info(f"[Solver:{self.id}] 💡 Stratégie adoptée : {decision.refined_strategy}")
 
+            # --------------------------------------------
+            # 3. BOUCLE DE PLANIFICATION-EXÉCUTION
+            # --------------------------------------------
             success = False
             final_result = None
-            execution_attempt = 0  # Budget "réel" : n'avance QUE quand un plan validé est dispatché
-            attempt_counter = 0    # Purement pour la numérotation télémétrique (jamais une condition de sortie)
+            execution_attempt = 0
+            attempt_counter = 0
 
             while execution_attempt < MAX_EXECUTION_TRIES:
                 if self.runtime_state.cancel_requested:
                     break
 
-                # --- CRÉATION DE LA TENTATIVE COURANTE (télémétrie) ---
                 attempt_counter += 1
                 self.current_attempt = PlanAttempt(
                     attempt_number=attempt_counter,
@@ -135,11 +195,7 @@ class Solver(Supervisor, Entity):
                         strategy=decision.refined_strategy,
                         variable_registry=self.variable_registry
                     )
-                    # Stocker le plan sérialisé
                     self.current_attempt.proposed_plan = proposed_plan.model_dump(mode='json')
-                    # --- A.4 : le Planner a déjà mis en cache l'advice qu'il vient d'utiliser
-                    # (self.planner._cached_advice, peuplé lors de CET appel à propose_plan) —
-                    # on le recopie sur la tentative pour qu'il soit persisté avec elle.
                     self.current_attempt.advice_injected = getattr(self.planner, "_cached_advice", None) or None
                 except ValueError as plan_error:
                     Logger.warning(f"[Solver:{self.id}] ⚠️ Plan invalide : {plan_error}")
@@ -148,7 +204,6 @@ class Solver(Supervisor, Entity):
                     self.current_attempt.failure_class = FailureClass.PLAN_REJECTED_VALIDATION
                     self.current_attempt.failure_reason = str(plan_error)
                     self.current_attempt.planner_feedback = str(plan_error)
-                    # Blâme certain : c'est Planner._validate_plan() qui a rejeté, sans ambiguïté possible.
                     self.current_attempt.target_entity = "Planner"
 
                     await self.propagate_event(Events.PLANNER_RETRY, {
@@ -164,13 +219,11 @@ class Solver(Supervisor, Entity):
                     )
                     self.context = f"{self.context}\n{feedback_msg}" if self.context else feedback_msg
 
-                    # --- 1.4 : ne consomme PAS execution_attempt — rien n'a touché le monde réel ---
                     self._preexecution_failures += 1
                     if self._preexecution_failures >= MAX_PREEXECUTION_FAILURES:
                         break
                     continue
 
-                # --- CHECKPOINT ANNULATION ---
                 if self.runtime_state.cancel_requested:
                     self.current_attempt.ended_at = time.time()
                     self.current_attempt.outcome = "failed"
@@ -186,26 +239,20 @@ class Solver(Supervisor, Entity):
                     self.current_attempt.outcome = "failed"
                     self.current_attempt.failure_class = FailureClass.PLAN_REJECTED_SUPERVISOR
                     self.current_attempt.failure_reason = _("Plan refusé par le superviseur")
-                    # Blâme certain : Solver.validate_plan() n'est qu'un proxy qui relaie vers le parent ;
-                    # au bout de la chaîne récursive, c'est toujours l'Orchestrateur qui juge réellement.
                     self.current_attempt.target_entity = "Orchestrator"
                     self.context += _("\n[Échec] Plan refusé par le Superviseur.")
 
-                    # --- 1.4 : même budget que le rejet de validation, même raison (rien d'exécuté) ---
                     self._preexecution_failures += 1
                     if self._preexecution_failures >= MAX_PREEXECUTION_FAILURES:
                         break
                     continue
 
-                # --- À PARTIR D'ICI : le plan est validé, on va réellement l'exécuter ---
-                # --- 1.4 : SEUL point d'incrémentation du budget d'exécution réelle ---
+                # --- EXÉCUTION RÉELLE (le plan est validé) ---
                 execution_attempt += 1
 
-                # --- SÉCURISATION DES IDs ---
                 for step in proposed_plan.steps:
                     step.id = make_step_id(step.id)
 
-                # --- ÉMISSION DU PLAN VERS LE C++ ---
                 plan_payload = {
                     "mission_id": self.id,
                     "goal": self.goal,
@@ -223,7 +270,6 @@ class Solver(Supervisor, Entity):
                 }
                 await self.propagate_event(Events.PLAN_GENERATED, plan_payload)
 
-                # --- EXÉCUTION DU PLAN ---
                 result = await self.executor.execute_plan(
                     plan=proposed_plan,
                     current_context=self.context,
@@ -241,16 +287,13 @@ class Solver(Supervisor, Entity):
                     break
                 else:
                     self.current_attempt.outcome = "failed"
-                    # --- NOUVEAU : propagation de la failure_class depuis l'Executor ---
                     if result.failure_class:
                         self.current_attempt.failure_class = result.failure_class
                     else:
-                        # Fallback de sécurité (normalement l'Executor remplit toujours ce champ)
                         self.current_attempt.failure_class = FailureClass.EXECUTION_FAILURE
                         Logger.warning(f"[Solver:{self.id}] failure_class None, fallback EXECUTION_FAILURE")
 
                     self.current_attempt.failure_reason = result.error_reason or _("Échec d'exécution")
-                    # --- NOUVEAU : propagation de target_entity depuis l'Executor (même logique que failure_class) ---
                     self.current_attempt.target_entity = result.target_entity or "Executor"
                     Logger.warning(f"[Solver:{self.id}] 🔄 Échec exécution (Tentative {execution_attempt}/{MAX_EXECUTION_TRIES}). Raison : {result.error_reason}")
                     self.context += _("\n[Raison de l'échec] {}. Vous devez adapter le prochain plan.").format(result.error_reason)
@@ -278,12 +321,8 @@ class Solver(Supervisor, Entity):
                     self.current_attempt.failure_class = FailureClass.USER_CANCELLED
                     self.current_attempt.failure_reason = _("Annulation demandée")
                 else:
-                    # Épuisement des tentatives
                     self.current_attempt.failure_class = FailureClass.MAX_RETRIES_REACHED
                     self.current_attempt.failure_reason = _("Échec définitif : impossible d'accomplir la tâche après plusieurs tentatives.")
-                    # target_entity volontairement laissé à None ici : ce chemin de sortie est rare et on ne
-                    # reconstruit pas un blâme a posteriori (voir la règle générale plus haut). L'Analyzer doit
-                    # ignorer la génération de leçon "entité" pour un attempt sans target_entity, pas deviner.
 
             error_msg = self.current_attempt.failure_reason if self.current_attempt else _("Échec inconnu")
             result = SolverResult(
@@ -304,81 +343,44 @@ class Solver(Supervisor, Entity):
                 self.current_attempt.failure_class = FailureClass.EXECUTION_FAILURE
                 self.current_attempt.failure_reason = str(general_error)
             raise general_error
-            
-    # =====================================================
-    # MÉTHODES INTERNES
-    # =====================================================
-    # async def _check_feasibility(self) -> FeasibilityDecision:
-    #     """Utilise le LLM pour vérifier si l'objectif est atteignable avant de planifier."""
-    #     Logger.info(f"[Solver:{self.id}] 🤔 Évaluation de la faisabilité du but...")
-        
-    #     tool_names = [t.get('name') for t in self.runtime_state.available_tools]
-        
-    #     prompt = f"""
-    #     Tu es le module d'évaluation stratégique principal du système. Analyse cette requête.
-        
-    #     BUT À ATTEINDRE : {self.goal}
-    #     CONTEXTE D'EXÉCUTION : {self.context}
-    #     OUTILS DISPONIBLES : {tool_names}
-        
-    #     Détermine si tu disposes des outils matériels nécessaires pour accomplir ce but.
-    #     Si OUI : Rédige dans 'refined_strategy' une stratégie courte des étapes logiques à suivre.
-    #     Si NON : Dans 'reason', rédige une explication polie ET DIRECTEMENT ADRESSÉE À L'UTILISATEUR pour lui expliquer pourquoi sa demande ne peut pas être exécutée.
-    #     """
-        
-    #     # Le bloc try/except est retiré. Si le LLM crash ou timeout, 
-    #     # l'exception remontera purement jusqu'à l'Orchestrateur.
-    #     decision: FeasibilityDecision = await self.llm.generate_structured(
-    #         prompt=prompt,
-    #         schema=FeasibilityDecision
-    #     )
-    #     return decision
 
-    # async def _check_feasibility(self) -> FeasibilityDecision:
-    #     Logger.info(f"[Solver:{self.id}] 🤔 Évaluation de la faisabilité du but...")
+        finally:
+            # Nettoyage du registre
+            if self.id in self.runtime_state.solver_registry:
+                del self.runtime_state.solver_registry[self.id]
+                Logger.debug(f"[Solver:{self.id}] Entrée supprimée du registre.")
+    
+    # =====================================================
+    # MÉTHODES UTILITAIRES
+    # =====================================================
+    def _format_similar_missions(self, similar: List[Dict]) -> str:
+        lines = []
+        limit = RETRIEVAL_MAX_RESULTS_INJECTED
+        for idx, sm in enumerate(similar[:limit], 1):
+            lines.append(f"{idx}. Mission : {sm.get('goal', '')}")
+            lines.append(f"   Résumé : {sm.get('summary', '')}")
+            lines.append(f"   Score : {sm.get('score', 0):.2f}")
+        return "\n".join(lines)
         
-    #     loader = get_prompt_loader()
-    #     prompt = loader.load(
-    #         "feasibility.md",
-    #         lang=self.runtime_state.language,
-    #         goal=self.goal,
-    #         context=self.context,
-    #         tools=[t.get('name') for t in self.runtime_state.available_tools]
-    #     )
-        
-    #     decision: FeasibilityDecision = await self.llm.generate_structured(
-    #         prompt=prompt,
-    #         schema=FeasibilityDecision
-    #     )
-    #     return decision
-        
-    async def _check_feasibility(self) -> FeasibilityDecision:
+    async def _check_feasibility(self, similar_missions_context: Optional[List[Dict]] = None) -> FeasibilityDecision:
         Logger.info(f"[Solver:{self.id}] 🤔 Évaluation de la faisabilité du but...")
-        
-        # ---> NOUVEAU : On demande une "vue" explicitement au ToolsManager
-        # On passe le 'goal' en prévision du futur filtrage LLM
         tools_view = await self.runtime_state.tools_manager.get_tools_view(goal_query=self.goal)
-        
-        # On formate cette vue textuellement pour le prompt (nom, rôle et description)
-        formatted_tools = [
-            f"- {t['name']} ({t['role']}): {t['description']}" for t in tools_view
-        ]
-        
+        formatted_tools = [f"- {t['name']} ({t['role']}): {t['description']}" for t in tools_view]
         loader = get_prompt_loader()
-        # Le prompt 'feasibility.md' recevra désormais des descriptions riches, pas juste des noms
         prompt = loader.load(
             "feasibility.md",
             lang=self.runtime_state.language,
             goal=self.goal,
             context=self.context,
-            tools="\n".join(formatted_tools) 
+            tools="\n".join(formatted_tools),
+            similar_missions=similar_missions_context
         )
-        
         decision: FeasibilityDecision = await self.llm.generate_structured(
             prompt=prompt,
             schema=FeasibilityDecision
         )
         return decision
+
     # =====================================================
     # IMPLÉMENTATION DE SUPERVISOR (Escalade vers l'Orchestrator)
     # =====================================================

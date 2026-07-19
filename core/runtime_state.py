@@ -5,7 +5,7 @@ Stockage central de l'état runtime. Évite les variables globales
 et permet la configuration dynamique depuis le frontend Qt.
 """
 from core.i18n import _
-
+from typing import Dict,List
 class RuntimeState:
     """État central du runtime."""
     def __init__(self):
@@ -25,3 +25,10 @@ class RuntimeState:
         self.environment: str = "simulated"  # 'simulated' ou 'real'
         self.session_memory = None   # Référence à SessionMemory (définie dans orchestrator)
         self.presentator_detail_level = "brief"   # "brief" ou "detailed"
+        self.current_signatures = []  # Stockage des signatures de la mission en cours
+        self.solver_registry: Dict[str, Dict] = {}
+            # Clé = solver_id (string)
+            # Valeur = {
+            #   "signatures": List[MissionSignature],
+            #   "similar_missions": Optional[List[Dict]]  # résultat du retriever (mis en cache)
+            # }

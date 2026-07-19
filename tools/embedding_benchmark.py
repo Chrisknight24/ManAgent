@@ -14,6 +14,7 @@ Usage:
 
 import sys
 import os
+import asyncio
 import argparse
 from typing import List, Tuple, Dict
 import numpy as np
@@ -78,22 +79,25 @@ ALL_TEXTS = sorted(set([p[0] for p in TEST_PAIRS] + [p[1] for p in TEST_PAIRS] +
 
 
 # ============================================================
-# 2. FONCTIONS DE BENCHMARK
+# 2. FONCTIONS DE BENCHMARK (asynchrones)
 # ============================================================
 
-def compute_similarity_matrix(texts: List[str], embedder: EmbeddingService) -> np.ndarray:
+async def compute_similarity_matrix(texts: List[str], embedder: EmbeddingService) -> np.ndarray:
     """Calcule la matrice de similarité cosinus pour une liste de textes."""
-    embeddings = [embedder.embed(t) for t in texts]
+    embeddings = []
+    for t in texts:
+        emb = await embedder.embed(t)
+        embeddings.append(emb)
     return cosine_similarity(embeddings)
 
-def run_benchmark(model_name: str) -> Dict:
+async def run_benchmark(model_name: str) -> Dict:
     """Exécute le benchmark pour un modèle donné et retourne les métriques."""
     print(f"\n🔍 Benchmark du modèle : {model_name}")
     embedder = EmbeddingService(model_name=model_name)
 
     # 1. Matrice de similarité pour toutes les paires
     all_texts = ALL_TEXTS
-    matrix = compute_similarity_matrix(all_texts, embedder)
+    matrix = await compute_similarity_matrix(all_texts, embedder)
 
     # 2. Scores pour les paires de test
     pair_scores = []
@@ -153,11 +157,11 @@ def print_report(stats: Dict):
         for text, score in top:
             print(f"    - {text} ({score:.4f})")
 
-def compare_models(models: List[str]):
+async def compare_models(models: List[str]):
     """Compare plusieurs modèles et affiche un tableau comparatif."""
     results = []
     for model in models:
-        stats = run_benchmark(model)
+        stats = await run_benchmark(model)
         results.append(stats)
 
     print("\n" + "=" * 70)
@@ -172,7 +176,7 @@ def compare_models(models: List[str]):
 # 3. POINT D'ENTRÉE
 # ============================================================
 
-def main():
+async def main():
     parser = argparse.ArgumentParser(description="Benchmark des modèles d'embedding")
     parser.add_argument("--model", type=str, default=None,
                         help="Nom du modèle à tester (ex: sentence-transformers/all-MiniLM-L6-v2)")
@@ -186,11 +190,11 @@ def main():
             "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
             "intfloat/multilingual-e5-small",
         ]
-        compare_models(models)
+        await compare_models(models)
     else:
         model = args.model or "sentence-transformers/all-MiniLM-L6-v2"
-        stats = run_benchmark(model)
+        stats = await run_benchmark(model)
         print_report(stats)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

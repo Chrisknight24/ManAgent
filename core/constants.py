@@ -63,3 +63,10 @@ class Providers:
 class OrchestratorMode(StrEnum):
     DIRECT = "direct"
     MISSION = "mission"
+
+# =====================================================
+# PARAMÈTRES DE RETRIEVAL
+# =====================================================
+RETRIEVAL_TOP_K = 20               # Nombre de voisins à récupérer
+RETRIEVAL_THRESHOLD = 0.85         # Seuil de similarité pour filtrer les résultats
+RETRIEVAL_MAX_RESULTS_INJECTED = 5 # Nombre max de missions similaires injectées dans le prompt

@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-build_observability_report.py (v3)
+build_observability_report.py (v4)
 ====================================
 Assemble UN fichier HTML autonome (CSS + JS inline).
 
-Nouveautés v3 :
-  - Timestamps lisibles (format heure locale, ou date si différent du jour)
-  - Durées affichées en secondes / minutes
-  - Les tours de session sont affichés du plus récent au plus ancien
-  - Filtres de polarité fonctionnels
+Nouveautés v4 :
+  - Affichage des signatures extraites par l'Orchestrateur
+  - Affichage des résultats du Retrieval (missions similaires)
+  - Affichage du prompt de faisabilité (FeasibilityDecision) pour le root solver
+  - Bulle utilisateur en vert émeraude (#2ecc71)
+  - Affichage des plans proposés lors des retries
+  - Meilleure traçabilité des événements de retrieval
 
 Sources de données : memory.db (episodes, lessons) + events.jsonl (Logger.event).
 """
@@ -17,11 +19,11 @@ import json
 import os
 import sqlite3
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 
 # =====================================================
-# CHARGEMENT DES DONNÉES (inchangé)
+# CHARGEMENT DES DONNÉES
 # =====================================================
 
 def load_episodes(db_path: str) -> List[Dict[str, Any]]:
@@ -67,6 +69,10 @@ def load_episodes(db_path: str) -> List[Dict[str, Any]]:
             "created_at": row.get("created_at"),
             "finished_at": row.get("finished_at"),
             "analyzed_at": row.get("analyzed_at"),
+            # Enrichis plus tard
+            "refined_goal": None,
+            "signatures": [],
+            "retrieval_results": [],
         })
     return episodes
 
@@ -115,7 +121,38 @@ def load_events(events_path: str) -> List[Dict[str, Any]]:
 
 
 # =====================================================
-# CORRÉLATION TEMPORELLE (inchangée)
+# EXTRACTION DES SIGNATURES ET RETRIEVAL
+# =====================================================
+
+def extract_signatures_from_routing_call(call: Dict) -> tuple:
+    """Extrait les signatures et l'output raffiné depuis un appel OrchestratorDecision."""
+    signatures = []
+    refined_goal = None
+    if call and call.get("response"):
+        resp = call.get("response")
+        refined_goal = resp.get("output")
+        for sig in resp.get("signatures", []):
+            signatures.append({
+                "action": sig.get("action"),
+                "object": sig.get("object"),
+                "desired_state": sig.get("desired_state")
+            })
+    return refined_goal, signatures
+
+
+# def find_retrieval_events(events: List[Dict]) -> Dict[str, List[Dict]]:
+#     """Regroupe les événements de retrieval par mission_id."""
+#     results = {}
+#     for ev in events:
+#         if ev.get("event") == "retriever_results":
+#             mission_id = ev.get("mission_id")
+#             if mission_id:
+#                 results.setdefault(mission_id, []).append(ev)
+#     return results
+
+
+# =====================================================
+# CORRÉLATION TEMPORELLE (inchangée, mais étendue)
 # =====================================================
 
 PRESENTATOR_TAGS = {"generate_text", "Presentator_report", "Presentator_error"}
@@ -280,8 +317,21 @@ def attach_presentator_and_routing(episodes, sessions_turns, all_calls, consumed
                 best_i, best_dist = i, dist
         if best_i is not None:
             turn["_routing_call"] = all_calls[best_i]
+            # Extraire les signatures et l'objectif raffiné
+            refined_goal, signatures = extract_signatures_from_routing_call(all_calls[best_i])
+            turn["refined_goal"] = refined_goal
+            turn["signatures"] = signatures
             consumed.add(best_i)
 
+
+def attach_retrieval_to_episodes(episodes, retrieval_events):
+    """Attache les résultats du retrieval aux épisodes correspondants."""
+    for ev in retrieval_events:
+        query_mission_id = ev.get("query_mission_id")
+        if query_mission_id:
+            ep = next((e for e in episodes if e.get("mission_id") == query_mission_id), None)
+            if ep:
+                ep.setdefault("retrieval_results", []).append(ev)
 
 def build_data(db_path: str, events_path: str) -> Dict[str, Any]:
     episodes = load_episodes(db_path)
@@ -290,12 +340,29 @@ def build_data(db_path: str, events_path: str) -> Dict[str, Any]:
 
     session_turns = [e for e in events if e.get("event") == "session_turn"]
     llm_calls = [e for e in events if e.get("event") == "llm_call"]
+    
+    # Récupérer les événements de retrieval
+    retrieval_events = [e for e in events if e.get("event") == "retriever_results"]
 
     offset = detect_clock_offset(episodes, llm_calls)
     consumed: set = set()
+
     for ep in episodes:
         correlate_tree(ep["execution_tree"], llm_calls, consumed, offset)
+
     attach_presentator_and_routing(episodes, session_turns, llm_calls, consumed, offset)
+    attach_retrieval_to_episodes(episodes, retrieval_events)  # <--- utilise la nouvelle fonction
+
+    # Transférer refined_goal et signatures des session_turns vers les épisodes
+    for turn in session_turns:
+        mission_id = turn.get("mission_id")
+        if mission_id:
+            ep = next((e for e in episodes if e.get("mission_id") == mission_id), None)
+            if ep:
+                if turn.get("refined_goal"):
+                    ep["refined_goal"] = turn.get("refined_goal")
+                if turn.get("signatures"):
+                    ep["signatures"] = turn.get("signatures")
 
     unattached_calls = [c for i, c in enumerate(llm_calls) if i not in consumed]
 
@@ -303,7 +370,6 @@ def build_data(db_path: str, events_path: str) -> Dict[str, Any]:
     for turn in session_turns:
         sessions.setdefault(turn.get("session_id", "?"), []).append(turn)
     for turns in sessions.values():
-        # On trie par date décroissante pour que les plus récents apparaissent en haut
         turns.sort(key=lambda t: t.get("ts") or "", reverse=True)
 
     return {
@@ -314,9 +380,8 @@ def build_data(db_path: str, events_path: str) -> Dict[str, Any]:
         "clock_offset_detected": offset,
     }
 
-
 # =====================================================
-# GABARIT HTML – version finale avec timestamps lisibles
+# GABARIT HTML – v4
 # =====================================================
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -347,6 +412,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   --accent-bg: #e4edfb;
   --accent-2: #7a2fb3;
   --accent-2-bg: #f3e8fb;
+  --user-bubble: #2ecc71;
+  --user-bubble-dark: #27ae60;
   --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --shadow-sm: 0 1px 2px rgba(28,33,27,0.06), 0 1px 1px rgba(28,33,27,0.08);
@@ -418,10 +485,12 @@ h3.sub-title { font-size: 15px; font-weight: 800; text-transform: uppercase; let
 .badge--skipped { background: var(--skipped-bg); color: var(--skipped); }
 .badge--pending { background: var(--pending-bg); color: var(--pending); }
 .badge--entity { background: var(--accent-bg); color: var(--accent); }
-.badge--env-real { background: var(--failure-bg); color: var(--failure); }
-.badge--env-simulated { background: var(--pending-bg); color: var(--pending); }
-.badge--avoid { background: var(--failure-bg); color: var(--failure); }
+.badge--env-real { background: #dbeafe; color: #1e40af; } /* bleu clair */
+.badge--env-simulated { background: #fef3c7; color: #92400e; } /* jaune */.badge--avoid { background: var(--failure-bg); color: var(--failure); }
 .badge--prefer { background: var(--success-bg); color: var(--success); }
+.badge--score-high { background: var(--success-bg); color: var(--success); }
+.badge--score-medium { background: #fef9e7; color: #b7950b; }
+.badge--score-low { background: var(--failure-bg); color: var(--failure); }
 
 .lesson-card.polarity-avoid { border-left: 6px solid var(--failure); }
 .lesson-card.polarity-prefer { border-left: 6px solid var(--success); }
@@ -455,15 +524,22 @@ h3.sub-title { font-size: 15px; font-weight: 800; text-transform: uppercase; let
 /* --- Fil de session --- */
 .thread-turn { margin-bottom: 22px; }
 .thread-turn__user {
-  background: var(--surface-alt); border-radius: 14px 14px 4px 14px; padding: 13px 18px;
-  max-width: 75%; margin-left: auto; font-size: 16px; font-weight: 600; box-shadow: var(--shadow-sm);
+  background: var(--user-bubble);
+  color: #fff;
+  border-radius: 14px 14px 4px 14px;
+  padding: 13px 18px;
+  max-width: 75%;
+  margin-left: auto;
+  font-size: 16px;
+  font-weight: 600;
+  box-shadow: var(--shadow-sm);
 }
 .thread-turn__meta { font-size: 12px; color: var(--text-faint); font-family: var(--mono); margin: 6px 4px; text-align: right; }
 .thread-turn__response {
   background: var(--surface); border-radius: 14px 14px 14px 4px; padding: 16px 20px;
   max-width: 85%; box-shadow: var(--shadow-sm); border: 1.5px solid var(--border); margin-top: 8px;
 }
-.thread-turn__badge-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.thread-turn__badge-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
 .responder-tag { font-family: var(--mono); font-size: 12px; font-weight: 800; color: var(--accent); }
 
 /* --- Mission card --- */
@@ -486,6 +562,45 @@ h3.sub-title { font-size: 15px; font-weight: 800; text-transform: uppercase; let
   font-family: var(--mono); margin-bottom: 18px; padding-bottom: 18px; border-bottom: 1.5px solid var(--border);
 }
 
+.context-signatures {
+  background: var(--surface-alt);
+  border-radius: 10px;
+  padding: 16px 20px;
+  margin-bottom: 20px;
+  border: 1.5px solid var(--border);
+}
+.context-signatures__row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.sig-tag {
+  display: inline-block;
+  background: var(--accent-bg);
+  color: var(--accent);
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 13px;
+  border: 1px solid var(--border);
+}
+
+.retrieval-section {
+  background: var(--surface-alt);
+  border-radius: 10px;
+  padding: 16px 20px;
+  margin-bottom: 20px;
+  border-left: 4px solid var(--accent-2);
+}
+.retrieval-item {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 12px; border-bottom: 1px solid var(--border); gap: 12px;
+  flex-wrap: wrap;
+}
+.retrieval-item:last-child { border-bottom: none; }
+.retrieval-item__goal { font-weight: 600; flex: 1; }
+.retrieval-item__score { font-family: var(--mono); font-size: 13px; }
+.retrieval-item__score-high { color: var(--success); }
+.retrieval-item__score-medium { color: #b7950b; }
+.retrieval-item__score-low { color: var(--failure); }
+.retrieval-item__link { color: var(--accent); font-family: var(--mono); font-size: 12px; cursor: pointer; }
+
 .entity-block {
   border-left: 4px solid var(--border-strong); padding: 4px 0 4px 18px; margin: 14px 0 14px 6px;
 }
@@ -493,17 +608,18 @@ h3.sub-title { font-size: 15px; font-weight: 800; text-transform: uppercase; let
 .entity-block--planner { border-left-color: var(--accent); }
 .entity-block--executor { border-left-color: #0f7a3d; }
 .entity-block--presentator { border-left-color: var(--accent-2); }
+.entity-block--feasibility { border-left-color: #e67e22; }
 .entity-block__label {
   font-family: var(--mono); font-size: 12.5px; font-weight: 800; text-transform: uppercase;
   letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 6px;
 }
 
-details.attempt, details.step, details.llm-call {
+details.attempt, details.step, details.llm-call, details.plan-detail {
   border: 1.5px solid var(--border); border-radius: 10px; background: var(--surface);
   margin: 8px 0; box-shadow: var(--shadow-sm); transition: box-shadow .12s ease;
 }
 details.attempt:hover, details.step:hover, details.llm-call:hover { box-shadow: var(--shadow-md); }
-details.attempt > summary, details.step > summary, details.llm-call > summary {
+details.attempt > summary, details.step > summary, details.llm-call > summary, details.plan-detail > summary {
   padding: 12px 16px; cursor: pointer; list-style: none; display: flex; align-items: center;
   gap: 10px; font-size: 15px; font-weight: 600;
 }
@@ -514,7 +630,10 @@ details > summary::-webkit-details-marker { display: none; }
   font-weight: 900; flex-shrink: 0; transition: transform .12s ease;
 }
 details[open] > summary .chevron { transform: rotate(90deg); }
-.attempt-body, .step-body, .llm-call-body { padding: 6px 18px 16px 46px; font-size: 15px; color: var(--text-muted); border-top: 1.5px solid var(--border); margin-top: 2px; padding-top: 14px; }
+.attempt-body, .step-body, .llm-call-body, .plan-detail-body {
+  padding: 6px 18px 16px 46px; font-size: 15px; color: var(--text-muted);
+  border-top: 1.5px solid var(--border); margin-top: 2px; padding-top: 14px;
+}
 .step-title { font-weight: 700; color: var(--text); }
 .step-tool { font-family: var(--mono); font-size: 12.5px; color: var(--accent); background: var(--accent-bg); padding: 2px 8px; border-radius: 6px; }
 
@@ -583,22 +702,15 @@ let currentSessionId = DATA.sessions[0] ? DATA.sessions[0].session_id : null;
 let currentMissionId = null;
 
 // =====================================================
-// FONCTIONS DE FORMATAGE DE TEMPS
+// FONCTIONS DE FORMATAGE
 // =====================================================
 
-/**
- * Convertit un timestamp (ISO ou Unix en secondes) en chaîne lisible.
- * - Si la date est aujourd'hui -> "HH:MM:SS"
- * - Sinon -> "DD/MM/YYYY HH:MM"
- */
 function formatTimestamp(ts) {
   if (!ts) return '—';
   let d;
   if (typeof ts === 'number' || (typeof ts === 'string' && !isNaN(parseFloat(ts)) && isFinite(ts))) {
-    // timestamp Unix en secondes
     d = new Date(parseFloat(ts) * 1000);
   } else {
-    // chaîne ISO
     d = new Date(ts);
   }
   if (isNaN(d.getTime())) return String(ts);
@@ -613,9 +725,6 @@ function formatTimestamp(ts) {
   }
 }
 
-/**
- * Formate une durée en millisecondes en chaîne lisible (ex: "2.3s" ou "1m 23s").
- */
 function formatDuration(ms) {
   if (!ms || ms < 0) return '—';
   if (ms < 1000) return Math.round(ms) + 'ms';
@@ -643,8 +752,9 @@ function envBadge(env) {
   const cls = env === 'real' ? 'env-real' : 'env-simulated';
   return `<span class="badge badge--${cls}">${esc(env || 'simulated')}</span>`;
 }
-function findEpisode(missionId) { return DATA.episodes.find(e => e.mission_id === missionId); }
-
+function findEpisode(missionId) {
+    return DATA.episodes.find(e => String(e.mission_id).trim() === String(missionId).trim());
+}
 // =====================================================
 // APPELS LLM (rendu générique)
 // =====================================================
@@ -673,7 +783,7 @@ function renderLlmCalls(calls) {
 }
 
 // =====================================================
-// ARBRE D'EXÉCUTION — narration par entité
+// ARBRE D'EXÉCUTION
 // =====================================================
 function renderNode(node) {
   const statusCls = node.status || 'pending';
@@ -718,6 +828,17 @@ function renderAttempt(attempt, idx) {
   const fcBadge = (attempt.failure_class && attempt.failure_class !== 'none') ? `<span class="badge badge--failed">${esc(attempt.failure_class)}</span>` : '';
   const nodesHtml = (attempt.nodes || []).map(n => renderNode(n)).join('');
   const planningCalls = attempt._planning_calls || [];
+  
+  // Plan détaillé (si disponible)
+  let planDetailHtml = '';
+  if (attempt.proposed_plan) {
+    const planStr = fmtJson(attempt.proposed_plan);
+    planDetailHtml = `<details class="plan-detail">
+      <summary><span class="chevron">▸</span> 📋 Plan proposé (${attempt.proposed_plan.steps ? attempt.proposed_plan.steps.length : '0'} étapes)</summary>
+      <div class="plan-detail-body"><div class="prompt-block">${esc(planStr)}</div></div>
+    </details>`;
+  }
+
   return `<details class="attempt" ${idx === 0 ? 'open' : ''}>
     <summary>
       <span class="chevron">▸</span>
@@ -729,6 +850,7 @@ function renderAttempt(attempt, idx) {
       ${attempt.failure_reason ? `<div style="color:var(--failure);font-weight:600">${esc(attempt.failure_reason)}</div>` : ''}
       <div class="entity-block entity-block--planner">
         <div class="entity-block__label">📐 Planner — construction du plan</div>
+        ${planDetailHtml}
         ${planningCalls.length ? renderLlmCalls(planningCalls) : '<div style="color:var(--text-faint);font-size:13.5px">Aucun appel capturé pour cette tentative.</div>'}
         ${adviceHtml}
       </div>
@@ -743,24 +865,62 @@ function renderAttempt(attempt, idx) {
 function renderSolverBlock(tree) {
   const feasCalls = tree._feasibility_calls || [];
   const attempts = (tree.attempts || []).map((a, i) => renderAttempt(a, i)).join('');
+  
+  // Pour le root solver, on affiche le prompt de faisabilité en évidence
+  let feasibilityHtml = '';
+  if (tree.solver_id === 'root' && feasCalls.length > 0) {
+    feasibilityHtml = `<div class="entity-block entity-block--feasibility">
+      <div class="entity-block__label">📋 Prompt de faisabilité (Root Solver)</div>
+      ${renderLlmCalls(feasCalls)}
+    </div>`;
+  } else if (tree.solver_id !== 'root') {
+    // Pour les sous-solvers, on garde le comportement existant
+    feasibilityHtml = `<div class="entity-block entity-block--solver">
+      <div class="entity-block__label">🧭 Solver — évaluation de faisabilité</div>
+      ${feasCalls.length ? renderLlmCalls(feasCalls) : '<div style="color:var(--text-faint);font-size:13.5px">Aucun appel capturé.</div>'}
+    </div>`;
+  }
+
   return `<div>
     <div style="font-size:13px;color:var(--text-faint);font-family:var(--mono);margin-bottom:8px">
       Solver [${esc(tree.solver_id)}] — statut final : ${esc(tree.status)}
     </div>
-    <div class="entity-block entity-block--solver">
-      <div class="entity-block__label">🧭 Solver — évaluation de faisabilité</div>
-      ${feasCalls.length ? renderLlmCalls(feasCalls) : '<div style="color:var(--text-faint);font-size:13.5px">Aucun appel capturé.</div>'}
-    </div>
+    ${feasibilityHtml}
     ${attempts}
   </div>`;
 }
 
+function renderRetrievalSection(retrievals) {
+  if (!retrievals || retrievals.length === 0) return '';
+  let html = `<div class="retrieval-section">
+    <h3 style="margin:0 0 12px;font-size:16px;font-weight:800;color:var(--accent-2);">🔍 Retrieval — Missions similaires trouvées</h3>`;
+  retrievals.forEach(r => {
+    const score = r.score || 0;
+    let scoreClass = 'score-low';
+    let scoreLabel = 'Faible';
+    if (score >= 0.85) { scoreClass = 'score-high'; scoreLabel = 'Élevée'; }
+    else if (score >= 0.70) { scoreClass = 'score-medium'; scoreLabel = 'Moyenne'; }
+    const goal = r.goal || 'Mission sans objectif';
+    const foundId = r.found_mission_id || r.mission_id;
+    html += `<div class="retrieval-item">
+      <span class="retrieval-item__goal">${esc(goal)}</span>
+      <span class="retrieval-item__score retrieval-item__${scoreClass}">${score.toFixed(3)} (${scoreLabel})</span>
+      <span class="retrieval-item__link" onclick="openMission('${esc(foundId)}')">↳ voir</span>
+    </div>`;
+  });
+  html += `</div>`;
+  return html;
+}
+// =====================================================
+// RENDU DES MISSIONS
+// =====================================================
 function renderMissionDetail(missionId) {
   const ep = findEpisode(missionId);
   if (!ep) return '<div class="empty-state">Mission introuvable.</div>';
   const created = formatTimestamp(ep.created_at);
   const finished = ep.finished_at ? formatTimestamp(ep.finished_at) : '—';
   const analyzed = ep.analyzed_at ? formatTimestamp(ep.analyzed_at) : 'pas encore analysée';
+  
   let html = `<div class="back-link" onclick="backToSession()">← Retour au fil de la session</div>`;
   html += `<div class="mission-detail">
     <div class="mission-header__goal">${esc(ep.goal)}</div>
@@ -770,8 +930,38 @@ function renderMissionDetail(missionId) {
       <span>finie : ${finished}</span>
       <span>${analyzed}</span>
     </div>`;
+
+  // --- Contexte & Signatures ---
+  const refinedGoal = ep.refined_goal || '';
+  const signatures = ep.signatures || [];
+  if (refinedGoal || signatures.length > 0) {
+    html += `<div class="context-signatures">
+      <h3 style="margin:0 0 8px;font-size:15px;font-weight:800;color:var(--text-muted);">🎯 Contexte & Signatures</h3>`;
+    if (refinedGoal) {
+      html += `<div style="font-weight:600;margin-bottom:8px;">Objectif raffiné : ${esc(refinedGoal)}</div>`;
+    }
+    if (signatures.length > 0) {
+      html += `<div style="font-size:13px;color:var(--text-muted);margin-bottom:4px;">Signatures extraites :</div>
+        <div class="context-signatures__row">`;
+      signatures.forEach(s => {
+        let label = `${s.action || '?'} ${s.object || '?'}`;
+        if (s.desired_state) label += ` → ${s.desired_state}`;
+        html += `<span class="sig-tag">${esc(label)}</span>`;
+      });
+      html += `</div>`;
+    }
+    html += `</div>`;
+  }
+
+  // --- Retrieval ---
+  if (ep.retrieval_results && ep.retrieval_results.length > 0) {
+    html += renderRetrievalSection(ep.retrieval_results);
+  }
+
+  // --- Arbre d'exécution ---
   html += renderSolverBlock(ep.execution_tree);
 
+  // --- Presentator ---
   const presCalls = ep._presentator_calls || [];
   html += `<div class="entity-block entity-block--presentator">
     <div class="entity-block__label">🗣️ Presentator — rédaction du rapport final</div>
@@ -787,22 +977,15 @@ function renderMissionDetail(missionId) {
 }
 
 // =====================================================
-// FIL DE SESSION (style chat, trié du plus récent au plus ancien)
-// =====================================================
-
-// =====================================================
-// THÈMES RÉCURRENTS (affichés sous chaque session)
+// FIL DE SESSION (inchangé, avec affichage des signatures dans le fil)
 // =====================================================
 function renderRecurrentThemes(sessionId) {
-    // Récupérer tous les mission_id de cette session
     const missionIds = new Set();
     const session = DATA.sessions.find(s => s.session_id === sessionId);
     if (!session) return '';
     session.turns.forEach(t => {
         if (t.mission_id) missionIds.add(t.mission_id);
     });
-
-    // Compter les scopes des leçons qui référencent ces missions
     const scopeCount = {};
     DATA.lessons.forEach(l => {
         const sources = l.source_episodes || [];
@@ -814,14 +997,10 @@ function renderRecurrentThemes(sessionId) {
             scopeCount[l.scope] = (scopeCount[l.scope] || 0) + count;
         }
     });
-
-    // Trier par occurrence décroissante et prendre les 5 premiers
     const sorted = Object.entries(scopeCount)
         .sort((a, b) => b[1] - a[1])
         .slice(0, 5);
-
     if (sorted.length === 0) return '';
-
     let html = `<div style="margin-top:20px; background:var(--surface-alt); border-radius:10px; padding:14px 18px; border:1.5px solid var(--border);">`;
     html += `<h3 style="font-size:15px; font-weight:800; margin:0 0 8px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.05em;">📊 Thèmes récurrents (scopes les plus fréquents)</h3>`;
     html += `<ul style="margin:0; padding:0; list-style:none;">`;
@@ -838,10 +1017,7 @@ function renderRecurrentThemes(sessionId) {
 function renderSessionThread(sessionId) {
   const session = DATA.sessions.find(s => s.session_id === sessionId);
   if (!session) return '<div class="empty-state">Aucune session sélectionnée.</div>';
-
-  // On copie et inverse l'ordre des tours pour afficher les plus récents en premier
   const turns = session.turns.slice().reverse();
-
   let html = `<h2 class="section-title">Session <span style="font-family:var(--mono);font-size:18px;color:var(--text-faint)">${esc(sessionId)}</span></h2>`;
   turns.forEach(t => {
     const tsStr = formatTimestamp(t.ts);
@@ -850,9 +1026,17 @@ function renderSessionThread(sessionId) {
       <div class="thread-turn__meta">${tsStr}</div>`;
     if (t._routing_call) {
       html += `<div style="max-width:85%;margin-top:6px">
-        <div class="field-label" style="margin-top:0">🧭 Orchestrator — décision de routage (direct ou mission ?)</div>
+        <div class="field-label" style="margin-top:0">🧭 Orchestrator — décision de routage</div>
         ${renderLlmCall(t._routing_call)}
       </div>`;
+      if (t.signatures && t.signatures.length > 0) {
+        html += `<div style="max-width:85%;margin-top:4px;font-size:13px;color:var(--text-muted);background:var(--surface-alt);padding:8px 12px;border-radius:8px;border:1px solid var(--border);">`;
+        html += `<b>Signatures :</b> `;
+        t.signatures.forEach(s => {
+          html += `<span style="background:var(--accent-bg);padding:2px 8px;border-radius:4px;margin:2px 4px 2px 0;display:inline-block;font-family:var(--mono);font-size:12px;">${esc(s.action)} ${esc(s.object)}</span>`;
+        });
+        html += `</div>`;
+      }
     }
     if (t.mode === 'direct') {
       html += `<div class="thread-turn__response">
@@ -869,7 +1053,6 @@ function renderSessionThread(sessionId) {
     }
     html += `</div>`;
   });
-  // Ajouter les thèmes récurrents après la conversation
   html += renderRecurrentThemes(sessionId);
   document.getElementById('view-sessions').innerHTML = html;
 }
@@ -884,7 +1067,7 @@ function backToSession() {
 }
 
 // =====================================================
-// LEÇONS — avec polarités visibles et filtres
+// LEÇONS (inchangé)
 // =====================================================
 function renderLessonsView(filter) {
   if (typeof filter === 'undefined') filter = 'all';
@@ -893,11 +1076,9 @@ function renderLessonsView(filter) {
     el.innerHTML = '<h2 class="section-title">Leçons</h2><div class="empty-state">Aucune leçon en base.</div>';
     return;
   }
-
   const avoidCount = DATA.lessons.filter(l => l.polarity === 'avoid').length;
   const preferCount = DATA.lessons.filter(l => l.polarity === 'prefer').length;
   const total = DATA.lessons.length;
-
   let html = `<h2 class="section-title">Base de leçons (${total})</h2>
     <div style="display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap;">
       <button class="filter-btn ${filter === 'all' ? 'active' : ''}" data-filter="all">Toutes (${total})</button>
@@ -905,9 +1086,7 @@ function renderLessonsView(filter) {
       <button class="filter-btn ${filter === 'prefer' ? 'active' : ''}" data-filter="prefer">✅ Prefer (${preferCount})</button>
     </div>
     <div id="lesson-list">`;
-
   const filtered = filter === 'all' ? DATA.lessons : DATA.lessons.filter(l => l.polarity === filter);
-
   filtered.forEach(l => {
     const kws = (l.keywords || []).map(k => `<span class="kw-tag">${esc(k)}</span>`).join('');
     const sources = (l.source_episodes || []).map(mid => {
@@ -929,11 +1108,8 @@ function renderLessonsView(filter) {
       ${sources ? `<div class="field-label">Créée / confirmée par</div><div>${sources}</div>` : ''}
     </div>`;
   });
-
   html += `</div>`;
   el.innerHTML = html;
-
-  // Attacher les événements de filtre
   document.querySelectorAll('.filter-btn').forEach(btn => {
     btn.onclick = function(e) {
       renderLessonsView(this.dataset.filter);
@@ -951,23 +1127,21 @@ function goToMissionFromLessons(missionId) {
 }
 
 // =====================================================
-// NAVIGATION
+// NAVIGATION (inchangé)
 // =====================================================
 function renderSidebar() {
   const el = document.getElementById('session-list');
   if (currentNav !== 'sessions') { el.innerHTML = ''; return; }
   let html = '';
-  // Trier les sessions par date du premier turn (le plus récent en premier)
   const sortedSessions = DATA.sessions.slice().sort((a, b) => {
     const aTime = a.turns[0] ? new Date(a.turns[0].ts).getTime() : 0;
     const bTime = b.turns[0] ? new Date(b.turns[0].ts).getTime() : 0;
-    return bTime - aTime; // décroissant
+    return bTime - aTime;
   });
   sortedSessions.forEach(s => {
     const active = s.session_id === currentSessionId;
     const missionCount = s.turns.filter(t => t.mode === 'mission').length;
     const directCount = s.turns.length - missionCount;
-    // On prend le premier turn (le plus récent)
     const firstTs = s.turns[0] ? formatTimestamp(s.turns[0].ts) : '';
     html += `<div class="session-item ${active ? 'active' : ''}" onclick="selectSession('${esc(s.session_id)}')">
       <div class="session-item__id">${esc(s.session_id).slice(0, 24)}</div>
@@ -1010,12 +1184,15 @@ selectNav('sessions');
 def render_html(data: Dict[str, Any]) -> str:
     data = {**data, "generated_at": datetime.now().isoformat(timespec="seconds")}
     json_blob = json.dumps(data, ensure_ascii=False, default=str)
+    # Vérification rapide
+    if not json_blob.endswith("}"):
+        raise RuntimeError("JSON tronqué !")
     json_blob = json_blob.replace("</script", "<\\/script")
     return HTML_TEMPLATE.replace("__DATA_JSON__", json_blob)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Génère le rapport d'observabilité HTML autonome (v3).")
+    parser = argparse.ArgumentParser(description="Génère le rapport d'observabilité HTML autonome (v4).")
     parser.add_argument("--db", default="memory.db")
     parser.add_argument("--events", default="observability/events.jsonl")
     parser.add_argument("--out", default="observability_report.html")
