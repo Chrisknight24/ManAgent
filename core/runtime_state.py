@@ -6,6 +6,8 @@ et permet la configuration dynamique depuis le frontend Qt.
 """
 from core.i18n import _
 from typing import Dict,List
+from core.execution_context import ExecutionContext
+
 class RuntimeState:
     """État central du runtime."""
     def __init__(self):
@@ -32,3 +34,5 @@ class RuntimeState:
             #   "signatures": List[MissionSignature],
             #   "similar_missions": Optional[List[Dict]]  # résultat du retriever (mis en cache)
             # }
+        self.current_mission_id = None  # Stockage du mission_id de la mission en cours
+        self.execution_context = ExecutionContext()

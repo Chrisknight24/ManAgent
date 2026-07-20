@@ -189,13 +189,14 @@ class Orchestrator(Supervisor, Entity):
             )
 
             # 8. Appeler le LLM pour la décision de routage
-            decision = await self._route_orchestrator(
-                orchestrator_prompt,
-                context_list,
-                forced_provider,
-                forced_model
-            )
-
+            # Avant d'appeler _route_orchestrator, on pousse session_id dans le scope
+            with self.runtime_state.execution_context.scope(session_id=session_id):
+                decision = await self._route_orchestrator(
+                    orchestrator_prompt,
+                    context_list,
+                    forced_provider,
+                    forced_model
+                )
             # Stocker les signatures dans le contexte d'exécution pour les utiliser plus tard
             self.current_execution_context["signatures"] = decision.signatures
 
@@ -411,13 +412,19 @@ class Orchestrator(Supervisor, Entity):
         mission_cache = MissionCache(mission_id, session_id, refined_goal)
         mission_cache.status = "running"
         session_memory.add_mission(mission_cache)
+        self.runtime_state.current_mission_id = mission_id
 
         # Stocker le cache dans le contexte pour le récupérer en cas d'exception
         self.current_execution_context["mission_cache"] = mission_cache
 
         Logger.event(
-            "session_turn", session_id=session_id, mode="mission",
-            mission_id=mission_id, user_message=user_message, refined_goal=refined_goal
+            "session_turn",
+            session_id=session_id,
+            mode="mission",
+            mission_id=mission_id,
+            user_message=user_message,
+            refined_goal=refined_goal,
+            signatures=[s.model_dump() for s in decision.signatures]  # <-- sérialisation correcte
         )
         Logger.info(f"[Orchestrator] 📝 Mission cache créé : {mission_id} pour la session {session_id}")
 
@@ -447,31 +454,74 @@ class Orchestrator(Supervisor, Entity):
         result = None
         final_response = ""
         try:
-            # 6. Exécuter le Solver
-            result = await self.root_solver.run()
+            # OBSERVABILITY : pousser le mission_id dans le contexte
+            with self.runtime_state.execution_context.scope(mission_id=mission_id):
+                result = await self.root_solver.run()
+        except asyncio.CancelledError as e:
+            # ---------------------------------------------------------
+            # CAS 1b : ANNULATION PAR L'UTILISATEUR (chat.stop)
+            # ---------------------------------------------------------
+            Logger.warning(f"[Orchestrator] Mission annulée par l'utilisateur : {e}")
+
+            mission_cache = session_memory.get_active_mission()
+            if mission_cache:
+                mission_cache.status = "cancelled"
+                mission_cache.finished_at = datetime.now()
+                if self.root_solver:
+                    mission_cache.execution_tree = self.root_solver.execution_tree
+                    mission_cache.resolved_data = copy.deepcopy(self.root_solver.variable_registry)
+                else:
+                    mission_cache.execution_tree = {"error": "Solver not instantiated"}
+                    mission_cache.resolved_data = {}
+
+                # Sauvegarder l'épisode en cancelled
+                try:
+                    await asyncio.to_thread(
+                        self.mission_store.save_episode,
+                        mission_cache,
+                        self.current_execution_context.get("session_id"),
+                        self.runtime_state.environment
+                    )
+                    Logger.info(f"[Orchestrator] Épisode d'annulation sauvegardé pour {mission_cache.mission_id}")
+                except Exception as save_err:
+                    Logger.error(f"[Orchestrator] Échec sauvegarde épisode annulé : {save_err}")
+
+                # Mettre à jour le contexte de session
+                session_memory.context.last_mission_status = "cancelled"
+                session_memory.context.unresolved_issues.append(
+                    f"Mission {mission_cache.mission_id} annulée par l'utilisateur."
+                )
+                context_dict = {
+                    "goal_stack": session_memory.context.goal_stack,
+                    "unresolved_issues": session_memory.context.unresolved_issues,
+                    "mission_history": session_memory.context.mission_history,
+                    "mood": session_memory.context.mood,
+                    "last_mission_status": session_memory.context.last_mission_status
+                }
+                await self._save_session_context(
+                    self.current_execution_context.get("session_id"), context_dict
+                )
+
+            # Relancer l'exception pour que le front reçoive le message d'annulation
+            raise
+
         except Exception as e:
             # ---------------------------------------------------------
             # CAS 1 : ERREUR CRITIQUE DANS LE SOLVER (API, timeout, etc.)
             # ---------------------------------------------------------
             Logger.error(f"[Orchestrator] Erreur critique dans le Solver : {e}")
 
-            # Récupérer le cache mission (doit exister)
             mission_cache = session_memory.get_active_mission()
             if mission_cache:
-                # Marquer comme failed
                 mission_cache.status = "failed"
                 mission_cache.finished_at = datetime.now()
-
-                # Récupérer l'arbre partiel si le solver a été instancié
                 if self.root_solver:
                     mission_cache.execution_tree = self.root_solver.execution_tree
                     mission_cache.resolved_data = copy.deepcopy(self.root_solver.variable_registry)
                 else:
-                    # Le solver n'a même pas été créé (cas très rare)
                     mission_cache.execution_tree = {"error": "Solver not instantiated"}
                     mission_cache.resolved_data = {}
 
-                # Sauvegarder l'épisode en base (même en échec)
                 try:
                     await asyncio.to_thread(
                         self.mission_store.save_episode,
@@ -483,7 +533,6 @@ class Orchestrator(Supervisor, Entity):
                 except Exception as save_err:
                     Logger.error(f"[Orchestrator] Échec de la sauvegarde de l'épisode d'échec : {save_err}")
 
-                # Mettre à jour le contexte de session
                 session_memory.context.last_mission_status = "failed"
                 session_memory.context.unresolved_issues.append(
                     f"Mission {mission_cache.mission_id} interrompue par une erreur système."
@@ -499,9 +548,7 @@ class Orchestrator(Supervisor, Entity):
                     self.current_execution_context.get("session_id"), context_dict
                 )
 
-            # ---> RELANCER L'EXCEPTION pour que le front reçoive le message technique
-            raise   # lève la même exception
-
+            raise
         # ============================================================
         # SUITE NORMALE : le Solver a retourné un résultat (succès ou échec fonctionnel)
         # ============================================================
@@ -856,6 +903,7 @@ class Orchestrator(Supervisor, Entity):
 
         await self.provider_manager.initialize()
         self.runtime_state.is_configured = True
+        Logger.set_runtime_state(self.runtime_state)
 
         await self.propagate_event(Events.RUNTIME_CONFIGURED, {"available_models": validated_models})
         return ResponsePacket(type="response", status="success", payload={"models_count": len(validated_models)})

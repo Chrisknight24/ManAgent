@@ -36,65 +36,46 @@ Donc :
     stderr = logs/debug
 """
 
-
-# =========================================================
-# IMPORTS
-# =========================================================
-
 import sys
 import os
 import json
 import threading
+from datetime import datetime, timezone
 
+# =========================================================
+# RUNTIME STATE REFERENCE
+# =========================================================
 
-# datetime :
-# -----------
-# Sert à générer timestamps/date/heure.
-#
-from datetime import datetime, timezone, timezone
+_runtime_state_ref = None
 
+def _get_current_mission_id():
+    """Retourne le mission_id courant depuis RuntimeState, ou None."""
+    if _runtime_state_ref:
+        return getattr(_runtime_state_ref, "current_mission_id", None)
+    return None
 
 # =========================================================
 # LOGGER CLASS
 # =========================================================
 
 class Logger:
-    """
-    Logger centralisé du runtime.
-
-    Pourquoi centraliser les logs ?
-    --------------------------------
-    Parce que plus tard :
-        - observability
-        - traces
-        - debugging
-        - monitoring
-        - analytics
-
-    dépendront tous des logs.
-
-    IMPORTANT :
-    -------------
-    Tous les modules utiliseront CETTE classe.
-    """
-
-    # =====================================================
-    # SINK JSON STRUCTURÉ (NOUVEAU — observabilité)
-    # =====================================================
-    # Toujours un FICHIER séparé, jamais stdout : la doctrine en tête de ce fichier
-    # (stdout = protocole, stderr = logs texte) reste intacte. Ce sink est une TROISIÈME
-    # sortie, additive, qui ne remplace ni stdout ni stderr.
     _json_sink_path: str = None
     _lock = threading.Lock()
 
     @staticmethod
+    def set_runtime_state(runtime_state):
+        """
+        Enregistre une référence au RuntimeState pour que Logger.event()
+        puisse injecter automatiquement current_mission_id.
+        À appeler une fois au démarrage du runtime.
+        """
+        global _runtime_state_ref
+        _runtime_state_ref = runtime_state
+
+    @staticmethod
     def configure_json_sink(path: str):
         """
-        Active l'écriture d'événements structurés (JSONL — un objet JSON par ligne) vers
-        `path`, en plus des logs texte habituels. À appeler une fois au démarrage (voir
-        main.py / Orchestrator.__init__). Tant que cette méthode n'a pas été appelée,
-        Logger.event() continue de fonctionner (le résumé texte reste toujours émis sur
-        stderr), simplement sans persistance structurée.
+        Active l'écriture d'événements structurés (JSONL) vers `path`.
         """
         Logger._json_sink_path = path
         try:
@@ -102,136 +83,52 @@ class Logger:
             if directory:
                 os.makedirs(directory, exist_ok=True)
         except Exception as e:
-            # On ne casse jamais le démarrage du runtime pour un souci d'observabilité
             Logger._log("WARNING", f"[Logger] Impossible de préparer le sink JSON ({path}) : {e}")
-
-
-    # =====================================================
-    # INTERNAL LOG FUNCTION
-    # =====================================================
 
     @staticmethod
     def _log(level: str, message: str):
-        """
-        Fonction interne commune.
-
-        level :
-            niveau du log
-            INFO / WARNING / ERROR / DEBUG
-
-        message :
-            contenu du log
-        """
-
-        # =============================================
-        # Génération timestamp
-        # =============================================
-
         timestamp = datetime.now().strftime("%H:%M:%S")
-
-        # =============================================
-        # Construction ligne finale
-        # =============================================
-
-        final_message = (
-            f"[{timestamp}] "
-            f"[{level}] "
-            f"{message}"
-        )
-
-        # =============================================
-        # IMPORTANT :
-        # Logs envoyés vers stderr
-        # =============================================
-
-        print(
-            final_message,
-            file=sys.stderr,
-            flush=True
-        )
-
-
-    # =====================================================
-    # INFO
-    # =====================================================
+        final_message = f"[{timestamp}] [{level}] {message}"
+        print(final_message, file=sys.stderr, flush=True)
 
     @staticmethod
     def info(message: str):
-        """
-        Log informatif normal.
-        """
-
         Logger._log("INFO", message)
-
-
-    # =====================================================
-    # WARNING
-    # =====================================================
 
     @staticmethod
     def warning(message: str):
-        """
-        Warning non critique.
-        """
-
         Logger._log("WARNING", message)
-
-
-    # =====================================================
-    # ERROR
-    # =====================================================
 
     @staticmethod
     def error(message: str):
-        """
-        Erreur importante.
-        """
-
         Logger._log("ERROR", message)
-
-
-    # =====================================================
-    # DEBUG
-    # =====================================================
 
     @staticmethod
     def debug(message: str):
-        """
-        Logs debug détaillés.
-        """
-
         Logger._log("DEBUG", message)
-
-    # =====================================================
-    # EVENT (NOUVEAU — observabilité structurée)
-    # =====================================================
 
     @staticmethod
     def event(event_type: str, **fields):
-        """
-        Émet un événement structuré pour la couche d'observabilité visuelle, en plus
-        (et indépendamment) des logs texte classiques — rien n'est retiré, ceci s'ajoute.
+        # Injection automatique du mission_id (déjà présent)
+        if "mission_id" not in fields:
+            mid = _get_current_mission_id()
+            if mid is not None:
+                fields["mission_id"] = mid
 
-        Exemple :
-            Logger.event("llm_call", tag="Plan", provider_id="gemini",
-                         prompt=prompt, response=response, duration_ms=1234)
+        # OBSERVABILITY : injection du contexte d'exécution
+        if _runtime_state_ref:
+            ctx_dict = _runtime_state_ref.execution_context.to_dict()
+            for key, value in ctx_dict.items():
+                if key not in fields:  # ne pas écraser si déjà fourni explicitement
+                    fields[key] = value
 
-        Contrat de robustesse : cette méthode ne doit JAMAIS faire planter l'appelant.
-        Une mission ne doit jamais échouer à cause d'un problème d'écriture du fichier
-        d'observabilité — toute erreur ici est avalée et loggée en WARNING, pas relancée.
-        """
         record = {
-            # --- FIX (trouvé en construisant la corrélation temporelle du viewer) : datetime.now()
-            # naïf renvoie l'heure LOCALE de la machine (Windows côté utilisateur), alors que
-            # PlanAttempt/ExecutionNode utilisent time.time() (toujours UTC). Écart mesuré en
-            # test réel : exactement 1h de décalage, rendant toute corrélation temporelle fausse.
-            # UTC partout, un seul référentiel d'horloge dans tout le système.
             "ts": datetime.now(timezone.utc).isoformat(),
             "event": event_type,
         }
         record.update(fields)
 
-        # Résumé texte toujours émis (utile même sans sink JSON configuré)
+        # Résumé texte (pour stderr)
         try:
             summary = json.dumps(fields, ensure_ascii=False, default=str)
         except Exception:
@@ -240,6 +137,7 @@ class Logger:
             summary = summary[:300] + "…"
         Logger._log("EVENT", f"{event_type} :: {summary}")
 
+        # Écriture dans le sink JSON
         if Logger._json_sink_path:
             try:
                 line = json.dumps(record, ensure_ascii=False, default=str)
