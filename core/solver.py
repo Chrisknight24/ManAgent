@@ -113,6 +113,7 @@ class Solver(Supervisor, Entity):
                     else:
                         try:
                             retriever = Retriever(
+                                runtime_state=self.runtime_state,
                                 top_k=RETRIEVAL_TOP_K,
                                 threshold=RETRIEVAL_THRESHOLD
                             )

@@ -2,10 +2,12 @@
 core/retriever.py
 =================
 Service de retrieval vectoriel des missions simples (MVP).
+Mise à jour : utilise le résumé sémantique (summary) et filtre par modèle d'embedding actif.
+             Utilise l'embedding_manager du runtime_state au lieu du singleton.
 """
+
 import asyncio
 from typing import List, Dict, Any, Optional, Set
-from core.embedding_service import get_embedding_service
 from memory.mission_profile_store import MissionProfileStore
 from memory.mission_store import MissionStore
 from utils.logger import Logger
@@ -17,13 +19,14 @@ class Retriever:
     def __init__(
         self,
         top_k: int = RETRIEVAL_TOP_K,
-        threshold: float = RETRIEVAL_THRESHOLD
+        threshold: float = RETRIEVAL_THRESHOLD,
+        runtime_state = None
     ):
         self.top_k = top_k
         self.threshold = threshold
         self.profile_store = MissionProfileStore()
         self.mission_store = MissionStore()
-        self.embedding_service = get_embedding_service()
+        self.runtime_state = runtime_state
 
     async def retrieve(
         self,
@@ -46,6 +49,26 @@ class Retriever:
         top_k = top_k or self.top_k
         threshold = threshold or self.threshold
 
+        # Récupération du modèle d'embedding actif depuis le runtime_state
+        active_model = None
+        embedding_manager = None
+        if self.runtime_state:
+            if hasattr(self.runtime_state, 'active_embedding_model'):
+                active_model = self.runtime_state.active_embedding_model
+                Logger.debug(f"[Retriever] Filtrage par modèle : {active_model}")
+            if hasattr(self.runtime_state, 'embedding_manager'):
+                embedding_manager = self.runtime_state.embedding_manager
+                if not embedding_manager.active_provider:
+                    Logger.warning("[Retriever] Aucun provider actif dans embedding_manager.")
+                else:
+                    Logger.debug(f"[Retriever] Embedding manager actif : {embedding_manager.active_provider_id}")
+
+        # Fallback sur le service d'embedding legacy si le manager n'est pas disponible
+        if not embedding_manager or not embedding_manager.active_provider:
+            Logger.warning("[Retriever] Fallback sur le service d'embedding legacy.")
+            from core.embedding_service import get_embedding_service
+            legacy_service = get_embedding_service()
+
         all_candidates: Dict[str, Dict] = {}
 
         for sig in signatures:
@@ -53,17 +76,21 @@ class Retriever:
             if sig.desired_state:
                 signature_text += f" {sig.desired_state}"
 
-            # --- NOUVEAU : gestion des erreurs d'embedding ---
             try:
-                embedding = await self.embedding_service.embed(signature_text)
+                # Utilisation du manager ou fallback
+                if embedding_manager and embedding_manager.active_provider:
+                    embedding = await embedding_manager.embed(signature_text)
+                else:
+                    embedding = await legacy_service.embed(signature_text)
             except Exception as e:
                 Logger.error(f"[Retriever] Erreur d'embedding pour '{signature_text}' : {e}")
-                continue  # On ignore cette signature et on passe à la suivante
+                continue
 
             raw_results = self.profile_store.get_similar_profiles(
                 query_embedding=embedding,
                 top_k=top_k,
-                threshold=threshold
+                threshold=threshold,
+                embedding_model=active_model  # <-- FILTRAGE PAR MODÈLE
             )
 
             for res in raw_results:
@@ -90,19 +117,8 @@ class Retriever:
                 Logger.warning(f"[Retriever] Mission {mission_id} introuvable dans episodes.")
                 continue
 
-            summary = None
-            presentator_raw = episode.get("presentator_result_json")
-            if presentator_raw and presentator_raw not in ("{}", "null", ""):
-                try:
-                    import json
-                    presentator_data = json.loads(presentator_raw)
-                    if isinstance(presentator_data, dict) and presentator_data.get("status") == "success":
-                        summary = episode.get("goal")
-                except Exception:
-                    pass
-
-            if not summary:
-                summary = episode.get("goal") or "Mission sans résumé"
+            # Utilisation du résumé sémantique, fallback sur le goal
+            summary = episode.get("summary") or episode.get("goal") or "Mission sans résumé"
 
             results.append({
                 "mission_id": mission_id,
@@ -124,10 +140,12 @@ class Retriever:
                 query_mission_id=query_mission_id,
                 found_mission_id=result["mission_id"],
                 goal=result.get("goal"),
+                summary=result.get("summary"),
                 score=result["score"],
                 matched_signature=result.get("matched_signature"),
                 top_k=self.top_k,
-                threshold=self.threshold
+                threshold=self.threshold,
+                embedding_model=active_model
             )
         return results
 
@@ -148,7 +166,8 @@ class Retriever:
 async def retrieve_similar_missions(
     signatures: List[MissionSignature],
     top_k: int = RETRIEVAL_TOP_K,
-    threshold: float = RETRIEVAL_THRESHOLD
+    threshold: float = RETRIEVAL_THRESHOLD,
+    runtime_state = None
 ) -> List[Dict[str, Any]]:
-    retriever = Retriever(top_k=top_k, threshold=threshold)
+    retriever = Retriever(top_k=top_k, threshold=threshold, runtime_state=runtime_state)
     return await retriever.retrieve(signatures, top_k, threshold)

@@ -184,16 +184,14 @@ class MissionProfileStore:
             raise
 
     def get_similar_profiles(self, query_embedding: List[float], top_k: int = 20,
-                              threshold: float = 0.0) -> List[Dict[str, Any]]:
+                              threshold: float = 0.0, embedding_model: Optional[str] = None) -> List[Dict[str, Any]]:
         try:
             with self._get_connection() as conn:
                 self._ensure_extension_loaded(conn)
                 cursor = conn.cursor()
-
                 query_blob = self._serialize_embedding(query_embedding)
 
-                # Utiliser 'k = ?' dans la clause WHERE pour respecter sqlite-vec
-                cursor.execute(f"""
+                sql = f"""
                     SELECT
                         p.id,
                         p.mission_id,
@@ -207,9 +205,14 @@ class MissionProfileStore:
                     FROM {VEC_TABLE_NAME} v
                     JOIN {TABLE_NAME} p ON p.id = v.rowid
                     WHERE v.embedding MATCH ? AND k = ?
-                    ORDER BY v.distance ASC
-                """, (query_blob, top_k))
+                """
+                params = [query_blob, top_k]
 
+                if embedding_model:
+                    sql += " AND p.embedding_model = ?"
+                    params.append(embedding_model)
+
+                cursor.execute(sql, tuple(params))
                 rows = cursor.fetchall()
                 results = []
                 for row in rows:
@@ -233,7 +236,7 @@ class MissionProfileStore:
         except Exception as e:
             Logger.error(f"[MissionProfileStore] Erreur get_similar_profiles : {e}")
             return []
-
+        
     def get_profiles_by_mission(self, mission_id: str) -> List[Dict[str, Any]]:
         """Retourne tous les profils associés à une mission donnée."""
         try:

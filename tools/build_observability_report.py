@@ -118,7 +118,7 @@ def load_events(events_path: str) -> List[Dict[str, Any]]:
 # TAGS
 # =====================================================
 
-PRESENTATOR_TAGS = {"generate_text", "Presentator_report", "Presentator_error"}
+PRESENTATOR_TAGS = {"generate_text", "Presentator_report", "Presentator_error", "Presentator_output"}
 FEASIBILITY_TAGS = {"FeasibilityDecision", "SignatureExtractor"}
 PLANNING_TAGS = {"Plan", "RerankedLessons"}
 CONVERGENCE_TAGS = {"ConvergenceDecision"}
@@ -933,24 +933,33 @@ function renderRetrievalSection(retrievals) {
     <div style="font-size:13px;color:var(--text-faint);margin-bottom:8px;font-family:var(--mono);">
       Top‑K : ${TOP_K} · Seuil : ${THRESHOLD.toFixed(2)}
     </div>`;
+  
   retrievals.forEach(r => {
     const score = r.score || 0;
     let scoreClass = 'score-low';
     let scoreLabel = 'Faible';
-    if (score >= THRESHOLD) { scoreClass = 'score-high'; scoreLabel = 'Élevée'; }
-    else if (score >= THRESHOLD - 0.15) { scoreClass = 'score-medium'; scoreLabel = 'Moyenne'; }
-    const goal = r.goal || 'Mission sans objectif';
+    if (score >= THRESHOLD) { 
+      scoreClass = 'score-high'; 
+      scoreLabel = 'Élevée'; 
+    } else if (score >= THRESHOLD - 0.15) { 
+      scoreClass = 'score-medium'; 
+      scoreLabel = 'Moyenne'; 
+    }
+    
     const foundId = r.found_mission_id || r.mission_id;
+    // Résumé sémantique, fallback sur le goal si absent
+    const summary = r.summary || r.goal || 'Mission sans résumé';
+    
     html += `<div class="retrieval-item">
-      <span class="retrieval-item__goal">${esc(goal)}</span>
+      <span class="retrieval-item__goal">${esc(summary)}</span>
       <span class="retrieval-item__score retrieval-item__${scoreClass}">${score.toFixed(3)} (${scoreLabel})</span>
       <span class="retrieval-item__link" onclick="openMission('${esc(foundId)}')">↳ voir</span>
     </div>`;
   });
+  
   html += `</div>`;
   return html;
 }
-
 // =====================================================
 // RENDU RECURSIF DE L'ARBRE DES SOLVERS
 // =====================================================

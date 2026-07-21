@@ -5,8 +5,9 @@ Stockage central de l'état runtime. Évite les variables globales
 et permet la configuration dynamique depuis le frontend Qt.
 """
 from core.i18n import _
-from typing import Dict,List
+from typing import Dict,List, Optional
 from core.execution_context import ExecutionContext
+from embeddings.manager import EmbeddingProviderManager
 
 class RuntimeState:
     """État central du runtime."""
@@ -36,3 +37,10 @@ class RuntimeState:
             # }
         self.current_mission_id = None  # Stockage du mission_id de la mission en cours
         self.execution_context = ExecutionContext()
+        self.embedding_manager = EmbeddingProviderManager()
+        self.active_embedding_model: Optional[str] = None  # ID du modèle choisi par l'user
+
+        self.embedding_manager = EmbeddingProviderManager()
+        self.active_embedding_model: Optional[str] = None  # ID du modèle actif
+
+        
