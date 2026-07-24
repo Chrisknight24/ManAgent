@@ -73,9 +73,7 @@ class Retriever:
 
         for sig in signatures:
             signature_text = f"{sig.action} {sig.object}"
-            if sig.desired_state:
-                signature_text += f" {sig.desired_state}"
-
+            
             try:
                 # Utilisation du manager ou fallback
                 if embedding_manager and embedding_manager.active_provider:
@@ -92,8 +90,10 @@ class Retriever:
                 threshold=threshold,
                 embedding_model=active_model  # <-- FILTRAGE PAR MODÈLE
             )
+            Logger.debug(f"[Retriever] {len(raw_results)} résultats bruts pour '{signature_text}'")
 
             for res in raw_results:
+                Logger.debug(f"[Retriever]   {res['mission_id']} -> distance={res['distance']:.4f}, score={res['similarity']:.4f}")
                 mid = res["mission_id"]
                 score = res["similarity"]
                 if mid not in all_candidates or score > all_candidates[mid]["score"]:

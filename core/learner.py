@@ -13,10 +13,12 @@ from memory.lesson_store import LessonStore
 from memory.mission_store import MissionStore
 from core.execution_models import ExecutionTree, PlanAttempt, FailureClass
 from core.entity_manifest import get_entity_role
+from core.prompt_loader import get_prompt_loader
+from core.i18n import _
 import asyncio
 
 # =====================================================
-# MODÈLE PYDANTIC POUR L'EXTRACTION DE LEÇON PAR LLM
+# MODÈLES PYDANTIC POUR L'EXTRACTION DE LEÇON
 # =====================================================
 
 class ExtractedLesson(BaseModel):
@@ -39,8 +41,7 @@ class ExtractedLesson(BaseModel):
         ...,
         description="Règle impérative et courte (1-2 phrases) pour éviter cette erreur à l'avenir."
     )
-
-    polarity: str = Field(..., description="avoid ou prefer")  # <--- NOUVEAU
+    polarity: str = Field(..., description="avoid ou prefer")
 
 
 class RerankedLessons(BaseModel):
@@ -69,9 +70,11 @@ class Analyzer:
     Analyse les épisodes (ExecutionTree) pour en extraire des leçons via LLM.
     """
 
-    def __init__(self, lesson_store: LessonStore, llm: Llm):
+    def __init__(self, lesson_store: LessonStore, llm: Llm, runtime_state):
         self.lesson_store = lesson_store
         self.llm = llm
+        self.runtime_state = runtime_state
+        self.loader = get_prompt_loader()
 
     async def analyze_episode(self, episode: Dict[str, Any]) -> None:
         """
@@ -99,9 +102,6 @@ class Analyzer:
     async def _analyze_presentator_failure(self, episode: Dict[str, Any]) -> None:
         """
         Analyse l'échec éventuel du Presentator pour cet épisode.
-        target_entity="Presentator" est ici une certitude absolue (pas d'inférence) : personne
-        d'autre que l'Orchestrateur n'appelle generate_mission_report/generate_error_report, et
-        cette méthode n'est déclenchée QUE si cet appel précis a échoué.
         """
         raw = episode.get("presentator_result_json")
         if not raw or raw in ("{}", "null"):
@@ -115,27 +115,22 @@ class Analyzer:
 
         error_reason = result.get("error_reason") or "Raison inconnue"
         environment = episode.get("environment", "simulated")
+        mission_id = episode.get("mission_id")
 
         try:
-            prompt = f"""
-Tu analyses l'échec d'une entité précise d'un moteur agentique.
-
-ENTITÉ RESPONSABLE : Presentator
-RÔLE DE CETTE ENTITÉ : {get_entity_role("Presentator")}
-
-CONTEXTE : la génération du rapport final de mission a échoué.
-DÉTAIL DE L'ERREUR : {error_reason}
-
-Instructions :
-1. Identifie un mot-clé de scope STABLE et étroit résumant la situation (ex: 'generation_rapport_echec',
-   'contexte_trop_long', 'donnees_manquantes').
-2. Propose 5 à 8 mots-clés LARGES de découvrabilité (types de mission, symptômes) qui
-   permettront de retrouver cette leçon plus tard — pas plus, la liste est plafonnée côté code
-   de toute façon (voir LessonStore.MAX_KEYWORDS_PER_CALL).
-3. Produis une règle impérative courte (1-2 phrases), adressée directement au Presentator.
-"""
+            prompt = self.loader.load(
+                "analyze_presentator_failure.md",
+                lang=getattr(self.runtime_state, "language", "en"),
+                role_description=get_entity_role("Presentator"),
+                error_reason=error_reason
+            )
             extracted = await asyncio.wait_for(
-                self.llm.generate_structured(prompt=prompt, schema=ExtractedLesson),
+                self.llm.generate_structured(
+                    prompt=prompt,
+                    schema=ExtractedLesson,
+                    mission_id=mission_id,
+                    tag="ExtractedLesson"
+                ),
                 timeout=30.0
             )
             scope = extracted.scope
@@ -156,63 +151,48 @@ Instructions :
             recommendation=recommendation,
             environment=environment,
             keywords=keywords,
-            mission_id=episode.get("mission_id")
+            mission_id=mission_id
         )
-
 
     async def _traverse_tree(self, tree: ExecutionTree, environment: str, mission_id: Optional[str] = None) -> None:
         """
         Parcourt récursivement l'arbre et génère des leçons pour chaque tentative et nœud.
         """
-        previous_outcomes = []  # <--- NOUVEAU : track les outcomes précédents pour le contraste
+        previous_outcomes = []
         for attempt in tree.attempts:
-            # On regarde si une tentative précédente a échoué
             has_previous_failure = "failed" in previous_outcomes
             await self._analyze_attempt(attempt, tree.goal, environment, mission_id, has_previous_failure)
-            previous_outcomes.append(attempt.outcome)  # on ajoute le résultat de cette tentative pour les suivantes
-            
-            # Parcourir les nœuds pour les sous-arbres (inchangé)
+            previous_outcomes.append(attempt.outcome)
             for node in attempt.nodes:
                 if node.child_execution_tree:
                     await self._traverse_tree(node.child_execution_tree, environment, mission_id)
 
-
-    async def _analyze_attempt(self, attempt: PlanAttempt, goal: str, environment: str, 
-                            mission_id: Optional[str] = None, has_previous_failure: bool = False) -> None:
+    async def _analyze_attempt(self, attempt: PlanAttempt, goal: str, environment: str,
+                               mission_id: Optional[str] = None, has_previous_failure: bool = False) -> None:
         """
         Analyse une tentative et génère des leçons.
-        - Si échec -> leçon "avoid".
-        - Si succès après au moins un échec -> leçon "prefer".
-        - Si succès direct (pas d'échec avant) -> aucune leçon.
         """
         failure_class = attempt.failure_class
         failure_reason = attempt.failure_reason or ""
 
-        # --- B3 : annulation utilisateur = pas de leçon ---
         if failure_class == FailureClass.USER_CANCELLED:
             return
 
-        # --- Cas 1 : ÉCHEC ---
         if attempt.outcome == "failed":
             await self._generate_avoid_lesson(attempt, goal, environment, mission_id)
             return
 
-        # --- Cas 2 : SUCCÈS ---
         if attempt.outcome == "success":
-            # On ne crée une leçon de succès que s'il y a eu un échec avant (contraste)
             if has_previous_failure:
                 await self._generate_prefer_lesson(attempt, goal, environment, mission_id)
-            # Sinon, on ignore (succès trivial, pas de valeur d'apprentissage)
             return
 
-        # (Cas improbable, mais sécurité)
         Logger.warning(f"[Analyzer] Outcome non reconnu : {attempt.outcome}")
 
-    async def _generate_avoid_lesson(self, attempt: PlanAttempt, goal: str, environment: str, 
-                                    mission_id: Optional[str] = None) -> None:
+    async def _generate_avoid_lesson(self, attempt: PlanAttempt, goal: str, environment: str,
+                                     mission_id: Optional[str] = None) -> None:
         """
         Génère une leçon de type 'avoid' à partir d'un échec.
-        (Code existant, légèrement refactorisé)
         """
         entity_type = attempt.target_entity
         if not entity_type:
@@ -226,31 +206,26 @@ Instructions :
         scope: Optional[str] = None
         recommendation: Optional[str] = None
         keywords: List[str] = []
+
         try:
             pruned = self._prune_attempt_for_llm(attempt)
-            prompt = f"""
-    Tu analyses l'échec d'une entité précise d'un moteur agentique.
-
-    ENTITÉ RESPONSABLE : {entity_type}
-    RÔLE DE CETTE ENTITÉ : {role_description}
-
-    OBJECTIF DE LA SOUS-TÂCHE : {goal}
-    TYPE D'ERREUR : {failure_class.value}
-    DÉTAIL DE L'ERREUR : {failure_reason}
-
-    SÉQUENCE D'EXÉCUTION (prunée) :
-    {pruned}
-
-    Instructions :
-    1. Identifie un mot-clé de scope STABLE et étroit qui résume la SITUATION précise à l'origine
-    de l'échec (ex: 'keyboard_run_dialog_focus_loss'). Ce n'est pas forcément une application.
-    2. Propose 5 à 8 mots-clés LARGES et variés (applications, actions, synonymes, outils
-    impliqués) qui permettront de retrouver cette leçon depuis un but de mission différent.
-    3. Produis une règle impérative courte (1-2 phrases), adressée directement à {entity_type}, pour
-    ÉVITER cette erreur à l'avenir compte tenu de son rôle ci-dessus.
-    """
+            prompt = self.loader.load(
+                "generate_avoid_lesson.md",
+                lang=getattr(self.runtime_state, "language", "en"),
+                entity_type=entity_type,
+                role_description=role_description,
+                goal=goal,
+                failure_class=failure_class.value,
+                failure_reason=failure_reason,
+                pruned_attempt=pruned
+            )
             extracted = await asyncio.wait_for(
-                self.llm.generate_structured(prompt=prompt, schema=ExtractedLesson),
+                self.llm.generate_structured(
+                    prompt=prompt,
+                    schema=ExtractedLesson,
+                    mission_id=mission_id,
+                    tag="ExtractedLesson"
+                ),
                 timeout=30.0
             )
             scope = extracted.scope
@@ -262,7 +237,6 @@ Instructions :
             recommendation = self._generate_recommendation_fallback(failure_class, failure_reason)
             keywords = []
 
-        # Upsert avec polarity='avoid'
         self.lesson_store.upsert_lesson(
             entity_type=entity_type,
             scope=scope,
@@ -270,10 +244,10 @@ Instructions :
             environment=environment,
             keywords=keywords,
             mission_id=mission_id,
-            polarity="avoid"  # <--- explicite
+            polarity="avoid"
         )
 
-        # Leçon complémentaire outil (si applicable) - on conserve la polarité avoid
+        # Leçon complémentaire outil (si applicable)
         if failure_class in (FailureClass.EXECUTION_FAILURE, FailureClass.CONVERGENCE_FAILURE):
             for node in attempt.nodes:
                 if node.status == "failed" and node.tool_name:
@@ -290,68 +264,44 @@ Instructions :
                     )
                     break
 
-
     async def _generate_prefer_lesson(self, attempt: PlanAttempt, goal: str, environment: str,
-                                    mission_id: Optional[str] = None) -> None:
+                                      mission_id: Optional[str] = None) -> None:
         """
         Génère une leçon de type 'prefer' à partir d'un succès SURVENU APRÈS UN ÉCHEC.
-        Le prompt est orienté "contraste" : qu'est-ce qui a permis de débloquer la situation ?
         """
-        # On utilise l'entité ciblée par la tentative (déjà posée par le code, même si c'est un succès, 
-        # on hérite du contexte ou on prend "Planner" par défaut). 
-        # Dans un succès, target_entity peut être None. On met un fallback sur "Planner" car c'est lui qui choisit la stratégie.
         entity_type = attempt.target_entity or "Planner"
         role_description = get_entity_role(entity_type)
-
-        # Pour le contraste, on récupère l'erreur de la tentative précédente (si elle existe)
-        # On va se baser sur le failure_reason du PlanAttempt actuel (qui est vide ici) 
-        # ou on pourrait remonter l'historique. Mais comme on a passé `has_previous_failure`, 
-        # on sait juste qu'il y a eu un échec. On va faire un prompt générique.
-        # Idéalement, on voudrait le résumé de l'échec précédent. 
-        # Pour l'instant, on lui donne juste le contexte de la réussite, et on lui demande de déduire le contraste.
-        
-        # On récupère le plan proposé pour cette tentative (pour voir ce qui a été tenté avec succès)
         proposed_plan_desc = json.dumps(attempt.proposed_plan, indent=2, ensure_ascii=False) if attempt.proposed_plan else "Aucun plan stocké."
 
         try:
             pruned = self._prune_attempt_for_llm(attempt)
-            prompt = f"""
-    Tu analyses une réussite INTERVENUE APRÈS UN ÉCHEC dans un moteur agentique.
-
-    ENTITÉ RESPONSABLE DE LA STRATÉGIE GAGNANTE : {entity_type}
-    RÔLE DE CETTE ENTITÉ : {role_description}
-
-    OBJECTIF DE LA SOUS-TÂCHE : {goal}
-
-    SÉQUENCE D'EXÉCUTION QUI A RÉUSSI (prunée) :
-    {pruned}
-
-    PLAN PROPOSÉ POUR CETTE TENTATIVE RÉUSSIE :
-    {proposed_plan_desc}
-
-    Instructions (contraste implicite avec les échecs précédents) :
-    1. Identifie un mot-clé de scope STABLE et étroit qui résume la STRATÉGIE GAGNANTE à l'origine
-    de ce succès (ex: 'keyboard_win_r_alternative', 'vision_based_ui_navigation').
-    2. Propose 5 à 8 mots-clés LARGES et variés.
-    3. Produis une règle impérative courte (1-2 phrases), adressée directement à {entity_type}, pour
-    PRIVILÉGIER cette approche à l'avenir, en mentionnant en quoi elle est plus robuste que l'approche
-    qui a échoué précédemment.
-    """
+            prompt = self.loader.load(
+                "generate_prefer_lesson.md",
+                lang=getattr(self.runtime_state, "language", "en"),
+                entity_type=entity_type,
+                role_description=role_description,
+                goal=goal,
+                pruned_attempt=pruned,
+                proposed_plan_desc=proposed_plan_desc
+            )
             extracted = await asyncio.wait_for(
-                self.llm.generate_structured(prompt=prompt, schema=ExtractedLesson),
+                self.llm.generate_structured(
+                    prompt=prompt,
+                    schema=ExtractedLesson,
+                    mission_id=mission_id,
+                    tag="ExtractedLesson"
+                ),
                 timeout=30.0
             )
             scope = extracted.scope
             recommendation = extracted.recommendation
             keywords = extracted.keywords
-
         except Exception as e:
             Logger.error(f"[Analyzer] Échec LLM pour la leçon prefer : {e}")
             scope = "success_contrast_fallback"
             recommendation = "Lorsqu'une méthode échoue, privilégier une approche alternative (ex: utiliser la vision ou la souris) plutôt que de répéter la même action."
             keywords = ["alternative", "retry", "success"]
 
-        # Upsert avec polarity='prefer'
         self.lesson_store.upsert_lesson(
             entity_type=entity_type,
             scope=scope,
@@ -359,19 +309,16 @@ Instructions :
             environment=environment,
             keywords=keywords,
             mission_id=mission_id,
-            polarity="prefer"  # <--- explicite
+            polarity="prefer"
         )
 
     def _prune_attempt_for_llm(self, attempt: PlanAttempt) -> str:
-        """
-        Réduit un PlanAttempt à une séquence légère pour le LLM.
-        Ne garde que [step_id, description, expected_result, actual_result, error_reason].
-        """
+        """Réduit un PlanAttempt à une séquence légère pour le LLM."""
         pruned_nodes = []
         for node in attempt.nodes:
             pruned_nodes.append({
                 "step_id": node.step_id,
-                "description": node.description[:100],  # tronquer si très long
+                "description": node.description[:100],
                 "expected_result": node.expected_result,
                 "actual_result": node.actual_result[:100] if node.actual_result else None,
                 "error_reason": node.error_reason[:100] if node.error_reason else None,
@@ -380,9 +327,7 @@ Instructions :
         return json.dumps(pruned_nodes, indent=2, ensure_ascii=False)
 
     def _generate_recommendation_fallback(self, failure_class: FailureClass, failure_reason: str) -> str:
-        """
-        Fallback statique en cas d'échec du LLM.
-        """
+        """Fallback statique en cas d'échec du LLM."""
         if failure_class == FailureClass.PLAN_REJECTED_VALIDATION:
             return "Le plan a été rejeté par validation statique. Vérifiez les variables utilisées, les conditions et la syntaxe du plan généré. Évitez les variables non déclarées et les opérateurs interdits dans les conditions."
         elif failure_class == FailureClass.PLAN_REJECTED_SUPERVISOR:
@@ -403,58 +348,27 @@ Instructions :
 
 
 # =====================================================
-# ADVISOR (reranker LLM — remplace le RAG lexical)
+# ADVISOR (reranker LLM)
 # =====================================================
 
 class Advisor:
-    """
-    Fournit des conseils aux entités via un reranker LLM, plus de matching lexical.
-
-    Principe : on ne filtre plus les leçons par LIKE/seuils AVANT de les montrer — on présente
-    TOUTES les leçons actives de l'environnement courant à un LLM, confidence/evidence donnés
-    comme CONTEXTE de jugement, pas comme porte binaire en amont. Ça règle deux problèmes en
-    même temps :
-      1. Le mismatch de vocabulaire : scope='keyboard_run_dialog_focus_loss' ne partage aucun
-         mot avec goal='lancer chrome', un LIKE ne les aurait jamais rapprochés.
-      2. Le cercle vicieux du seuil dur : une leçon à evidence=1 n'était jamais montrée, donc
-         jamais confirmée par l'usage, donc jamais promue au-dessus du seuil.
-
-    Le seul filtre qui reste un pur SQL, jamais délégué au LLM : l'environnement. Une leçon
-    'simulated' ne doit jamais apparaître dans une requête 'real' — non négociable.
-    """
-
     def __init__(self, lesson_store: LessonStore, runtime_state, llm: Llm):
         self.lesson_store = lesson_store
-        self.runtime_state = runtime_state  # B2 : seule source de vérité pour l'environnement
+        self.runtime_state = runtime_state
         self.llm = llm
-        self.advice_cache: Dict[str, str] = {}  # utilisé pour le goal racine (cache Orchestrateur)
+        self.advice_cache: Dict[str, str] = {}
+        self.loader = get_prompt_loader()
 
     async def prepare_advice(self, goal: str) -> None:
-        """Prépare le conseil pour le goal racine (utilisé par l'Orchestrateur au lancement de mission)."""
         advice = await self._llm_rerank_advice(["Planner", "Executor"], goal)
         self.advice_cache["Planner"] = advice
 
     async def get_advice(self, entity_types: List[str], goal: str) -> str:
-        """
-        Retourne un conseil fusionné pour une liste d'entités et un goal donné.
-        C'est la voie normale d'utilisation (recherche à la volée), y compris pour les
-        sous-tâches déléguées à un Child Solver — chacune avec SON propre goal, pas celui
-        de la mission racine (voir la discussion sur la granularité de l'injection).
-        """
+        if isinstance(entity_types, str):
+            entity_types = [entity_types]
         return await self._llm_rerank_advice(entity_types, goal)
 
     async def _llm_rerank_advice(self, entity_types: List[str], goal: str) -> str:
-        """
-        Cœur du RAG v2 : récupère les leçons actives, les soumet à un LLM reranker avec le goal
-        courant, formate uniquement celles jugées applicables — groupées par entité, pour que
-        le Planner distingue clairement ses propres leçons de celles qui concernent la fiabilité
-        des outils (voir ENTITY_MANIFEST : l'Executor n'a jamais la main pour changer de
-        stratégie, seul le Planner peut agir sur ce type de leçon).
-        """
-        # Un seul flag, lu directement : plus de dev_force_injection (voir runtime_state.py).
-        # "real" ici veut dire "traite cette session comme faisant confiance à la base de
-        # connaissance de prod" — une décision consciente du front, pas une bascule de test
-        # séparée de ce qui est réellement écrit dans les épisodes.
         effective_environment = getattr(self.runtime_state, "environment", "simulated")
 
         candidates = self.lesson_store.get_active_lessons(entity_types, effective_environment)
@@ -477,40 +391,26 @@ class Advisor:
             for c in candidates
         )
 
-        # --- A.2 : le raisonnement du reranker (champ "reasoning") est un log de debug lu
-        # directement par le développeur pour comprendre ce qui s'est passé — rien n'imposait
-        # sa langue jusqu'ici, et on l'a vu sortir en anglais une fois alors que tout le reste
-        # tourne en français. Ça ne change rien pour l'utilisateur final (le reasoning ne lui
-        # est jamais montré), mais ça sert directement l'objectif d'observabilité : des logs
-        # illisibles à moitié dans une langue, à moitié dans une autre, ne servent à rien.
-        lang = getattr(self.runtime_state, "language", "fr")
+        lang_code = getattr(self.runtime_state, "language", "fr")
 
-        prompt = f"""
-Tu juges la pertinence de leçons apprises pour une mission à venir.
+        prompt = self.loader.load(
+            "advisor_rerank_advice.md",
+            lang=lang_code,
+            goal=goal,
+            strictness_note=strictness_note,
+            candidates_text=candidates_text,
+            lang_code=lang_code
+        )
 
-BUT DE LA MISSION : {goal}
-
-{strictness_note}
-
-LEÇONS CANDIDATES (issues d'échecs passés, pas forcément liées à ce but précis) :
-{candidates_text}
-
-Instructions :
-Sélectionne UNIQUEMENT les leçons dont la situation d'origine est réellement susceptible de se
-reproduire dans cette mission — pas un simple mot en commun, un vrai rapport sémantique.
-Une liste vide est une réponse parfaitement valide si rien ne s'applique réellement.
-Rédige le champ "reasoning" dans la langue de code ISO "{lang}".
-"""
         try:
             reranked = await asyncio.wait_for(
                 self.llm.generate_structured(prompt=prompt, schema=RerankedLessons, tag="RerankedLessons"),
-                timeout=35.0  # <-- 1. Augmenté à 35s
+                timeout=35.0
             )
         except Exception as e:
-            # --- 2. Fallback : top 3 leçons les plus confiantes ---
             Logger.error(f"[Advisor] Échec du reranker LLM : {type(e).__name__}: {e}")
             if candidates:
-                fallback_selected = candidates[:3]  # déjà triées par confidence DESC
+                fallback_selected = candidates[:3]
                 fallback_lines = ["⚠️ Reranker indisponible (timeout/erreur). Voici les conseils les plus confiants :"]
                 for c in fallback_selected:
                     fallback_lines.append(f"- {c['recommendation']}")
@@ -525,13 +425,9 @@ Rédige le champ "reasoning" dans la langue de code ISO "{lang}".
             Logger.debug(f"[Advisor] Aucune leçon retenue par le reranker pour {entity_types}.")
             return ""
 
-        # --- NOUVEAU : Regrouper par polarité, puis par entité ---
-        by_polarity: Dict[str, Dict[str, List[Dict[str, Any]]]] = {
-            "avoid": {},
-            "prefer": {}
-        }
+        by_polarity: Dict[str, Dict[str, List[Dict[str, Any]]]] = {"avoid": {}, "prefer": {}}
         for c in selected:
-            polarity = c.get("polarity", "avoid")  # fallback pour les anciennes leçons
+            polarity = c.get("polarity", "avoid")
             entity = c["entity_type"]
             if entity not in by_polarity[polarity]:
                 by_polarity[polarity][entity] = []
@@ -543,10 +439,9 @@ Rédige le champ "reasoning" dans la langue de code ISO "{lang}".
             "Solver": "Solver",
             "Presentator": "Presentator",
         }
-        
+
         blocks = []
 
-        # 1. Bloc AVOID
         avoid_items = by_polarity.get("avoid", {})
         if avoid_items:
             avoid_lines = ["### 🚫 À éviter (Issus d'échecs)"]
@@ -557,7 +452,6 @@ Rédige le champ "reasoning" dans la langue de code ISO "{lang}".
                     avoid_lines.append(f"- {l['recommendation']}")
             blocks.append("\n".join(avoid_lines))
 
-        # 2. Bloc PREFER
         prefer_items = by_polarity.get("prefer", {})
         if prefer_items:
             prefer_lines = ["### ✅ À privilégier (Issus de succès après échec)"]
@@ -573,6 +467,7 @@ Rédige le champ "reasoning" dans la langue de code ISO "{lang}".
 
         Logger.info(f"[Advisor] {len(selected)} leçon(s) retenue(s) par le reranker pour {entity_types}.")
         return "\n\n".join(blocks)
+
 
 # =====================================================
 # LEARNER (Entité principale)
@@ -592,20 +487,11 @@ class Learner(Entity):
         self.mission_store = mission_store
         self.runtime_state = runtime_state
         self.lesson_store = LessonStore()
-        self.analyzer = Analyzer(self.lesson_store, self.llm)  # <-- on passe le llm
-        self.advisor = Advisor(self.lesson_store, runtime_state, self.llm)  # <-- llm requis pour le reranker
+        self.analyzer = Analyzer(self.lesson_store, self.llm, self.runtime_state)
+        self.advisor = Advisor(self.lesson_store, runtime_state, self.llm)
         self.advice_cache: Dict[str, str] = {}
 
-    # =====================================================
-    # MÉTHODE PRINCIPALE (contrat Entity)
-    # =====================================================
-
     async def process(self, command: str = "analyze", **kwargs) -> Any:
-        """
-        Point d'entrée pour les commandes du Learner.
-        - command="analyze" : analyse tous les épisodes non encore analysés (kwarg force=True pour tout ré-analyser).
-        - command="prepare_advice" : prépare les conseils pour un goal donné.
-        """
         if command == "analyze":
             return await self.analyze_all_episodes(force=kwargs.get("force", False))
         elif command == "prepare_advice":
@@ -616,20 +502,7 @@ class Learner(Entity):
         else:
             raise ValueError(f"Commande learner inconnue : {command}")
 
-    # =====================================================
-    # ANALYSE (async + déduplication)
-    # =====================================================
-
     async def analyze_all_episodes(self, force: bool = False) -> int:
-        """
-        Analyse tous les épisodes non encore analysés.
-        Utilise MissionStore pour la déduplication.
-
-        force=True : réinitialise analyzed_at=NULL pour TOUS les épisodes avant de commencer,
-        pour permettre une ré-analyse complète après une évolution de la logique de l'Analyzer.
-        Ceci doit rester une action déclenchée consciemment, jamais un comportement par défaut
-        (sinon on retombe exactement dans le bug de ré-analyse silencieuse qu'on vient de fermer).
-        """
         if force:
             reset_count = self.mission_store.reset_analyzed()
             Logger.info(f"[Learner] Ré-analyse forcée demandée : {reset_count} épisode(s) remis à zéro.")
@@ -644,40 +517,18 @@ class Learner(Entity):
             mission_id = episode.get("mission_id")
             try:
                 await self.analyzer.analyze_episode(episode)
-                # Marquer comme analysé après succès
                 self.mission_store.mark_analyzed(mission_id)
                 count += 1
             except Exception as e:
                 Logger.error(f"[Learner] Erreur analyse épisode {mission_id} : {e}")
-                # On ne marque pas comme analysé pour permettre une retentative plus tard
         Logger.info(f"[Learner] Analyse terminée : {count} épisodes traités.")
         return count
 
-    # =====================================================
-    # PRÉPARATION / RÉCUPÉRATION DES CONSEILS (reranker LLM)
-    # =====================================================
-
     async def prepare_advice(self, goal: str) -> None:
-        """Prépare le conseil pour le goal racine (async : passe maintenant par un appel LLM)."""
         await self.advisor.prepare_advice(goal)
         self.advice_cache = self.advisor.advice_cache
 
     async def get_advice(self, entity_types: List[str], goal: str) -> str:
-        """
-        Retourne un conseil fusionné pour une liste d'entités et un goal donné (recherche à la
-        volée, LLM-drivée). C'est la voie normale — y compris pour un but de sous-tâche, pas
-        seulement le but racine de la mission.
-
-        Note de compatibilité : accepte aussi une simple string (un seul entity_type) pour ne
-        pas casser un appelant qui n'aurait pas encore été mis à jour vers la liste.
-        """
         if isinstance(entity_types, str):
             entity_types = [entity_types]
         return await self.advisor.get_advice(entity_types, goal)
-
-    # NOTE : get_production_advice() a été retiré. La distinction "seuils stricts en prod" ne
-    # vit plus dans un second chemin de code parallèle (c'était une source de confusion — cf.
-    # le bug où seul ce canal lisait dynamiquement l'environnement) : elle est maintenant une
-    # instruction donnée AU reranker lui-même via `strictness_note` dans Advisor._llm_rerank_advice,
-    # conditionnée par le même environnement effectif. Le seul filtre qui reste un pur SQL non
-    # négociable est l'environnement (simulated/real) — jamais délégué au jugement du LLM.

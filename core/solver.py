@@ -3,7 +3,7 @@ from utils.logger import Logger
 from core.entity import Entity
 from core.constants import Events
 from .supervisor import Supervisor
-from .plan_models import FeasibilityDecision, Plan, SolverResult, ExecutionStatus, MissionSignature
+from .plan_models import FeasibilityDecision, Plan, SolverResult, ExecutionStatus, MissionSignature, CompactedAdvice
 from .planner import Planner
 from .executor import Executor
 from core.llm import Llm
@@ -16,6 +16,7 @@ from core.execution_models import ExecutionTree, PlanAttempt, FailureClass
 from core.retriever import Retriever
 from core.signature_extractor import SignatureExtractor
 from core.constants import RETRIEVAL_TOP_K, RETRIEVAL_THRESHOLD, RETRIEVAL_MAX_RESULTS_INJECTED
+from core.mission_compactor import MissionCompactor
 
 MAX_DEPTH = 10
 MAX_EXECUTION_TRIES = 3
@@ -69,6 +70,13 @@ class Solver(Supervisor, Entity):
         }
         Logger.debug(f"[Solver:{self.id}] Signatures assignées : {len(signatures)}")
 
+    def _update_novelty_marker(self, is_novel: bool) -> None:
+        """Met à jour le marqueur is_novel de manière sécurisée (ne jamais passer de True à False)."""
+        current = self.runtime_state.execution_markers.get("is_novel", False)
+        if is_novel and not current:
+            self.runtime_state.execution_markers["is_novel"] = True
+            Logger.info(f"[Solver:{self.id}] Marqueur is_novel mis à True (mission jugée nouvelle).")
+            
     async def run(self) -> SolverResult:
         with self.runtime_state.execution_context.scope(
             solver_id=self.id,
@@ -93,6 +101,12 @@ class Solver(Supervisor, Entity):
             )
 
             try:
+                # --- DÉCLARATION AVANT LE BLOC ---
+                similar_missions_context = None
+
+                # ============================================================
+                # 1. EXTRACTION DES SIGNATURES (si l'Orchestrateur ne les a pas fournies)
+                # ============================================================
                 if not self.signatures:
                     try:
                         extractor = SignatureExtractor(llm=self.llm, runtime_state=self.runtime_state)
@@ -102,14 +116,20 @@ class Solver(Supervisor, Entity):
                     except Exception as e:
                         Logger.error(f"[Solver:{self.id}] Échec de SignatureExtractor : {e}")
 
-                similar_missions_context = ""
+                # ============================================================
+                # 2. RETRIEVAL + MISSIONCOMPACTOR (TOUJOURS EXÉCUTÉ SI SIGNATURES DISPONIBLES)
+                # ============================================================
+                similar_missions_context = None
                 if self.signatures:
                     registry_entry = self.runtime_state.solver_registry.get(self.id)
+
+                    # 2a. Cache ou nouveau retrieval
                     if registry_entry and registry_entry.get("similar_missions") is not None:
                         similar = registry_entry["similar_missions"]
                         if similar:
-                            similar_missions_context = similar
                             Logger.info(f"[Solver:{self.id}] Cache utilisé : {len(similar)} missions.")
+                        else:
+                            similar = None
                     else:
                         try:
                             retriever = Retriever(
@@ -128,12 +148,42 @@ class Solver(Supervisor, Entity):
                                     "signatures": self.signatures,
                                     "similar_missions": similar
                                 }
-                            if similar:
-                                similar_missions_context = similar
-                            else:
-                                similar_missions_context = None
                         except Exception as e:
                             Logger.error(f"[Solver:{self.id}] Échec du retrieval : {e}")
+                            similar = None
+
+                    # 2b. Si des missions similaires sont trouvées, appeler le MissionCompactor
+                    if similar:
+                        try:
+                            compactor = MissionCompactor(parent=self)
+                            compacted: CompactedAdvice = await compactor.compact(
+                                goal=self.goal,
+                                similar_missions=similar,
+                                llm=self.llm,
+                                runtime_state=self.runtime_state
+                            )
+                            compacted_advice = compacted.advice
+                            is_novel = compacted.is_novel
+
+                            # Mise à jour du marqueur is_novel (ne jamais passer True -> False)
+                            if is_novel:
+                                self.runtime_state.execution_markers["is_novel"] = is_novel
+
+                            if compacted_advice:
+                                similar_missions_context = compacted_advice
+                                Logger.info(f"[Solver:{self.id}] MissionCompactor a produit un conseil de {len(compacted_advice)} caractères. Nouveau ? {is_novel}")
+                            else:
+                                # Fallback : liste brute formatée
+                                temp_compactor = MissionCompactor()
+                                similar_missions_context = temp_compactor._format_missions(similar)
+                                Logger.warning(f"[Solver:{self.id}] MissionCompactor a retourné vide, utilisation de la liste brute formatée.")
+                        except Exception as e:
+                            Logger.error(f"[Solver:{self.id}] Erreur lors du MissionCompactor : {e}")
+                            # Fallback : liste brute formatée
+                            temp_compactor = MissionCompactor()
+                            similar_missions_context = temp_compactor._format_missions(similar)
+                    else:
+                        similar_missions_context = None
 
                 # Feasibility
                 with self.runtime_state.execution_context.scope(entity_name="Feasibility", entity_role="Solver"):
@@ -161,6 +211,17 @@ class Solver(Supervisor, Entity):
                     if self.runtime_state.cancel_requested:
                         break
 
+                    execution_attempt += 1
+                    # Mise à jour du marqueur dans RuntimeState
+                    self.runtime_state.execution_markers["execution_attempt"] = execution_attempt
+                    
+                    Logger.event(
+                        "mission_retry",
+                        solver_id=self.id,
+                        attempt_number=execution_attempt,
+                        max_attempts=MAX_EXECUTION_TRIES
+                    )
+
                     attempt_counter += 1
                     self.current_attempt = PlanAttempt(
                         attempt_number=attempt_counter,
@@ -181,11 +242,25 @@ class Solver(Supervisor, Entity):
                                 )
                             self.current_attempt.proposed_plan = proposed_plan.model_dump(mode='json')
                             self.current_attempt.advice_injected = getattr(self.planner, "_cached_advice", None) or None
+
+                            # Mise à jour du marqueur has_abstract_task
+                            self.runtime_state.execution_markers["has_abstract_task"] = any(
+                                step.type.value == "abstract_task" for step in proposed_plan.steps
+                            )
                         
-                        # --- NOUVEAU : capture explicite de ValidationError ---
                         except ValidationError as pydantic_error:
+                            self.runtime_state.execution_markers["plan_rejected"] = True
                             error_msg = f"Erreur de validation Pydantic : {pydantic_error}"
                             Logger.warning(f"[Solver:{self.id}] ⚠️ Plan invalide (Pydantic) : {error_msg}")
+                            
+                            Logger.event(
+                                "plan_rejected_validation",
+                                solver_id=self.id,
+                                attempt=attempt_counter,
+                                reason=error_msg,
+                                failure_class="PLAN_REJECTED_VALIDATION"
+                            )
+                            
                             self.current_attempt.ended_at = time.time()
                             self.current_attempt.outcome = "failed"
                             self.current_attempt.failure_class = FailureClass.PLAN_REJECTED_VALIDATION
@@ -211,7 +286,14 @@ class Solver(Supervisor, Entity):
                             continue
 
                         except ValueError as plan_error:
+                            self.runtime_state.execution_markers["plan_rejected"] = True
                             Logger.warning(f"[Solver:{self.id}] ⚠️ Plan invalide (Validation personnalisée) : {plan_error}")
+                            # --- AJOUT : log du plan en cas d'erreur ---
+                            Logger.warning(f"[Solver:{self.id}] ⚠️ Plan invalide (Validation personnalisée) : {plan_error}")
+                            # On logue le plan proposé s'il existe (même s'il est vide)
+                            if hasattr(self, 'planner') and hasattr(self.planner, '_last_proposed_plan'):
+                                Logger.debug(f"[Solver:{self.id}] Plan rejeté : {self.planner._last_proposed_plan}")
+                            # --- fin ajout ---
                             self.current_attempt.ended_at = time.time()
                             self.current_attempt.outcome = "failed"
                             self.current_attempt.failure_class = FailureClass.PLAN_REJECTED_VALIDATION
@@ -236,7 +318,6 @@ class Solver(Supervisor, Entity):
                                 break
                             continue
 
-                        # Suite du code inchangée (validation, exécution, etc.)
                         if self.runtime_state.cancel_requested:
                             self.current_attempt.ended_at = time.time()
                             self.current_attempt.outcome = "failed"
@@ -244,9 +325,18 @@ class Solver(Supervisor, Entity):
                             self.current_attempt.failure_reason = _("Annulation demandée")
                             break
 
-                        is_valid = await self.parent.validate_plan(proposed_plan, self.id)
+                         # Validation par le Superviseur (via la méthode héritée)
+                        is_valid = await self.validate_plan(proposed_plan, self.id)
                         if not is_valid:
+                            self.runtime_state.execution_markers["plan_rejected"] = True
                             Logger.warning(f"[Solver:{self.id}] Plan refusé par le superviseur.")
+                            
+                            Logger.event(
+                                "plan_rejected_supervisor",
+                                solver_id=self.id,
+                                attempt=attempt_counter,
+                                reason="Plan refusé par le superviseur"
+                            )
                             self.current_attempt.ended_at = time.time()
                             self.current_attempt.outcome = "failed"
                             self.current_attempt.failure_class = FailureClass.PLAN_REJECTED_SUPERVISOR
@@ -257,9 +347,7 @@ class Solver(Supervisor, Entity):
                             if self._preexecution_failures >= MAX_PREEXECUTION_FAILURES:
                                 break
                             continue
-
-                        execution_attempt += 1
-
+                        
                         for step in proposed_plan.steps:
                             step.id = make_step_id(step.id)
 
@@ -355,7 +443,6 @@ class Solver(Supervisor, Entity):
                 if self.id in self.runtime_state.solver_registry:
                     del self.runtime_state.solver_registry[self.id]
                     Logger.debug(f"[Solver:{self.id}] Entrée supprimée du registre.")
-
     
     # =====================================================
     # MÉTHODES UTILITAIRES

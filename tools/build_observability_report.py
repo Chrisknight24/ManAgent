@@ -120,7 +120,7 @@ def load_events(events_path: str) -> List[Dict[str, Any]]:
 
 PRESENTATOR_TAGS = {"generate_text", "Presentator_report", "Presentator_error", "Presentator_output"}
 FEASIBILITY_TAGS = {"FeasibilityDecision", "SignatureExtractor"}
-PLANNING_TAGS = {"Plan", "RerankedLessons"}
+PLANNING_TAGS = {"Plan", "RerankedLessons", "MissionCompactor"}
 CONVERGENCE_TAGS = {"ConvergenceDecision"}
 
 # =====================================================
@@ -500,6 +500,7 @@ h3.sub-title { font-size: 15px; font-weight: 800; text-transform: uppercase; let
 .badge--score-high { background: var(--success-bg); color: var(--success); }
 .badge--score-medium { background: #fef9e7; color: #b7950b; }
 .badge--score-low { background: var(--failure-bg); color: var(--failure); }
+.badge--cancelled { background: #fef3c7; color: #92400e; }  /* Orange doux */
 
 .lesson-card.polarity-avoid { border-left: 6px solid var(--failure); }
 .lesson-card.polarity-prefer { border-left: 6px solid var(--success); }
@@ -883,7 +884,7 @@ function fmtJson(obj) {
   try { return JSON.stringify(obj, null, 2); } catch(e) { return String(obj); }
 }
 function statusBadge(status) {
-  const cls = {success: 'success', failed: 'failed', skipped: 'skipped', pending: 'pending'}[status] || 'pending';
+  const cls = {success: 'success', failed: 'failed', skipped: 'skipped', pending: 'pending', cancelled: 'cancelled'}[status] || 'pending';
   return `<span class="badge badge--${cls}">${esc(status || '?')}</span>`;
 }
 function envBadge(env) {
@@ -1015,13 +1016,35 @@ function renderSolverTree(ep, tree) {
         html += renderRetrievalSection(retrievalResults);
     }
 
-    // 3. FeasibilityDecision
+        // 3. FeasibilityDecision
     const feasCalls = prepCalls.filter(c => c.tag === 'FeasibilityDecision');
     if (feasCalls.length) {
         html += `<div class="entity-block entity-block--feasibility">
-          <div class="entity-block__label">📋 Évaluation de la faisabilité</div>
-          ${renderLlmCalls(feasCalls)}
-        </div>`;
+          <div class="entity-block__label">📋 Évaluation de la faisabilité</div>`;
+        // Afficher chaque appel FeasibilityDecision
+        for (const call of feasCalls) {
+            // On récupère la réponse pour extraire le refined_strategy
+            const response = call.response || {};
+            const isPossible = response.is_possible;
+            const reason = response.reason || '';
+            const refinedStrategy = response.refined_strategy || '';
+            
+            html += `<div style="margin-bottom:12px;padding:8px 12px;background:var(--surface-alt);border-radius:8px;border-left:3px solid ${isPossible ? 'var(--success)' : 'var(--failure)'};">`;
+            html += `<div style="font-weight:700;">${isPossible ? '✅ Faisable' : '❌ Non faisable'}</div>`;
+            if (reason) {
+                html += `<div style="font-size:14px;color:var(--text-muted);margin-top:4px;">${esc(reason)}</div>`;
+            }
+            if (refinedStrategy) {
+                html += `<div style="margin-top:8px;padding:8px 12px;background:var(--accent-bg);border-radius:6px;border-left:3px solid var(--accent);">`;
+                html += `<div style="font-weight:700;font-size:13px;color:var(--accent);">🎯 Stratégie raffinée</div>`;
+                html += `<div style="font-size:14px;white-space:pre-wrap;color:var(--text);">${esc(refinedStrategy)}</div>`;
+                html += `</div>`;
+            }
+            html += `</div>`;
+        }
+        // On garde aussi les appels LLM complets (déjà rendus par renderLlmCalls)
+        html += renderLlmCalls(feasCalls);
+        html += `</div>`;
     }
 
     // 4. Tentatives

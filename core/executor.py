@@ -212,15 +212,13 @@ class Executor:
     def _interpolate_text(self, text: str) -> str:
         if not text:
             return text
-        matches = re.findall(r'\$@_([a-zA-Z0-9_]+)', text)
-        interpolated = text
-        for var_name in matches:
+        def replace_var(match):
+            var_name = match.group(1)
             if var_name in self.solver.variable_registry:
-                real_value = self.solver.variable_registry[var_name]["value"]
-                interpolated = interpolated.replace(f"$@_{var_name}", str(real_value))
-            else:
-                interpolated = interpolated.replace(f"$@_{var_name}", _("[Action ignorée]"))
-        return interpolated
+                return str(self.solver.variable_registry[var_name]["value"])
+            # Marqueur spécial pour variable inconnue
+            return f"__UNKNOWN_VAR_{var_name}__"
+        return re.sub(r'\$@_([a-zA-Z0-9_]+)', replace_var, text)
 
     async def _handle_abstract_task(self, step: PlanStep, runtime_context: str) -> Tuple[bool, str, Optional[str], Optional[SolverResult]]:
         from .solver import Solver, MAX_DEPTH
@@ -269,10 +267,14 @@ class Executor:
 
         if child_result.status == ExecutionStatus.SUCCESS:
             final_response = child_result.response or _("Objectif de la sous-tâche [{}] atteint.").format(step.id)
-            return True, final_response, child_result.final_context, child_result
+            # On ajoute l'indicateur pour la convergence
+            enriched_response = f"[TOOLS OK] {final_response}"
+            return True, enriched_response, child_result.final_context, child_result
         else:
-            return False, "", child_result.error_reason, child_result
-
+            error_msg = child_result.error_reason or "Échec de la sous-tâche"
+            enriched_error = f"[TOOLS FAILED] {error_msg}"
+            return False, "", enriched_error, child_result
+        
     async def _handle_tool_call(self, step: PlanStep) -> Tuple[bool, str, Optional[str]]:
         try:
             tool_args = json.loads(step.tool_args_json)
@@ -282,6 +284,15 @@ class Executor:
 
         tool_args = self._interpolate_dict(tool_args, self.solver.variable_registry)
         hardware_result_str = await self.solver.execute_tool(step.tool_name, tool_args)
+
+        # ----- NETTOYAGE AVANT PARSING -----
+        if hardware_result_str:
+            # Échappe les caractères de contrôle (sauf ceux autorisés dans JSON)
+            # Version simple : remplace \n, \r, \t
+            hardware_result_str = hardware_result_str.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+            # Version avancée (plus robuste) : échappe tous les caractères de contrôle 0x00-0x1F
+            # import re
+            # hardware_result_str = re.sub(r'[\x00-\x1f\x7f]', lambda m: f'\\u{ord(m.group(0)):04x}', hardware_result_str)
 
         try:
             parsed_result = json.loads(hardware_result_str)
@@ -308,8 +319,10 @@ class Executor:
             return True, is_success_flag, None
 
         except json.JSONDecodeError:
+            # On logue le contenu problématique pour debug
+            Logger.warning(f"[Executor] Échec de parsing JSON pour l'outil {step.tool_name}. Contenu reçu : {hardware_result_str[:200]}")
             return False, "", "Le retour de l'outil C++ ne respecte pas le format JSON strict."
-
+        
     async def _check_convergence(self, step: PlanStep, actual_result: str) -> ConvergenceDecision:
         if not step.expected_result:
             Logger.info(f"[Executor] Aucun critère défini pour [{step.id}]. Convergence implicite acceptée.")
@@ -357,10 +370,16 @@ class Executor:
             raise e
 
     def _normalize_condition(self, expr: str) -> str:
+        import re
+        # Remplacer les opérateurs symboliques
         expr = expr.replace('!=', '___NEQ___')
         expr = expr.replace('&&', ' and ')
         expr = expr.replace('||', ' or ')
         expr = expr.replace('!', ' not ')
+        # Remplacer les opérateurs textuels (AND, OR, NOT) - insensibles à la casse
+        expr = re.sub(r'\bAND\b', ' and ', expr, flags=re.IGNORECASE)
+        expr = re.sub(r'\bOR\b', ' or ', expr, flags=re.IGNORECASE)
+        expr = re.sub(r'\bNOT\b', ' not ', expr, flags=re.IGNORECASE)
         expr = expr.replace('___NEQ___', '!=')
         return expr
 
@@ -395,6 +414,12 @@ class Executor:
         import re
 
         interpolated = self._interpolate_text(condition_raw).strip()
+
+        # Détection de variable inconnue
+        if "__UNKNOWN_VAR_" in interpolated:
+            Logger.debug(f"[Executor] Condition contient une variable inconnue, évaluée à False : {condition_raw}")
+            return False
+
         interpolated = interpolated.replace(_("[Action ignorée]"), "False")
         interpolated = re.sub(r'\btrue\b', 'True', interpolated, flags=re.IGNORECASE)
         interpolated = re.sub(r'\bfalse\b', 'False', interpolated, flags=re.IGNORECASE)
@@ -443,7 +468,7 @@ class Executor:
         except Exception as e:
             Logger.error(f"[Executor] ⚠️ Erreur syntaxique ou typage dans la condition '{condition_raw}' (Normalisé: '{interpolated}'). Motif: {e}")
             return False
-
+        
     def _interpolate_dict(self, obj, variable_registry: dict):
         if isinstance(obj, dict):
             return {k: self._interpolate_dict(v, variable_registry) for k, v in obj.items()}

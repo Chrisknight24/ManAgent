@@ -64,21 +64,20 @@ Dernier statut de mission : {{ session_last_mission_status or "Aucune mission pr
 5. **CONTEXTE DE SESSION**
    - Utilise le `SESSION CONTEXT` (objectifs précédents, problèmes récurrents) pour évaluer si des informations ont déjà été fournies dans le passé.
    - Si une information manquante a déjà été mentionnée auparavant, tu peux l’utiliser sans redemander.
-## EXTRACTION DES MISSIONS SIMPLES (FACULTATIF)
+## EXTRACTION DES SIGNATURES (OBLIGATOIRE SI MISSION)
 
 Si la requête est une mission (type = "mission"), extrais la liste des missions simples qu'elle contient.
 
 Chaque mission simple est définie par :
-- **action** : l'action à effectuer (ex: "ouvrir", "fermer", "lancer", "supprimer")
-- **object** : l'objet de l'action (ex: "chrome", "excel", "notepad", "fichier")
-- **desired_state** : (optionnel) l'état final souhaité (ex: "ouvert", "fermé", "installé")
+- **action** : l'action à effectuer (ex: "open", "close", "launch", "delete")
+- **object** : l'objet de l'action (ex: "chrome", "excel", "notepad", "file")
+- **desired_state** : (optionnel) l'état final souhaité (ex: "opened", "closed", "installed")
 
-Par exemple :
-- "Ouvre Chrome" → action="ouvrir", object="chrome"
-- "Ferme Excel" → action="fermer", object="excel"
-- "Installe Ubuntu" → action="installer", object="ubuntu", desired_state="installé"
+**Règle importante** : les valeurs `action` et `object` doivent toujours être en anglais, quelle que soit la langue de la demande utilisateur.
+- Si la demande est dans une autre langue, traduis les termes en anglais.
+- Sois fidèle à la demande : ne traduis pas de manière approximative, utilise la traduction la plus directe et standard.
 
-Remplis la liste `signatures` avec ces objets. Si la requête est directe (type = "direct"), laisse la liste vide.
+Le champ `desired_state` est facultatif. Ne le renseigne que s'il est explicitement mentionné ou clairement sous-entendu dans la demande.
 
 ## RÉPONSE
 Génère une décision structurée au format JSON.

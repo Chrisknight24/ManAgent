@@ -6,13 +6,16 @@ Tu es un module spécialisé dans l'extraction de missions simples à partir d'u
 {{ goal }}
 
 ## CONTEXTE
-{{ context or "Aucun contexte spécifique." }}
+{{ context }}
 
 ## INSTRUCTIONS
+
 - Extrais les missions simples (action + objet + desired_state) contenues dans l'objectif.
-- Une mission simple est une action atomique (ex: ouvrir, fermer, lancer) appliquée à un objet (ex: notepad, chrome, fichier).
-- Si l'objectif est complexe (plusieurs actions), extrais chaque action séparément.
-- Si l'objectif est vague (ex: "configure la machine"), privilégie une seule signature avec l'action "configurer" et l'objet principal.
+- Les valeurs `action` et `object` doivent **toujours** être en anglais, quelle que soit la langue de l'objectif.
+- Si l'objectif est dans une autre langue, traduis les termes en anglais de manière directe et standard.
+- Le champ `desired_state` est facultatif. Ne le renseigne que s'il est explicitement mentionné ou clairement sous-entendu.
+- Ne fais pas de suppositions sur l'état final si ce n'est pas précisé.
 
 ## RÉPONSE
+
 Génère une liste de signatures structurées au format JSON.

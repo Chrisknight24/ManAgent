@@ -42,5 +42,22 @@ class RuntimeState:
 
         self.embedding_manager = EmbeddingProviderManager()
         self.active_embedding_model: Optional[str] = None  # ID du modèle actif
+        self.auto_learn_enabled = True
+
+        self.execution_markers = {
+            "execution_attempt": 0,
+            "has_abstract_task": False,
+            "plan_rejected": False,
+            "is_novel": False,
+        }
+    
+    def reset_execution_markers(self):
+        """Réinitialise les marqueurs d'exécution pour une nouvelle mission."""
+        self.execution_markers = {
+            "execution_attempt": 0,
+            "has_abstract_task": False,
+            "plan_rejected": False,
+            "is_novel": False,
+        }
 
         

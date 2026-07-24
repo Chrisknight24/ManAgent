@@ -71,6 +71,8 @@ class Planner:
         except Exception as e:
             Logger.warning(f"[Planner] Impossible de logger le plan : {e}")
 
+        # Dans propose_plan, après la validation
+        self._last_proposed_plan = proposed_plan
         if not proposed_plan.steps:
             raise ValueError(_("Le plan généré par le LLM est structurellement valide mais ne contient aucune étape."))
 
@@ -100,12 +102,22 @@ class Planner:
                     matches = re.findall(r'\$@_([a-zA-Z0-9_]+)', field)
                     used_vars.update(matches)
 
-        unknown = used_vars - created_vars
+        # --- NOUVEAU : Filtrer les variables _data si la variable de base est créée ---
+        filtered_used = set()
+        for var in used_vars:
+            if var.endswith("_data"):
+                base_var = var[:-5]  # enlève _data
+                if base_var in created_vars:
+                    # cette variable _data est implicite, on l'ignore
+                    continue
+            filtered_used.add(var)
+
+        unknown = filtered_used - created_vars
         if unknown:
             errors.append(_("Variables utilisées mais jamais créées : {}").format(', '.join(unknown)))
 
         inherited_vars = set(variable_registry.keys()) if variable_registry else set()
-        unused_plan_vars = (created_vars - used_vars) - inherited_vars
+        unused_plan_vars = (created_vars - filtered_used) - inherited_vars
         if unused_plan_vars:
             warnings.append(_("Variables créées dans le plan mais jamais utilisées : {}").format(', '.join(unused_plan_vars)))
 
@@ -114,4 +126,10 @@ class Planner:
                 if not step.output_variable_name:
                     errors.append(_("L'étape '{}' a expected_result='any' mais ne définit aucun output_variable_name.").format(step.id))
 
-        return len(errors) == 0, warnings
+        if not errors and not warnings:
+            return True, []
+        if not errors:
+            return True, warnings
+        if not errors:
+            errors.append(_("Validation échouée pour une raison inconnue. Vérifiez la structure du plan."))
+        return False, errors

@@ -17,17 +17,14 @@ Tu es le module d'évaluation stratégique principal du système. Ton rôle est 
 ## CONTEXTE D'EXÉCUTION
 {{ context or "Aucun contexte." }}
 
+## CONSEILS STRATÉGIQUES (MISSIONS SIMILAIRES)
 {% if similar_missions %}
-## MISSIONS SIMILAIRES SUSCEPTIBLES D'AIDER
+Voici un conseil stratégique synthétisé à partir de missions passées similaires :
 
-Voici des missions passées qui partagent des caractéristiques avec la demande actuelle. Elles peuvent t'inspirer pour structurer ta stratégie, même si l'objectif global diffère.
+{{ similar_missions }}
 
-{% for item in similar_missions %}
-- **Mission** : {{ item.goal }}
-  **Résumé** : {{ item.summary }}
-  **Score de similarité** : {{ item.score }}
-{% endfor %}
-
+{% else %}
+[Aucune mission similaire disponible.]
 {% endif %}
 
 ## OUTILS DISPONIBLES

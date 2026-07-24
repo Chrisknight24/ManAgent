@@ -29,7 +29,7 @@ from core.entity import Entity
 from core.llm import Llm
 from pydantic import ValidationError
 from .presentator import Presentator
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Any
 
 from core.prompt_loader import get_prompt_loader
 from core.i18n import _
@@ -46,6 +46,9 @@ from memory.session_store import SessionStore
 
 from core.embedding_service import get_embedding_service
 from memory.mission_profile_store import MissionProfileStore
+
+from core.markers.manager import MarkerManager
+from memory.fingerprint_store import FingerprintStore
 
 class Orchestrator(Supervisor, Entity):
     """
@@ -73,6 +76,8 @@ class Orchestrator(Supervisor, Entity):
         self.session_memories: Dict[str, SessionMemory] = {}
         self.mission_store = MissionStore()
         self.session_store = SessionStore()
+        self.marker_manager = MarkerManager()
+        self.fingerprint_store = FingerprintStore()
 
         # Observabilité structurée (Logger -> JSON)
         Logger.configure_json_sink("observability/events.jsonl")
@@ -149,6 +154,7 @@ class Orchestrator(Supervisor, Entity):
 
         # 2. Réarmer le système
         self.runtime_state.cancel_requested = False
+        self.runtime_state.reset_execution_markers()   # <-- AJOUT
 
         if not forced_provider or not forced_model:
             raise ValueError(_("Missing forced_provider or forced_model."))
@@ -351,6 +357,49 @@ class Orchestrator(Supervisor, Entity):
             )
             raise
 
+    async def _evaluate_learning_trigger(self, mission_context: Dict[str, Any]) -> None:
+        """Évalue si l'apprentissage doit être déclenché."""
+        if not self.runtime_state.auto_learn_enabled:
+            return
+
+        # 1. Vérifier les marqueurs
+        if not self.marker_manager.should_learn(mission_context):
+            return
+
+        # 2. Vérifier l'empreinte (éviter les doublons)
+        fingerprint = self.fingerprint_store.compute_fingerprint(
+            goal=mission_context.get("goal"),
+            plan=mission_context.get("plan", {}),
+            signatures=mission_context.get("signatures", [])
+        )
+        if self.fingerprint_store.exists(fingerprint):
+            Logger.debug("[Orchestrator] Empreinte déjà existante, analyse ignorée.")
+            return
+
+        # 3. Lancer l'analyse en arrière-plan
+        asyncio.create_task(self._background_learn(mission_context, fingerprint))
+
+    async def _background_learn(self, mission_context: Dict[str, Any], fingerprint: str) -> None:
+        """Tâche de fond pour l'analyse Learner."""
+        try:
+            Logger.info("[Orchestrator] 🧠 Apprentissage déclenché par les marqueurs.")
+            # Sauvegarder l'empreinte avant l'analyse pour éviter les doublons
+            self.fingerprint_store.save(mission_context.get("mission_id"), fingerprint)
+
+            if not self.runtime_state.learner:
+                Logger.warning("[Orchestrator] Learner non initialisé.")
+                return
+
+            analyzed = await self.runtime_state.learner.analyze_all_episodes(force=False)
+            if analyzed > 0:
+                Logger.info(f"[Orchestrator] ✅ {analyzed} épisode(s) analysé(s).")
+            else:
+                Logger.debug("[Orchestrator] Aucun nouvel épisode à analyser.")
+        except asyncio.CancelledError:
+            Logger.debug("[Orchestrator] Tâche d'apprentissage annulée.")
+        except Exception as e:
+            Logger.error(f"[Orchestrator] ❌ Erreur lors de l'apprentissage : {e}")
+
     async def _handle_direct_decision(
         self,
         decision: OrchestratorDecision,
@@ -458,6 +507,53 @@ class Orchestrator(Supervisor, Entity):
             with self.runtime_state.execution_context.scope(mission_id=mission_id):
                 result = await self.root_solver.run()
 
+                # ============================================================
+                # GESTION DE L'ANNULATION PAR L'UTILISATEUR (après Solver)
+                # ============================================================
+                if self.runtime_state.cancel_requested:
+                    Logger.info("[Orchestrator] Mission annulée par l'utilisateur après le Solver.")
+                    mission_cache = session_memory.get_active_mission()
+                    if mission_cache:
+                        mission_cache.status = "cancelled"
+                        mission_cache.finished_at = datetime.now()
+                        if self.root_solver:
+                            mission_cache.execution_tree = self.root_solver.execution_tree
+                            mission_cache.resolved_data = copy.deepcopy(self.root_solver.variable_registry)
+                        else:
+                            mission_cache.execution_tree = {"error": "Solver not instantiated"}
+                            mission_cache.resolved_data = {}
+
+                        # Résumé concis pour l'annulation
+                        mission_cache.summary = f"Mission '{refined_goal}' annulée par l'utilisateur."
+
+                        # Sauvegarde directe (pas de Presentator)
+                        await asyncio.to_thread(
+                            self.mission_store.save_episode,
+                            mission_cache,
+                            session_id,
+                            self.runtime_state.environment
+                        )
+
+                        # Mise à jour du contexte de session
+                        session_memory.context.last_mission_status = "cancelled"
+                        session_memory.context.unresolved_issues.append(
+                            f"Mission {mission_cache.mission_id} annulée par l'utilisateur."
+                        )
+                        await self._save_session_context(session_id, session_memory.context.to_dict())
+
+                        # Envoi d'un événement pour que l'UI passe en état "échec/annulé"
+                        await self.propagate_event(Events.MISSION_FAILED, {
+                            "reason": "Mission annulée par l'utilisateur",
+                            "mission_id": mission_cache.mission_id,
+                            "session_id": session_id
+                        })
+
+                    # Réponse pour que l'UI reprenne le contrôle
+                    await self.propagate_event(Events.THINKING_FINISHED, {})
+                    return ResponsePacket(type="response", status="success",
+                                        payload={"message": _("Mission annulée par l'utilisateur")})
+
+                
         except asyncio.CancelledError as e:
             # CAS : ANNULATION PAR L'UTILISATEUR
             Logger.warning(f"[Orchestrator] Mission annulée par l'utilisateur : {e}")
@@ -489,7 +585,6 @@ class Orchestrator(Supervisor, Entity):
             raise
 
         except Exception as e:
-            # CAS : ERREUR CRITIQUE DANS LE SOLVER (API, timeout, etc.)
             Logger.error(f"[Orchestrator] Erreur critique dans le Solver : {e}")
             mission_cache = session_memory.get_active_mission()
             if mission_cache:
@@ -498,12 +593,7 @@ class Orchestrator(Supervisor, Entity):
                 if self.root_solver:
                     mission_cache.execution_tree = self.root_solver.execution_tree
                     mission_cache.resolved_data = copy.deepcopy(self.root_solver.variable_registry)
-                else:
-                    mission_cache.execution_tree = {"error": "Solver not instantiated"}
-                    mission_cache.resolved_data = {}
-                # Résumé minimal pour erreur critique
                 mission_cache.summary = f"Mission '{refined_goal}' interrompue par une erreur système : {str(e)}"
-                # Sauvegarde directe (pas de Presentator)
                 await asyncio.to_thread(
                     self.mission_store.save_episode,
                     mission_cache,
@@ -515,8 +605,14 @@ class Orchestrator(Supervisor, Entity):
                     f"Mission {mission_cache.mission_id} interrompue par une erreur système."
                 )
                 await self._save_session_context(session_id, session_memory.context.to_dict())
-            raise
 
+                # --- NOUVEAU : Envoi de l'événement d'échec au frontend ---
+                await self.propagate_event(Events.MISSION_FAILED, {
+                    "reason": str(e),
+                    "mission_id": mission_cache.mission_id,
+                    "session_id": session_id
+                })
+            raise
         # ============================================================
         # SUITE NORMALE : le Solver a retourné un résultat
         # ============================================================
@@ -584,15 +680,26 @@ class Orchestrator(Supervisor, Entity):
         except Exception as e:
             # CAS : ÉCHEC DU PRESENTATOR (fallback rigide)
             Logger.error(f"[Orchestrator] ⚠️ Échec du Presentator. Motif: {e}")
+
+             # --- NOUVEAU PHASE 3 ---
+            if mission_cache:
+                Logger.event(
+                    "fallback_used",
+                    mission_id=mission_cache.mission_id,
+                    reason=str(e),
+                    fallback_type="presentator"
+                )
+            # ------------------------
             # On construit manuellement les réponses
+            # Fallback : on ne met pas l'erreur technique dans le résumé
             if result.status == ExecutionStatus.SUCCESS:
                 fallback_ctx = result.final_context[-500:] if result.final_context else "Aucun contexte disponible."
                 final_response = _("Mission achevée techniquement, mais le rapport final n'a pas pu être généré.\n\n**Dernier état :**\n```\n{}\n```").format(fallback_ctx)
-                summary = f"Mission '{refined_goal}' : succès technique (rapport final indisponible)"
+                summary = f"Mission '{refined_goal}' : succès technique (rapport final indisponible)."
             else:
-                reason = result.error_reason or "erreur inconnue"
+                reason = result.error_reason or _("erreur inconnue")
                 final_response = _("❌ La mission a échoué : {} (rapport final indisponible)").format(reason)
-                summary = f"Mission '{refined_goal}' : échec – {reason} (rapport final indisponible)"
+                summary = f"Mission '{refined_goal}' : échec (rapport final indisponible)."
 
             if mission_cache:
                 mission_cache.summary = summary
@@ -645,6 +752,25 @@ class Orchestrator(Supervisor, Entity):
                     except Exception as e:
                         Logger.error(f"[Orchestrator] Échec stockage embeddings : {e}")
 
+        
+        # --- RÉCUPÉRATION DES MARQUEURS D'EXÉCUTION DEPUIS RUNTIME_STATE ---
+        execution_markers = self.runtime_state.execution_markers
+
+        # --- DÉCLENCHEMENT AUTO-LEARN (MARQUEURS) ---
+        mission_context = {
+            "goal": refined_goal,
+            "status": mission_cache.status if mission_cache else "unknown",
+            "execution_attempt": execution_markers.get("execution_attempt", 0),
+            "has_abstract_task": execution_markers.get("has_abstract_task", False),
+            "plan_rejected": execution_markers.get("plan_rejected", False),
+            "is_novel": execution_markers.get("is_novel", False),
+            "mission_id": mission_id,
+            "solver_id": self.root_solver.id if self.root_solver else None,
+            "session_id": session_id,
+            "plan": {},  # On ne stocke pas le plan complet pour éviter la lourdeur
+            "signatures": signatures,
+        }
+        await self._evaluate_learning_trigger(mission_context)
         # 10. Sauvegarde du SessionContext
         context_dict = {
             "goal_stack": session_memory.context.goal_stack,
@@ -672,7 +798,17 @@ class Orchestrator(Supervisor, Entity):
         # 12. Émettre la réponse finale
         await self.propagate_event(Events.RESPONSE_COMPLETED, {"content": final_response})
         return ResponsePacket(type="response", status="success", payload={"message": final_response})
-            
+
+
+    def _has_abstract_task_in_plan(self, plan) -> bool:
+        if not plan or not hasattr(plan, 'steps'):
+            return False
+        return any(step.type.value == "abstract_task" for step in plan.steps)
+
+    def _was_plan_rejected(self) -> bool:
+        # On pourrait lire un flag dans runtime_state ou vérifier les logs
+        # Pour l'instant, on suppose que False par défaut
+        return False     
     # =====================================================
     # MÉTHODE DE SAUVEGARDE DU SESSION CONTEXT
     # =====================================================

@@ -111,7 +111,8 @@ class Llm:
             )
             raise
 
-    async def generate_structured(self, prompt: str, schema: Type[BaseModel], tag: Optional[str] = None) -> BaseModel:
+    async def generate_structured(self, prompt: str, schema: Type[BaseModel], tag: Optional[str] = None,
+                                  mission_id: Optional[str] = None,) -> BaseModel:
         """
         Génération contrainte pour l'architecture 'Tout est Plan'.
 
@@ -135,6 +136,7 @@ class Llm:
             )
             Logger.event(
                 "llm_call",
+                mission_id=mission_id,  # <--- TRANSMIS
                 tag=event_tag,
                 kind="structured",
                 schema=schema.__name__,

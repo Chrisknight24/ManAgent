@@ -173,3 +173,9 @@ class ConvergenceDecision(BaseModel):
         ..., 
         description=_("Analyse technique de la convergence ou explication précise de la divergence constatée.")
     )
+
+class CompactedAdvice(BaseModel):
+    """Résultat structuré du MissionCompactor."""
+    advice: str = Field(..., description="Conseil stratégique (stratégies clés + pièges à éviter) pour le Planner.")
+    is_novel: bool = Field(..., description="True si la mission actuelle semble réellement nouvelle (peu de patterns connus), False si elle est déjà bien couverte par les missions similaires.")
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0, description="Niveau de confiance du compactor dans son jugement (optionnel).")
