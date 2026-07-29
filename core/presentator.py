@@ -24,7 +24,7 @@ class PresentatorOutput(BaseModel):
 
 class Presentator(Entity):
     def __init__(self, provider_manager, runtime_state,
-                 provider_id: str = None, model_id: str = None, llm: Optional[Llm] = None):
+             provider_id: str = None, model_id: str = None, llm: Optional[Llm] = None):
         
         super().__init__(name="presentator", role="presenter", llm=llm, parent=None)
         
@@ -35,24 +35,18 @@ class Presentator(Entity):
             self.llm = Llm(
                 provider_manager=provider_manager,
                 provider_id=provider_id,
-                model_id=model_id
+                model_id=model_id,
+                runtime_state=runtime_state  # <--- NOUVEAU
             )
 
         if not self.llm:
             raise ValueError(_("Presentator requires a Llm instance or provider/model identifiers."))
-
     # ============================================================
     # IMPLÉMENTATION DE LA MÉTHODE ABSTRAITE DE Entity
     # ============================================================
 
     async def process(self, *args, **kwargs) -> str:
-        """
-        Point d'entrée générique pour le Presentator.
-        Redirige vers generate_mission_output avec les paramètres appropriés.
-        """
         Logger.info("[Presentator] 🎤 Appel via process() – délégation vers generate_mission_output")
-        
-        # Extraction des paramètres (support args et kwargs)
         goal = kwargs.get("goal", args[0] if args else "")
         final_context = kwargs.get("final_context", args[1] if len(args) > 1 else "")
         variable_registry = kwargs.get("variable_registry", args[2] if len(args) > 2 else {})
@@ -69,7 +63,6 @@ class Presentator(Entity):
             error_reason=error_reason
         )
         return output.user_report
-
     # ============================================================
     # NOUVELLE MÉTHODE STRUCTURÉE (PHASE 1)
     # ============================================================
@@ -81,7 +74,8 @@ class Presentator(Entity):
         variable_registry: dict,
         accumulated_response: str,
         mission_status: str,  # "success" ou "failed"
-        error_reason: Optional[str] = None
+        error_reason: Optional[str] = None,
+        mission_id: Optional[str] = None,  # <--- AJOUT
     ) -> PresentatorOutput:
         """
         Génère un rapport utilisateur long ET un résumé court, en un seul appel LLM structuré.
@@ -111,10 +105,12 @@ class Presentator(Entity):
         )
 
         try:
+            # --- NOUVEAU : plus de paramètre mission_id, tout est automatique ---
             output: PresentatorOutput = await self.llm.generate_structured(
                 prompt=prompt,
                 schema=PresentatorOutput,
-                tag="Presentator_output"
+                tag="Presentator_output",
+                mission_id=mission_id  # <--- TRANSMISSION EXPLICITE
             )
             Logger.info("[Presentator] ✅ Génération structurée réussie.")
             return output
@@ -126,7 +122,8 @@ class Presentator(Entity):
         except Exception as e:
             Logger.error(f"[Presentator] ❌ Échec de la génération structurée : {e}")
             return self._build_fallback_output(goal, mission_status, error_reason, str(e))
-
+        
+                
     def _build_fallback_output(self, goal: str, mission_status: str, error_reason: Optional[str], error_detail: str) -> PresentatorOutput:
         """Construit un rapport et un résumé minimal de secours."""
         if mission_status == "success":

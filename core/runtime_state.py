@@ -8,7 +8,7 @@ from core.i18n import _
 from typing import Dict,List, Optional
 from core.execution_context import ExecutionContext
 from embeddings.manager import EmbeddingProviderManager
-
+from utils.logger import Logger
 class RuntimeState:
     """État central du runtime."""
     def __init__(self):
@@ -59,5 +59,24 @@ class RuntimeState:
             "plan_rejected": False,
             "is_novel": False,
         }
+
+    def update_marker(self, key: str, value, mode='set'):
+        """
+        Met à jour un marqueur de manière cumulative.
+        - 'execution_attempt' : prend le max
+        - 'has_abstract_task', 'plan_rejected', 'is_novel' : OR logique
+        - autre : assignation directe (fallback)
+        """
+        if key == 'execution_attempt':
+            current = self.execution_markers.get(key, 0)
+            self.execution_markers[key] = max(current, value)
+        elif key in ('has_abstract_task', 'plan_rejected', 'is_novel'):
+            if value:
+                self.execution_markers[key] = True
+            # Si value est False, on ne fait rien (ne jamais désactiver un flag)
+        else:
+            self.execution_markers[key] = value
+
+        Logger.debug(f"[RuntimeState] update_marker: {key} = {value} (current: {self.execution_markers.get(key)})")
 
         

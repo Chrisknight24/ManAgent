@@ -114,6 +114,11 @@ class MissionProfileStore:
                     cursor.execute("ALTER TABLE mission_profiles ADD COLUMN embedding_dimension INTEGER DEFAULT 384")
                 except sqlite3.OperationalError:
                     pass
+                try:
+                    cursor.execute("ALTER TABLE mission_profiles ADD COLUMN root_mission_id TEXT")
+                    Logger.info("[MissionProfileStore] Migration: colonne 'root_mission_id' ajoutée.")
+                except sqlite3.OperationalError:
+                    pass  # déjà présente
 
                 # Table virtuelle pour l'index vectoriel
                 cursor.execute(f"""
@@ -137,38 +142,39 @@ class MissionProfileStore:
         return list(array.array('f', blob))
 
     def insert_profile(self, mission_id: str, signature_text: str, embedding: List[float],
-                       action: Optional[str] = None, object: Optional[str] = None,
-                       desired_state: Optional[str] = None,
-                       signature_index: int = 0, signature_count: int = 1,
-                       embedding_model: Optional[str] = None,
-                       embedding_dimension: Optional[int] = None) -> int:
+                   action: Optional[str] = None, object: Optional[str] = None,
+                   desired_state: Optional[str] = None,
+                   signature_index: int = 0, signature_count: int = 1,
+                   embedding_model: Optional[str] = None,
+                   embedding_dimension: Optional[int] = None,
+                   root_mission_id: Optional[str] = None) -> int:  # <-- NOUVEAU
         """
-        Insère un MissionProfile dans la base et met à jour l'index vectoriel.
-
-        Si embedding_model ou embedding_dimension ne sont pas fournis, on utilise
-        les valeurs par défaut du service d'embedding.
+        Insère un MissionProfile.
+        - root_mission_id : ID de la mission racine (pour remonter jusqu'à l'épisode complet)
         """
-        # Valeurs par défaut si non spécifiées
         if embedding_model is None:
             embedding_model = EmbeddingService.DEFAULT_MODEL
         if embedding_dimension is None:
-            embedding_dimension = 384  # dimension par défaut
+            embedding_dimension = 384
 
         try:
             with self._get_connection() as conn:
                 self._ensure_extension_loaded(conn)
                 cursor = conn.cursor()
 
+                # Si root_mission_id n'est pas fourni, on utilise mission_id comme fallback
+                root_id = root_mission_id if root_mission_id is not None else mission_id
+
                 cursor.execute(f"""
                     INSERT INTO {TABLE_NAME}
                     (mission_id, signature_text, action, object, desired_state,
-                     embedding, signature_index, signature_count,
-                     embedding_model, embedding_dimension)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    embedding, signature_index, signature_count,
+                    embedding_model, embedding_dimension, root_mission_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (mission_id, signature_text, action, object, desired_state,
-                      self._serialize_embedding(embedding),
-                      signature_index, signature_count,
-                      embedding_model, embedding_dimension))
+                    self._serialize_embedding(embedding),
+                    signature_index, signature_count,
+                    embedding_model, embedding_dimension, root_id))
                 profile_id = cursor.lastrowid
 
                 cursor.execute(f"""
@@ -177,14 +183,14 @@ class MissionProfileStore:
                 """, (profile_id, self._serialize_embedding(embedding)))
 
                 conn.commit()
-                Logger.debug(f"[MissionProfileStore] Profile inséré : {mission_id} / {signature_text} (id={profile_id}, model={embedding_model})")
+                Logger.debug(f"[MissionProfileStore] Profile inséré : {mission_id} / {signature_text} (root={root_id})")
                 return profile_id
         except Exception as e:
             Logger.error(f"[MissionProfileStore] Erreur insert_profile : {e}")
             raise
-
+        
     def get_similar_profiles(self, query_embedding: List[float], top_k: int = 20,
-                              threshold: float = 0.0, embedding_model: Optional[str] = None) -> List[Dict[str, Any]]:
+                          threshold: float = 0.0, embedding_model: Optional[str] = None) -> List[Dict[str, Any]]:
         try:
             with self._get_connection() as conn:
                 self._ensure_extension_loaded(conn)
@@ -201,6 +207,7 @@ class MissionProfileStore:
                         p.desired_state,
                         p.embedding_model,
                         p.embedding_dimension,
+                        p.root_mission_id,  -- <-- NOUVEAU
                         v.distance
                     FROM {VEC_TABLE_NAME} v
                     JOIN {TABLE_NAME} p ON p.id = v.rowid
@@ -216,7 +223,7 @@ class MissionProfileStore:
                 rows = cursor.fetchall()
                 results = []
                 for row in rows:
-                    distance = row[8]
+                    distance = row[9]  # décalé à cause de root_mission_id
                     if threshold > 0 and distance > threshold:
                         continue
                     similarity = 1.0 - distance
@@ -229,6 +236,7 @@ class MissionProfileStore:
                         "desired_state": row[5],
                         "embedding_model": row[6],
                         "embedding_dimension": row[7],
+                        "root_mission_id": row[8],  # <-- NOUVEAU
                         "distance": distance,
                         "similarity": similarity
                     })
@@ -245,9 +253,9 @@ class MissionProfileStore:
                 cursor = conn.cursor()
                 cursor.execute(f"""
                     SELECT id, mission_id, signature_text, action, object, desired_state,
-                           signature_index, signature_count,
-                           embedding_model, embedding_dimension,
-                           created_at
+                        signature_index, signature_count,
+                        embedding_model, embedding_dimension, root_mission_id,  -- <-- NOUVEAU
+                        created_at
                     FROM {TABLE_NAME}
                     WHERE mission_id = ?
                     ORDER BY signature_index ASC

@@ -7,6 +7,8 @@ Tu es un expert en analyse de missions. On te donne une nouvelle mission et une 
 
 ## MISSIONS SIMILAIRES (triées par score décroissant)
 {{ missions }}
++ 
++ *Note : la section ci-dessus peut inclure des "Leçons" (conseils d'évitement ou de préférence) extraites de ces missions. Tiens-en compte dans ta synthèse pour formuler des recommandations pratiques.*
 
 ## RÔLE
 1. **Synthétiser un conseil stratégique** pour le Planner : 

@@ -34,6 +34,9 @@ class MarkerManager:
             except Exception as e:
                 Logger.error(f"[MarkerManager] Erreur sur le marqueur {marker.name} : {e}")
 
+        # Log détaillé de l'état des marqueurs
+        Logger.debug(f"[MarkerManager] Marqueurs activés : {triggered} ({len(triggered)}/2 requis)")
+
         # Au moins 2 marqueurs activés pour déclencher l'apprentissage
         if len(triggered) >= 2:
             Logger.event(
@@ -43,10 +46,10 @@ class MarkerManager:
                 solver_id=context.get("solver_id"),
                 session_id=context.get("session_id"),
             )
-            Logger.info(f"[MarkerManager] Apprentissage déclenché par : {', '.join(triggered)}")
+            Logger.info(f"[MarkerManager] ✅ Apprentissage déclenché par : {', '.join(triggered)}")
             return True
 
-        Logger.debug("[MarkerManager] Aucun marqueur ou moins de 2 marqueurs activés, apprentissage ignoré.")
+        Logger.debug("[MarkerManager] ⏭️ Apprentissage ignoré : moins de 2 marqueurs activés.")
         return False
 
     def add_marker(self, marker: BaseMarker):

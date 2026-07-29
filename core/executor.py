@@ -277,11 +277,13 @@ class Executor:
         
     async def _handle_tool_call(self, step: PlanStep) -> Tuple[bool, str, Optional[str]]:
         try:
-            tool_args = json.loads(step.tool_args_json)
+            # Utilisation de la méthode de parsing sécurisée
+            tool_args = self._safe_json_loads(step.tool_args_json)
         except json.JSONDecodeError as e:
             error_detail = f"{e.msg} at line {e.lineno} column {e.colno} (pos {e.pos})"
             return False, "", _("Échec de désérialisation JSON initial : {}").format(error_detail)
 
+        # Le reste de la méthode reste inchangé
         tool_args = self._interpolate_dict(tool_args, self.solver.variable_registry)
         hardware_result_str = await self.solver.execute_tool(step.tool_name, tool_args)
 
@@ -338,7 +340,7 @@ class Executor:
 
         Logger.info(f"[Executor] [Analyse Sémantique] Invocation du LLM pour l'étape abstraite [{step.id}]...")
         return await self._evaluate_semantic_convergence(step, actual_result)
-
+    
     def _verify_rigid_outcome(self, expected: str, actual: str) -> Tuple[bool, str]:
         expected_clean = expected.strip().lower()
         actual_clean = actual.strip().lower()
@@ -355,6 +357,11 @@ class Executor:
         return False, _("Rejet matériel : L'outil a renvoyé '{}', mais le plan exigeait expressément '{}'.").format(actual_clean, expected_clean)
 
     async def _evaluate_semantic_convergence(self, step: PlanStep, actual_result: str) -> ConvergenceDecision:
+        # --- RÉCUPÉRATION AUTO DU MISSION_ID DEPUIS LE CONTEXTE ---
+        mission_id = None
+        if hasattr(self.solver, 'runtime_state') and self.solver.runtime_state:
+            mission_id = self.solver.runtime_state.execution_context.get("mission_id")
+
         loader = get_prompt_loader()
         prompt = loader.load(
             "convergence.md",
@@ -364,11 +371,61 @@ class Executor:
             actual_result=actual_result
         )
         try:
-            return await self.solver.llm.generate_structured(prompt=prompt, schema=ConvergenceDecision)
+            return await self.solver.llm.generate_structured(
+                prompt=prompt,
+                schema=ConvergenceDecision,
+                tag="ConvergenceDecision",
+                mission_id=mission_id  # <--- TRANSMISSION EXPLICITE
+            )
         except Exception as e:
             Logger.error(f"[Executor] 🔥 Panne de l'infrastructure de validation sémantique à l'étape [{step.id}] : {str(e)}")
             raise e
+        
+    def _safe_json_loads(self, json_str: str) -> dict:
+        """
+        Parse une chaîne JSON de manière robuste en réparant les séquences d'échappement
+        invalides (ex: \l, \s, \d) sans toucher aux séquences valides (\n, \t, \\, etc.).
+        """
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError as e:
+            # Si l'erreur n'est pas liée à un échappement invalide, on la propage.
+            if "Invalid \\escape" not in str(e):
+                raise
 
+            # Réparation ciblée
+            result = []
+            i = 0
+            while i < len(json_str):
+                if json_str[i] == '\\' and i + 1 < len(json_str):
+                    nxt = json_str[i + 1]
+                    # Séquences d'échappement JSON valides
+                    if nxt in ('"', '\\', '/', 'b', 'f', 'n', 'r', 't'):
+                        # Conserver telles quelles
+                        result.append(json_str[i])
+                        result.append(nxt)
+                        i += 2
+                        continue
+                    elif nxt == 'u':
+                        # Séquence Unicode (ex: \u1234). On la conserve telle quelle.
+                        # (On ne vérifie pas les 4 hexadécimaux pour simplifier, JSON le fera)
+                        result.append(json_str[i])
+                        result.append(nxt)
+                        i += 2
+                        continue
+                    else:
+                        # Séquence invalide (ex: \l, \s, \d, \x) => on la transforme en \\
+                        result.append('\\\\')  # deux backslashes pour représenter un seul dans la chaîne JSON
+                        result.append(nxt)
+                        i += 2
+                        continue
+                result.append(json_str[i])
+                i += 1
+
+            fixed_str = ''.join(result)
+            # Tentative de parsing de la chaîne réparée
+            return json.loads(fixed_str)
+        
     def _normalize_condition(self, expr: str) -> str:
         import re
         # Remplacer les opérateurs symboliques

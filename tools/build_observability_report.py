@@ -179,22 +179,56 @@ def _collect_attempts(tree, attempt_index, all_attempts):
             if child_tree:
                 _collect_attempts(child_tree, attempt_index, all_attempts)
 
+def build_solver_to_mission_map(episodes):
+    """
+    Parcourt tous les épisodes et construit un dictionnaire {solver_id: mission_id}
+    à partir des arbres d'exécution.
+    """
+    solver_to_mission = {}
+    for ep in episodes:
+        mission_id = ep.get("mission_id")
+        if not mission_id:
+            continue
+        tree = ep.get("execution_tree")
+        if not tree:
+            continue
+        # Parcours récursif de l'arbre
+        def traverse(node):
+            if not node:
+                return
+            sid = node.get("solver_id")
+            if sid:
+                solver_to_mission[sid] = mission_id
+            for attempt in node.get("attempts", []):
+                for step_node in attempt.get("nodes", []):
+                    child = step_node.get("child_execution_tree")
+                    if child:
+                        traverse(child)
+        traverse(tree)
+    return solver_to_mission
+
 # =====================================================
 # RATTACHEMENT DES APPELS LLM AUX TENTATIVES
 # =====================================================
 
 def attach_llm_calls_by_mission(episodes, llm_calls):
-    ep_index = {ep["mission_id"]: ep for ep in episodes if ep.get("mission_id")}
+    # 1. Regrouper les appels par mission_id (ceux qui en ont un)
     calls_by_mission = {}
+    orphan_calls = []
     for call in llm_calls:
         mid = call.get("mission_id")
         if mid:
             calls_by_mission.setdefault(mid, []).append(call)
+        else:
+            orphan_calls.append(call)
+
+    # 2. Rattacher les appels aux épisodes
+    ep_index = {ep["mission_id"]: ep for ep in episodes if ep.get("mission_id")}
 
     for mid, calls in calls_by_mission.items():
-        if mid not in ep_index:
+        ep = ep_index.get(mid)
+        if not ep:
             continue
-        ep = ep_index[mid]
         tree = ep.get("execution_tree") or {}
         attempt_index = {}
         all_attempts = []
@@ -218,7 +252,6 @@ def attach_llm_calls_by_mission(episodes, llm_calls):
                     if attempt:
                         _store_call_on_attempt(attempt, call, tag)
                         continue
-                # Fallback par timestamp
                 call_ts = _parse_ts(call.get("ts"))
                 if call_ts is not None:
                     matched = None
@@ -234,7 +267,6 @@ def attach_llm_calls_by_mission(episodes, llm_calls):
                     if matched:
                         _store_call_on_attempt(matched, call, tag)
                         continue
-                # Sinon on le met dans other_calls
                 ep.setdefault("_other_calls", []).append(call)
                 continue
 
@@ -263,6 +295,45 @@ def attach_llm_calls_by_mission(episodes, llm_calls):
                 continue
 
             _store_call_in_episode(ep, call, tag)
+
+    # 3. Fallback pour les appels orphelins (sans mission_id)
+    # On utilise un mapping solver_id -> mission_id construit à partir des épisodes
+    # mais on l'utilise UNIQUEMENT pour les appels qui n'ont pas de mission_id
+    if orphan_calls:
+        solver_to_mission = {}
+        for ep in episodes:
+            mission_id = ep.get("mission_id")
+            if not mission_id:
+                continue
+            tree = ep.get("execution_tree")
+            if not tree:
+                continue
+            def traverse(node):
+                if not node:
+                    return
+                sid = node.get("solver_id")
+                if sid:
+                    # On n'écrase pas les clés existantes (on pourrait avoir des doublons)
+                    solver_to_mission.setdefault(sid, mission_id)
+                for attempt in node.get("attempts", []):
+                    for step_node in attempt.get("nodes", []):
+                        child = step_node.get("child_execution_tree")
+                        if child:
+                            traverse(child)
+            traverse(tree)
+
+        for call in orphan_calls:
+            solver_id = call.get("solver_id")
+            mission_id = solver_to_mission.get(solver_id)
+            if mission_id:
+                ep = ep_index.get(mission_id)
+                if ep:
+                    # On rattache l'appel à l'épisode (avec la logique existante)
+                    # mais on le met dans _other_calls pour debug
+                    ep.setdefault("_other_calls", []).append(call)
+            else:
+                # On les met dans un dictionnaire global "unattached"
+                pass
 
 # =====================================================
 # RATTACHEMENT DES RETRIEVAL AUX SOLVERS

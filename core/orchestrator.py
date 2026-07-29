@@ -276,7 +276,8 @@ class Orchestrator(Supervisor, Entity):
             llm_for_learner = Llm(
                 provider_manager=self.provider_manager,
                 provider_id=forced_provider,
-                model_id=forced_model
+                model_id=forced_model,
+                runtime_state=self.runtime_state  # <--- AJOUT
             )
             self.learner = Learner(
                 name="learner",
@@ -287,7 +288,7 @@ class Orchestrator(Supervisor, Entity):
             )
             self.runtime_state.learner = self.learner
             Logger.info(f"[Orchestrator] Learner instancié avec {forced_provider}/{forced_model}.")
-
+            
     def _prepare_execution_context(self, session_id: str, forced_provider: str, forced_model: str):
         """Initialise les dictionnaires de contexte d'exécution pour la session."""
         self.active_sessions[session_id] = {
@@ -303,21 +304,22 @@ class Orchestrator(Supervisor, Entity):
         }
 
     async def _get_orchestrator_advice(self, user_message: str) -> str:
-        """Récupère les conseils pour l'Orchestrateur (routage) depuis le Learner."""
-        advice = ""
-        if hasattr(self.runtime_state, 'learner') and self.runtime_state.learner:
-            try:
-                advice = await self.runtime_state.learner.get_advice(
-                    entity_types=["Orchestrator"], goal=user_message
-                )
-            except Exception as e:
-                Logger.error(f"[Orchestrator] Erreur récupération conseils routage : {e}")
-                advice = ""
-            if advice:
-                Logger.debug("[Orchestrator] Conseils reçus pour le routage.")
-            else:
-                Logger.debug("[Orchestrator] Aucun conseil reçu pour le routage.")
-        return advice
+        # Reranker désactivé pour l'instant.
+        # advice = ""
+        # if hasattr(self.runtime_state, 'learner') and self.runtime_state.learner:
+        #     try:
+        #         advice = await self.runtime_state.learner.get_advice(
+        #             entity_types=["Orchestrator"], goal=user_message
+        #         )
+        #     except Exception as e:
+        #         Logger.error(f"[Orchestrator] Erreur récupération conseils routage : {e}")
+        #         advice = ""
+        # if advice:
+        #     Logger.debug("[Orchestrator] Conseils reçus pour le routage.")
+        # else:
+        #     Logger.debug("[Orchestrator] Aucun conseil reçu pour le routage.")
+        # return advice
+        return ""  # <-- désactivé
 
     async def _route_orchestrator(
         self,
@@ -359,11 +361,14 @@ class Orchestrator(Supervisor, Entity):
 
     async def _evaluate_learning_trigger(self, mission_context: Dict[str, Any]) -> None:
         """Évalue si l'apprentissage doit être déclenché."""
+        
         if not self.runtime_state.auto_learn_enabled:
+            Logger.debug("[Orchestrator] ⏭️ Apprentissage ignoré : auto_learn_enabled est False.")
             return
 
         # 1. Vérifier les marqueurs
         if not self.marker_manager.should_learn(mission_context):
+            Logger.debug("[Orchestrator] ⏭️ Apprentissage ignoré : marqueurs insuffisants (voir logs MarkerManager).")
             return
 
         # 2. Vérifier l'empreinte (éviter les doublons)
@@ -373,12 +378,13 @@ class Orchestrator(Supervisor, Entity):
             signatures=mission_context.get("signatures", [])
         )
         if self.fingerprint_store.exists(fingerprint):
-            Logger.debug("[Orchestrator] Empreinte déjà existante, analyse ignorée.")
+            Logger.debug("[Orchestrator] ⏭️ Apprentissage ignoré : empreinte déjà existante.")
             return
 
         # 3. Lancer l'analyse en arrière-plan
+        Logger.info("[Orchestrator] ✅ Apprentissage déclenché ! Lancement de l'analyse en arrière-plan.")
         asyncio.create_task(self._background_learn(mission_context, fingerprint))
-
+        
     async def _background_learn(self, mission_context: Dict[str, Any], fingerprint: str) -> None:
         """Tâche de fond pour l'analyse Learner."""
         try:
@@ -533,6 +539,7 @@ class Orchestrator(Supervisor, Entity):
                             session_id,
                             self.runtime_state.environment
                         )
+                        await self._invalidate_cache_for_mission(mission_cache.mission_id, self.root_solver.signatures if self.root_solver else [])
 
                         # Mise à jour du contexte de session
                         session_memory.context.last_mission_status = "cancelled"
@@ -576,6 +583,8 @@ class Orchestrator(Supervisor, Entity):
                     session_id,
                     self.runtime_state.environment
                 )
+                await self._invalidate_cache_for_mission(mission_cache.mission_id, self.root_solver.signatures if self.root_solver else [])
+
                 # Mettre à jour le contexte
                 session_memory.context.last_mission_status = "cancelled"
                 session_memory.context.unresolved_issues.append(
@@ -600,6 +609,8 @@ class Orchestrator(Supervisor, Entity):
                     session_id,
                     self.runtime_state.environment
                 )
+                await self._invalidate_cache_for_mission(mission_cache.mission_id, self.root_solver.signatures if self.root_solver else [])
+
                 session_memory.context.last_mission_status = "failed"
                 session_memory.context.unresolved_issues.append(
                     f"Mission {mission_cache.mission_id} interrompue par une erreur système."
@@ -645,9 +656,7 @@ class Orchestrator(Supervisor, Entity):
             await self.propagate_event(Events.THINKING_FINISHED, {})
             return ErrorPacket(type="error", message=_("Génération annulée"))
 
-        # ============================================================
         # 8. PRESENTATOR (rapport + résumé structuré)
-        # ============================================================
         try:
             presentator = Presentator(
                 provider_manager=self.provider_manager,
@@ -659,14 +668,15 @@ class Orchestrator(Supervisor, Entity):
             # On détermine le statut de la mission pour le Presentator
             mission_status = "success" if result.status == ExecutionStatus.SUCCESS else "failed"
 
-            # Appel unique structuré
+            # Appel unique structuré (sans mission_id explicite)
             output = await presentator.generate_mission_output(
                 goal=refined_goal,
                 final_context=result.final_context,
                 variable_registry=self.root_solver.variable_registry,
                 accumulated_response=result.response or "",
                 mission_status=mission_status,
-                error_reason=result.error_reason if mission_status == "failed" else None
+                error_reason=result.error_reason if mission_status == "failed" else None,
+                mission_id=mission_cache.mission_id  # <--- AJOUT
             )
 
             final_response = output.user_report
@@ -680,7 +690,6 @@ class Orchestrator(Supervisor, Entity):
         except Exception as e:
             # CAS : ÉCHEC DU PRESENTATOR (fallback rigide)
             Logger.error(f"[Orchestrator] ⚠️ Échec du Presentator. Motif: {e}")
-
              # --- NOUVEAU PHASE 3 ---
             if mission_cache:
                 Logger.event(
@@ -716,44 +725,55 @@ class Orchestrator(Supervisor, Entity):
                     session_id,
                     self.runtime_state.environment
                 )
+                await self._invalidate_cache_for_mission(mission_cache.mission_id, self.root_solver.signatures if self.root_solver else [])
+                
                 Logger.info(f"[Orchestrator] ✅ Épisode sauvegardé avec résumé : {mission_cache.mission_id}")
             except Exception as e:
                 Logger.error(f"[Orchestrator] Échec sauvegarde épisode : {e}")
 
-            # --- Stockage des signatures comme MissionProfiles (seulement si succès) ---
-            if result.status == ExecutionStatus.SUCCESS:
-                signatures = self.current_execution_context.get("signatures", [])
-                if signatures:
-                    try:
-                        # Utilisation du embedding_manager du runtime_state
-                        embedding_manager = self.runtime_state.embedding_manager
-                        if not embedding_manager or not embedding_manager.active_provider:
-                            raise RuntimeError("Aucun provider d'embedding actif.")
+            # # --- Stockage des signatures comme MissionProfiles (seulement si succès) ---
+            # if result.status == ExecutionStatus.SUCCESS:
+            #     signatures = self.current_execution_context.get("signatures", [])
+            #     if signatures:
+            #         try:
+            #             # Utilisation du embedding_manager du runtime_state
+            #             embedding_manager = self.runtime_state.embedding_manager
+            #             if not embedding_manager or not embedding_manager.active_provider:
+            #                 raise RuntimeError("Aucun provider d'embedding actif.")
 
-                        store = MissionProfileStore()
-                        active_model = embedding_manager.active_provider.model_name
+            #             store = MissionProfileStore()
+            #             active_model = embedding_manager.active_provider.model_name
 
-                        for idx, sig in enumerate(signatures):
-                            signature_text = f"{sig.action} {sig.object}"
-                            embedding = await embedding_manager.embed(signature_text)
-                            store.insert_profile(
-                                mission_id=mission_cache.mission_id,
-                                signature_text=signature_text,
-                                embedding=embedding,
-                                action=sig.action,
-                                object=sig.object,
-                                desired_state=sig.desired_state,
-                                signature_index=idx,
-                                signature_count=len(signatures),
-                                embedding_model=active_model,
-                                embedding_dimension= embedding_manager.dimension
-                            )
-                        Logger.info(f"[Orchestrator] ✅ {len(signatures)} embedding(s) stocké(s) avec le modèle {active_model} pour la mission {mission_cache.mission_id}")
-                    except Exception as e:
-                        Logger.error(f"[Orchestrator] Échec stockage embeddings : {e}")
+            #             for idx, sig in enumerate(signatures):
+            #                 signature_text = f"{sig.action} {sig.object}"
+            #                 embedding = await embedding_manager.embed(signature_text)
+            #                 store.insert_profile(
+            #                     mission_id=mission_cache.mission_id,
+            #                     signature_text=signature_text,
+            #                     embedding=embedding,
+            #                     action=sig.action,
+            #                     object=sig.object,
+            #                     desired_state=sig.desired_state,
+            #                     signature_index=idx,
+            #                     signature_count=len(signatures),
+            #                     embedding_model=active_model,
+            #                     embedding_dimension= embedding_manager.dimension
+            #                 )
+            #             Logger.info(f"[Orchestrator] ✅ {len(signatures)} embedding(s) stocké(s) avec le modèle {active_model} pour la mission {mission_cache.mission_id}")
+            #         except Exception as e:
+            #             Logger.error(f"[Orchestrator] Échec stockage embeddings : {e}")
 
         
+        # --- Consolidation des leçons (EntityLearner) ---
+        # try:
+        #     if self.runtime_state.learner:
+        #         consolidated = await self.runtime_state.learner.consolidate_lessons()
+        #         if consolidated > 0:
+        #             Logger.info(f"[Orchestrator] ✅ Consolidation déclenchée : {consolidated} groupe(s) traités.")
+        # except Exception as e:
+        #     Logger.error(f"[Orchestrator] Erreur lors de la consolidation : {e}")
         # --- RÉCUPÉRATION DES MARQUEURS D'EXÉCUTION DEPUIS RUNTIME_STATE ---
+                
         execution_markers = self.runtime_state.execution_markers
 
         # --- DÉCLENCHEMENT AUTO-LEARN (MARQUEURS) ---
@@ -923,6 +943,23 @@ class Orchestrator(Supervisor, Entity):
             Logger.debug("[Orchestrator] Heartbeat task cancelled.")
             raise
 
+    async def _invalidate_cache_for_mission(self, mission_id: str, signatures: List) -> None:
+        """Invalide le cache pour les signatures d'une mission."""
+        if not signatures:
+            return
+        try:
+            from core.cache import CacheManager
+            normalized_markers = CacheManager()._normalize_signatures(
+                [{"action": s.action, "object": s.object} for s in signatures]
+            )
+            if normalized_markers:
+                cache_mgr = self.runtime_state.cache_manager or CacheManager()
+                invalidated = await cache_mgr.invalidate(normalized_markers)
+                if invalidated > 0:
+                    Logger.debug(f"[Orchestrator] Cache invalidé pour {invalidated} entrée(s) suite à la mission {mission_id}")
+        except Exception as e:
+            Logger.warning(f"[Orchestrator] Échec de l'invalidation du cache : {e}")
+
     # =====================================================
     # CONFIGURATION RUNTIME
     # =====================================================
@@ -1032,6 +1069,19 @@ class Orchestrator(Supervisor, Entity):
         await self.provider_manager.initialize()
         self.runtime_state.is_configured = True
         Logger.set_runtime_state(self.runtime_state)
+
+        # --- Configuration du cache ---
+        cache_max_entries = payload.get("cache_max_entries", 1000)
+        cache_ttl_seconds = payload.get("cache_ttl_seconds", 7 * 24 * 3600)
+
+        from core.cache import CacheManager
+        cache_mgr = CacheManager()
+        cache_mgr.set_max_entries(cache_max_entries)
+        cache_mgr.set_ttl(cache_ttl_seconds)
+
+        # On stocke l'instance dans runtime_state pour que les autres composants puissent l'utiliser
+        self.runtime_state.cache_manager = cache_mgr
+        Logger.info(f"[Orchestrator] Cache configuré : max_entries={cache_max_entries}, ttl={cache_ttl_seconds}s")
 
         await self.propagate_event(Events.RUNTIME_CONFIGURED, {"available_models": validated_models})
         return ResponsePacket(type="response", status="success", payload={"models_count": len(validated_models)})

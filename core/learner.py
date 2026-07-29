@@ -16,7 +16,8 @@ from core.entity_manifest import get_entity_role
 from core.prompt_loader import get_prompt_loader
 from core.i18n import _
 import asyncio
-
+from core.cache import CacheManager
+from core.entity_learner import EntityLearner
 # =====================================================
 # MODÈLES PYDANTIC POUR L'EXTRACTION DE LEÇON
 # =====================================================
@@ -99,6 +100,13 @@ class Analyzer:
         # Parcourir l'arbre récursivement
         await self._traverse_tree(tree, episode.get("environment", "simulated"), episode.get("mission_id"))
 
+    async def _invalidate_advisor_cache(self, scope: str) -> None:
+        try:
+            cache_mgr = self.runtime_state.cache_manager or CacheManager()
+            await cache_mgr.invalidate([scope])
+        except Exception as e:
+            Logger.warning(f"[Analyzer] Échec de l'invalidation du cache Advisor : {e}")
+            
     async def _analyze_presentator_failure(self, episode: Dict[str, Any]) -> None:
         """
         Analyse l'échec éventuel du Presentator pour cet épisode.
@@ -124,15 +132,17 @@ class Analyzer:
                 role_description=get_entity_role("Presentator"),
                 error_reason=error_reason
             )
-            extracted = await asyncio.wait_for(
-                self.llm.generate_structured(
-                    prompt=prompt,
-                    schema=ExtractedLesson,
-                    mission_id=mission_id,
-                    tag="ExtractedLesson"
-                ),
-                timeout=30.0
-            )
+            # --- ENCAPSULATION DANS LE SCOPE ---
+            with self.runtime_state.execution_context.scope(mission_id=mission_id):
+                extracted = await asyncio.wait_for(
+                    self.llm.generate_structured(
+                        prompt=prompt,
+                        schema=ExtractedLesson,
+                        tag="ExtractedLesson"
+                        # Le mission_id est désormais récupéré automatiquement via le scope
+                    ),
+                    timeout=30.0
+                )
             scope = extracted.scope
             recommendation = extracted.recommendation
             keywords = extracted.keywords
@@ -153,6 +163,9 @@ class Analyzer:
             keywords=keywords,
             mission_id=mission_id
         )
+        await self._invalidate_advisor_cache(scope)
+
+        
 
     async def _traverse_tree(self, tree: ExecutionTree, environment: str, mission_id: Optional[str] = None) -> None:
         """
@@ -190,7 +203,7 @@ class Analyzer:
         Logger.warning(f"[Analyzer] Outcome non reconnu : {attempt.outcome}")
 
     async def _generate_avoid_lesson(self, attempt: PlanAttempt, goal: str, environment: str,
-                                     mission_id: Optional[str] = None) -> None:
+                                 mission_id: Optional[str] = None) -> None:
         """
         Génère une leçon de type 'avoid' à partir d'un échec.
         """
@@ -219,15 +232,16 @@ class Analyzer:
                 failure_reason=failure_reason,
                 pruned_attempt=pruned
             )
-            extracted = await asyncio.wait_for(
-                self.llm.generate_structured(
-                    prompt=prompt,
-                    schema=ExtractedLesson,
-                    mission_id=mission_id,
-                    tag="ExtractedLesson"
-                ),
-                timeout=30.0
-            )
+            # --- ENCAPSULATION DANS LE SCOPE ---
+            with self.runtime_state.execution_context.scope(mission_id=mission_id):
+                extracted = await asyncio.wait_for(
+                    self.llm.generate_structured(
+                        prompt=prompt,
+                        schema=ExtractedLesson,
+                        tag="ExtractedLesson"
+                    ),
+                    timeout=30.0
+                )
             scope = extracted.scope
             recommendation = extracted.recommendation
             keywords = extracted.keywords
@@ -246,6 +260,7 @@ class Analyzer:
             mission_id=mission_id,
             polarity="avoid"
         )
+        await self._invalidate_advisor_cache(scope)
 
         # Leçon complémentaire outil (si applicable)
         if failure_class in (FailureClass.EXECUTION_FAILURE, FailureClass.CONVERGENCE_FAILURE):
@@ -262,10 +277,11 @@ class Analyzer:
                         mission_id=mission_id,
                         polarity="avoid"
                     )
+                    await self._invalidate_advisor_cache(scope)
                     break
-
+                
     async def _generate_prefer_lesson(self, attempt: PlanAttempt, goal: str, environment: str,
-                                      mission_id: Optional[str] = None) -> None:
+                                  mission_id: Optional[str] = None) -> None:
         """
         Génère une leçon de type 'prefer' à partir d'un succès SURVENU APRÈS UN ÉCHEC.
         """
@@ -284,15 +300,16 @@ class Analyzer:
                 pruned_attempt=pruned,
                 proposed_plan_desc=proposed_plan_desc
             )
-            extracted = await asyncio.wait_for(
-                self.llm.generate_structured(
-                    prompt=prompt,
-                    schema=ExtractedLesson,
-                    mission_id=mission_id,
-                    tag="ExtractedLesson"
-                ),
-                timeout=30.0
-            )
+            # --- ENCAPSULATION DANS LE SCOPE ---
+            with self.runtime_state.execution_context.scope(mission_id=mission_id):
+                extracted = await asyncio.wait_for(
+                    self.llm.generate_structured(
+                        prompt=prompt,
+                        schema=ExtractedLesson,
+                        tag="ExtractedLesson"
+                    ),
+                    timeout=30.0
+                )
             scope = extracted.scope
             recommendation = extracted.recommendation
             keywords = extracted.keywords
@@ -311,7 +328,8 @@ class Analyzer:
             mission_id=mission_id,
             polarity="prefer"
         )
-
+        await self._invalidate_advisor_cache(scope)
+        
     def _prune_attempt_for_llm(self, attempt: PlanAttempt) -> str:
         """Réduit un PlanAttempt à une séquence légère pour le LLM."""
         pruned_nodes = []
@@ -352,30 +370,63 @@ class Analyzer:
 # =====================================================
 
 class Advisor:
-    def __init__(self, lesson_store: LessonStore, runtime_state, llm: Llm):
+    def __init__(
+        self,
+        lesson_store: LessonStore,
+        runtime_state,
+        llm: Llm,
+        cache_manager: Optional[CacheManager] = None
+    ):
+        if cache_manager is None:
+            Logger.warning("[Advisor] Aucun cache_manager fourni, utilisation d'une instance locale (non partagée).")
+            cache_manager = CacheManager()
         self.lesson_store = lesson_store
         self.runtime_state = runtime_state
         self.llm = llm
         self.advice_cache: Dict[str, str] = {}
         self.loader = get_prompt_loader()
-
+        self.cache_manager = cache_manager
+        
     async def prepare_advice(self, goal: str) -> None:
         advice = await self._llm_rerank_advice(["Planner", "Executor"], goal)
         self.advice_cache["Planner"] = advice
 
     async def get_advice(self, entity_types: List[str], goal: str) -> str:
-        if isinstance(entity_types, str):
-            entity_types = [entity_types]
-        return await self._llm_rerank_advice(entity_types, goal)
+        # Reranker désactivé pour l'instant.
+        # if isinstance(entity_types, str):
+        #     entity_types = [entity_types]
+        # return await self._llm_rerank_advice(entity_types, goal)
+        return ""  # <-- désactivé
 
     async def _llm_rerank_advice(self, entity_types: List[str], goal: str) -> str:
         effective_environment = getattr(self.runtime_state, "environment", "simulated")
 
-        candidates = self.lesson_store.get_active_lessons(entity_types, effective_environment)
-        if not candidates:
-            Logger.debug(f"[Advisor] Aucune leçon active pour {entity_types} (env={effective_environment}).")
-            return ""
+        # Récupérer d'abord les leçons consolidées
+        candidates = self.lesson_store.get_consolidated_lessons(entity_types, effective_environment)
 
+        # Fallback sur les brutes si aucune consolidée
+        if not candidates:
+            candidates = self.lesson_store.get_active_lessons(entity_types, effective_environment)
+            if candidates:
+                Logger.debug(f"[Advisor] Fallback sur {len(candidates)} leçons brutes (aucune consolidée).")
+            else:
+                Logger.debug(f"[Advisor] Aucune leçon (consolidée ou brute) pour {entity_types}.")
+                return ""
+        # --- 1. Construire la clé de cache ---
+        cache_params = {
+            "goal": goal.strip().lower(),
+            "entity_types": sorted(entity_types),
+            "environment": effective_environment,
+            "candidate_ids": sorted([str(c["id"]) for c in candidates])
+        }
+
+        # --- 2. Vérifier le cache ---
+        cached = await self.cache_manager.get("advisor", cache_params)
+        if cached is not None:
+            Logger.info(f"[Advisor] Cache hit pour {entity_types} - {goal[:30]}...")
+            return cached["advice"]
+
+        # --- 3. Exécuter le reranking (code existant) ---
         strictness_note = (
             "ENVIRONNEMENT RÉEL : sois strict, ne retiens que les leçons avec une confiance et un "
             "nombre de confirmations élevés — une fausse recommandation ici a un coût réel."
@@ -425,6 +476,7 @@ class Advisor:
             Logger.debug(f"[Advisor] Aucune leçon retenue par le reranker pour {entity_types}.")
             return ""
 
+        # --- 4. Formater la réponse (code existant, inchangé) ---
         by_polarity: Dict[str, Dict[str, List[Dict[str, Any]]]] = {"avoid": {}, "prefer": {}}
         for c in selected:
             polarity = c.get("polarity", "avoid")
@@ -465,9 +517,20 @@ class Advisor:
         if not blocks:
             return ""
 
-        Logger.info(f"[Advisor] {len(selected)} leçon(s) retenue(s) par le reranker pour {entity_types}.")
-        return "\n\n".join(blocks)
+        result = "\n\n".join(blocks)
 
+        # --- 5. Stocker le résultat dans le cache ---
+        markers = [str(c["id"]) for c in candidates]
+        await self.cache_manager.set(
+            "advisor",
+            cache_params,
+            {"advice": result},
+            invalidation_markers=markers
+        )
+        Logger.debug(f"[Advisor] Résultat stocké dans le cache pour {entity_types} - {goal[:30]}...")
+
+        Logger.info(f"[Advisor] {len(selected)} leçon(s) retenue(s) par le reranker pour {entity_types}.")
+        return result
 
 # =====================================================
 # LEARNER (Entité principale)
@@ -488,7 +551,16 @@ class Learner(Entity):
         self.runtime_state = runtime_state
         self.lesson_store = LessonStore()
         self.analyzer = Analyzer(self.lesson_store, self.llm, self.runtime_state)
-        self.advisor = Advisor(self.lesson_store, runtime_state, self.llm)
+        self.advisor = Advisor(
+            self.lesson_store,
+            runtime_state,
+            self.llm,
+            cache_manager=self.runtime_state.cache_manager  # <-- AJOUT
+        )
+        self.entity_learner = EntityLearner(
+            lesson_store=self.lesson_store,
+            cache_manager=self.runtime_state.cache_manager
+        )
         self.advice_cache: Dict[str, str] = {}
 
     async def process(self, command: str = "analyze", **kwargs) -> Any:
@@ -501,6 +573,13 @@ class Learner(Entity):
             return None
         else:
             raise ValueError(f"Commande learner inconnue : {command}")
+        
+    async def consolidate_lessons(self) -> int:
+        """Déclenche la consolidation des leçons (si le seuil est atteint)."""
+        count = await self.entity_learner.consolidate_if_needed()
+        if count > 0:
+            Logger.info(f"[Learner] Consolidation terminée : {count} groupe(s) traités.")
+        return count
 
     async def analyze_all_episodes(self, force: bool = False) -> int:
         if force:

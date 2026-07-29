@@ -1,10 +1,5 @@
-"""
-core/retriever.py
-=================
-Service de retrieval vectoriel des missions simples (MVP).
-Mise à jour : utilise le résumé sémantique (summary) et filtre par modèle d'embedding actif.
-             Utilise l'embedding_manager du runtime_state au lieu du singleton.
-"""
+# core/retriever.py
+# Version avec support de root_mission_id
 
 import asyncio
 from typing import List, Dict, Any, Optional, Set
@@ -13,21 +8,26 @@ from memory.mission_store import MissionStore
 from utils.logger import Logger
 from core.plan_models import MissionSignature
 from core.constants import RETRIEVAL_TOP_K, RETRIEVAL_THRESHOLD
-
+from core.cache import CacheManager
 
 class Retriever:
     def __init__(
         self,
         top_k: int = RETRIEVAL_TOP_K,
         threshold: float = RETRIEVAL_THRESHOLD,
-        runtime_state = None
+        runtime_state = None,
+        cache_manager: Optional[CacheManager] = None
     ):
+        if cache_manager is None:
+            Logger.warning("[Retriever] Aucun cache_manager fourni, utilisation d'une instance locale (non partagée).")
+            cache_manager = CacheManager()
         self.top_k = top_k
         self.threshold = threshold
         self.profile_store = MissionProfileStore()
         self.mission_store = MissionStore()
         self.runtime_state = runtime_state
-
+        self.cache_manager = cache_manager
+            
     async def retrieve(
         self,
         signatures: List[MissionSignature],
@@ -49,7 +49,30 @@ class Retriever:
         top_k = top_k or self.top_k
         threshold = threshold or self.threshold
 
-        # Récupération du modèle d'embedding actif depuis le runtime_state
+        # Normaliser les signatures pour la clé de cache
+        normalized_sigs = []
+        for s in signatures:
+            normalized_sigs.append({
+                "action": s.action.strip().lower(),
+                "object": s.object.strip().lower(),
+                "desired_state": s.desired_state.strip().lower() if s.desired_state else None
+            })
+
+        # Construire les paramètres de cache
+        cache_params = {
+            "signatures": normalized_sigs,
+            "top_k": top_k,
+            "threshold": threshold,
+            "embedding_model": self.runtime_state.active_embedding_model if self.runtime_state else None
+        }
+
+        # --- 1. Vérifier le cache ---
+        cached = await self.cache_manager.get("retrieval", cache_params)
+        if cached is not None:
+            Logger.info(f"[Retriever] Cache hit : {len(cached)} résultats retournés.")
+            return cached
+        
+        # --- 2. Exécuter le retrieval ---
         active_model = None
         embedding_manager = None
         if self.runtime_state:
@@ -63,7 +86,6 @@ class Retriever:
                 else:
                     Logger.debug(f"[Retriever] Embedding manager actif : {embedding_manager.active_provider_id}")
 
-        # Fallback sur le service d'embedding legacy si le manager n'est pas disponible
         if not embedding_manager or not embedding_manager.active_provider:
             Logger.warning("[Retriever] Fallback sur le service d'embedding legacy.")
             from core.embedding_service import get_embedding_service
@@ -75,7 +97,6 @@ class Retriever:
             signature_text = f"{sig.action} {sig.object}"
             
             try:
-                # Utilisation du manager ou fallback
                 if embedding_manager and embedding_manager.active_provider:
                     embedding = await embedding_manager.embed(signature_text)
                 else:
@@ -88,7 +109,7 @@ class Retriever:
                 query_embedding=embedding,
                 top_k=top_k,
                 threshold=threshold,
-                embedding_model=active_model  # <-- FILTRAGE PAR MODÈLE
+                embedding_model=active_model
             )
             Logger.debug(f"[Retriever] {len(raw_results)} résultats bruts pour '{signature_text}'")
 
@@ -101,7 +122,8 @@ class Retriever:
                         "score": score,
                         "matched_signature": signature_text,
                         "action": sig.action,
-                        "object": sig.object
+                        "object": sig.object,
+                        "root_mission_id": res.get("root_mission_id")  # <-- ON STOCKE LE root_mission_id
                     }
 
         if not all_candidates:
@@ -112,16 +134,24 @@ class Retriever:
 
         results = []
         for mission_id, data in all_candidates.items():
-            episode = self.mission_store.get_episode(mission_id)
-            if not episode:
-                Logger.warning(f"[Retriever] Mission {mission_id} introuvable dans episodes.")
-                continue
+            # Récupérer le root_mission_id depuis le profile
+            root_mission_id = data.get("root_mission_id") or mission_id
 
-            # Utilisation du résumé sémantique, fallback sur le goal
+            # Charger l'épisode depuis le root_mission_id (pour avoir le résumé global)
+            episode = self.mission_store.get_episode(root_mission_id)
+            if not episode:
+                Logger.warning(f"[Retriever] Mission racine {root_mission_id} (issue de {mission_id}) introuvable dans episodes.")
+                # Fallback sur l'ID du profile
+                episode = self.mission_store.get_episode(mission_id)
+                if not episode:
+                    Logger.warning(f"[Retriever] Mission {mission_id} introuvable dans episodes (fallback échoué).")
+                    continue
+
             summary = episode.get("summary") or episode.get("goal") or "Mission sans résumé"
 
             results.append({
-                "mission_id": mission_id,
+                "mission_id": root_mission_id,  # on retourne l'ID racine
+                "source_profile_id": mission_id,  # pour traçabilité
                 "goal": episode.get("goal"),
                 "summary": summary,
                 "score": data["score"],
@@ -147,8 +177,21 @@ class Retriever:
                 threshold=self.threshold,
                 embedding_model=active_model
             )
-        return results
 
+        # --- 3. Stocker les résultats dans le cache ---
+        if results:
+            await self.cache_manager.set(
+                "retrieval",
+                cache_params,
+                results,
+                invalidation_markers=self.cache_manager._normalize_signatures(
+                    [{"action": s.action, "object": s.object} for s in signatures]
+                )
+            )
+
+        return results
+    
+    
     async def retrieve_from_goal(
         self,
         goal: str,
@@ -167,7 +210,15 @@ async def retrieve_similar_missions(
     signatures: List[MissionSignature],
     top_k: int = RETRIEVAL_TOP_K,
     threshold: float = RETRIEVAL_THRESHOLD,
-    runtime_state = None
+    runtime_state = None,
+    cache_manager: Optional[CacheManager] = None
 ) -> List[Dict[str, Any]]:
-    retriever = Retriever(top_k=top_k, threshold=threshold, runtime_state=runtime_state)
+    if cache_manager is None:
+        cache_manager = CacheManager()
+    retriever = Retriever(
+        top_k=top_k,
+        threshold=threshold,
+        runtime_state=runtime_state,
+        cache_manager=cache_manager
+    )
     return await retriever.retrieve(signatures, top_k, threshold)
