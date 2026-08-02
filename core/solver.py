@@ -1,7 +1,10 @@
-# core/solver.py
-# Version avec stockage conditionnel des MissionProfiles
-# et gestion de is_novel / similar_missions
-# Intégration de root_mission_id
+"""
+core/solver.py
+==============
+Solver – exécute une mission en orchestrant Planner et Executor.
+Version avec enregistrement d'un DataProvider pour le registre,
+et activation explicite de la Progressive Disclosure.
+"""
 
 from typing import Optional, Any, Dict, List
 from utils.logger import Logger
@@ -25,6 +28,8 @@ from core.mission_compactor import MissionCompactor
 from core.runtime_state import RuntimeState
 from memory.mission_profile_store import MissionProfileStore
 import asyncio
+from core.discovery.providers.registry_provider import SolverRegistryProvider
+import json
 
 MAX_DEPTH = 10
 MAX_EXECUTION_TRIES = 3
@@ -32,13 +37,33 @@ MAX_PREEXECUTION_FAILURES = 3
 
 
 class Solver(Supervisor, Entity):
-    
-    def __init__(self, solver_id: str, goal: str, parent: Supervisor, provider_manager, runtime_state,
-             provider_id: str = None, model_id: str = None, llm: Optional[Llm] = None,
-             depth: int = 0, context: str = "", parent_step_id: str = None):
+    """
+    Solver – exécute une mission.
+    Hérite de Supervisor (pour la validation) et de Entity (pour l'identité et les DataProviders).
+    """
 
+    def __init__(
+        self,
+        solver_id: str,
+        goal: str,
+        parent: Supervisor,
+        provider_manager,
+        runtime_state,
+        provider_id: str = None,
+        model_id: str = None,
+        llm: Optional[Llm] = None,
+        depth: int = 0,
+        context: str = "",
+        parent_step_id: str = None
+    ):
         Supervisor.__init__(self)
-        Entity.__init__(self, name=solver_id, role="solver", llm=llm, parent=parent)
+        Entity.__init__(
+            self,
+            name=solver_id,
+            role="solver",
+            llm=llm,
+            parent=parent
+        )
 
         self.goal = goal
         self.provider_manager = provider_manager
@@ -51,9 +76,7 @@ class Solver(Supervisor, Entity):
         self.execution_tree = None
         self.current_attempt = None
         self.signatures = []
-
-        # Nouvelle variable pour mémoriser si un retrieval a eu lieu et son résultat
-        self._similar_missions = None  # None = pas encore défini, [] = retrieval fait mais vide
+        self._similar_missions = None
 
         if not self.llm and provider_id and model_id:
             self.llm = Llm(
@@ -71,8 +94,75 @@ class Solver(Supervisor, Entity):
         else:
             self.variable_registry = {}
 
-        self.planner = Planner(llm=self.llm, runtime_state=self.runtime_state)
+        # Enregistrement du DataProvider pour le registre
+        if self.runtime_state.discovery_engine:
+            registry_provider = SolverRegistryProvider(self)
+            self.register_data_provider("registry", registry_provider)
+            Logger.info(
+                _("[Solver:{id}] DataProvider 'registry' enregistré pour le Solver.")
+                .format(id=self.id)
+            )
+
+            # --- Activation explicite de la Progressive Disclosure ---
+            if not self.llm._discovery_enabled:
+                self.llm.enable_discovery(self.runtime_state.discovery_engine, self)
+                Logger.info(
+                    _("[Solver:{id}] Progressive Disclosure activée.")
+                    .format(id=self.id)
+                )
+
+        self.planner = Planner(
+            name=f"planner_{solver_id}",
+            llm=self.llm,
+            runtime_state=self.runtime_state,
+            parent=self
+        )
         self.executor = Executor(solver_node=self)
+
+    def _get_registry_metadata_view(self) -> Dict[str, Any]:
+        """Vue normalisée du registre (métadonnées uniquement)."""
+        view = {}
+        for key, info in self.variable_registry.items():
+            value = info.get("value")
+            hint = _("(donnée cachée, accessible via Progressive Disclosure)")
+            if isinstance(value, dict):
+                keys = list(value.keys())[:3]
+                hint = _("(objet JSON avec clés: {keys})").format(keys=", ".join(keys))
+            elif isinstance(value, list):
+                hint = _("(liste de {count} éléments)").format(count=len(value))
+            elif isinstance(value, str):
+                if len(value) > 100:
+                    hint = _("(chaîne de {length} caractères)").format(length=len(value))
+                else:
+                    hint = _("(chaîne: {preview}...)").format(preview=value[:50])
+            elif value is None:
+                hint = _("(null)")
+            else:
+                hint = _("(type: {type})").format(type=type(value).__name__)
+
+            view[key] = {
+                "description": info.get("description", _("Pas de description")),
+                "source": info.get("source", _("Inconnu")),
+                "timestamp": info.get("timestamp", "N/A"),
+                "type": self._get_type_string(value),
+                "value_hint": hint,
+            }
+        return view
+
+    def _get_type_string(self, value) -> str:
+        if value is None:
+            return "null"
+        if isinstance(value, bool):
+            return "bool"
+        if isinstance(value, (int, float)):
+            return "number"
+        if isinstance(value, str):
+            return "string"
+        if isinstance(value, list):
+            return "list"
+        if isinstance(value, dict):
+            return "object"
+        return "unknown"
 
     def assign_signatures(self, signatures: List[MissionSignature]) -> None:
         self.signatures = signatures
@@ -108,7 +198,6 @@ class Solver(Supervisor, Entity):
             try:
                 similar_missions_context = None
 
-                # 1. Extraction des signatures (si non fournies)
                 if not self.signatures:
                     try:
                         extractor = SignatureExtractor(llm=self.llm, runtime_state=self.runtime_state)
@@ -118,13 +207,11 @@ class Solver(Supervisor, Entity):
                     except Exception as e:
                         Logger.error(f"[Solver:{self.id}] Échec de SignatureExtractor : {e}")
 
-                # 2. RETRIEVAL + MISSIONCOMPACTOR
                 similar_missions_context = None
-                self._similar_missions = None  # réinitialisation
+                self._similar_missions = None
 
                 if self.signatures:
                     registry_entry = self.runtime_state.solver_registry.get(self.id)
-
                     if registry_entry and registry_entry.get("similar_missions") is not None:
                         similar = registry_entry["similar_missions"]
                         if similar:
@@ -153,8 +240,7 @@ class Solver(Supervisor, Entity):
                         except Exception as e:
                             Logger.error(f"[Solver:{self.id}] Échec du retrieval : {e}")
 
-                    # Mémoriser le résultat du retrieval
-                    self._similar_missions = similar  # peut être None ou une liste
+                    self._similar_missions = similar
 
                     if similar:
                         try:
@@ -171,10 +257,7 @@ class Solver(Supervisor, Entity):
                             )
                             compacted_advice = compacted.advice
                             is_novel = compacted.is_novel
-
-                            # Mise à jour du marqueur is_novel
                             self.runtime_state.update_marker("is_novel", is_novel)
-
                             if compacted_advice:
                                 similar_missions_context = compacted_advice
                                 Logger.info(f"[Solver:{self.id}] MissionCompactor a produit un conseil de {len(compacted_advice)} caractères. Nouveau ? {is_novel}")
@@ -187,11 +270,9 @@ class Solver(Supervisor, Entity):
                             temp_compactor = MissionCompactor()
                             similar_missions_context = temp_compactor._format_missions(similar)
                     else:
-                        # Aucune mission similaire trouvée → considérer comme nouvelle
                         self.runtime_state.update_marker("is_novel", True)
                         similar_missions_context = None
 
-                # Feasibility
                 with self.runtime_state.execution_context.scope(entity_name="Feasibility", entity_role="Solver"):
                     decision = await self._check_feasibility(similar_missions_context)
 
@@ -402,7 +483,6 @@ class Solver(Supervisor, Entity):
                 if success and final_result is not None:
                     self.execution_tree.status = "success"
 
-                    # --- STOCKAGE CONDITIONNEL DES MISSIONPROFILES ---
                     if self.signatures:
                         is_novel = self.runtime_state.execution_markers.get("is_novel", False)
                         should_store = False
@@ -410,7 +490,6 @@ class Solver(Supervisor, Entity):
                             should_store = True
                         else:
                             should_store = is_novel
-
                         if should_store:
                             asyncio.create_task(self._store_mission_profiles_async())
                         else:
@@ -458,6 +537,7 @@ class Solver(Supervisor, Entity):
     # =====================================================
     # MÉTHODES UTILITAIRES
     # =====================================================
+
     def _format_similar_missions(self, similar: List[Dict]) -> str:
         lines = []
         limit = RETRIEVAL_MAX_RESULTS_INJECTED
@@ -482,12 +562,13 @@ class Solver(Supervisor, Entity):
         )
         decision: FeasibilityDecision = await self.llm.generate_structured(
             prompt=prompt,
-            schema=FeasibilityDecision
+            schema=FeasibilityDecision,
+            tag="FeasibilityDecision",
+            mission_id=self.id
         )
         return decision
 
     async def _store_mission_profiles_async(self):
-        """Stocke les signatures de ce Solver en tant que MissionProfiles (asynchrone, non bloquant)."""
         if not self.signatures:
             return
         try:
@@ -498,8 +579,6 @@ class Solver(Supervisor, Entity):
             store = MissionProfileStore()
             active_model = embedding_manager.active_provider.model_name
             dimension = embedding_manager.dimension
-
-            # Récupérer le root_mission_id
             root_mission_id = self.runtime_state.current_mission_id or self.id
 
             for idx, sig in enumerate(self.signatures):
@@ -516,7 +595,7 @@ class Solver(Supervisor, Entity):
                     signature_count=len(self.signatures),
                     embedding_model=active_model,
                     embedding_dimension=dimension,
-                    root_mission_id=root_mission_id  # <-- NOUVEAU
+                    root_mission_id=root_mission_id
                 )
             Logger.info(f"[Solver:{self.id}] ✅ {len(self.signatures)} embedding(s) stocké(s) (root={root_mission_id}).")
         except Exception as e:

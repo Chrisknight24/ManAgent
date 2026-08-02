@@ -5,7 +5,7 @@ Stockage central de l'état runtime. Évite les variables globales
 et permet la configuration dynamique depuis le frontend Qt.
 """
 from core.i18n import _
-from typing import Dict,List, Optional
+from typing import Dict,List, Optional, Any
 from core.execution_context import ExecutionContext
 from embeddings.manager import EmbeddingProviderManager
 from utils.logger import Logger
@@ -50,7 +50,12 @@ class RuntimeState:
             "plan_rejected": False,
             "is_novel": False,
         }
-    
+
+        # --- DISCOVERY FRAMEWORK ---
+        self.cache_manager = None  # Sera initialisé par l'Orchestrator
+        self.discovery_llm = None   # LLM dédié pour les SemanticTools (ou None pour utiliser le LLM de l'entité)
+        self.discovery_engine = None  # Instance du DiscoveryEngine (initialisé dans orchestrator)            
+        
     def reset_execution_markers(self):
         """Réinitialise les marqueurs d'exécution pour une nouvelle mission."""
         self.execution_markers = {
@@ -79,4 +84,11 @@ class RuntimeState:
 
         Logger.debug(f"[RuntimeState] update_marker: {key} = {value} (current: {self.execution_markers.get(key)})")
 
+    def set_discovery_llm(self, llm):
+        """Définit le LLM à utiliser pour les SemanticTools du Discovery Framework."""
+        self.discovery_llm = llm
+
+    def set_discovery_engine(self, engine):
+        """Définit le DiscoveryEngine."""
+        self.discovery_engine = engine
         

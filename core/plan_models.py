@@ -4,7 +4,9 @@ plan_models.py
 Le contrat de données strict pour l'architecture 'Tout est Plan'.
 Mis à jour avec la méthode Stringified JSON pour les arguments d'outils,
 la logique conditionnelle par registre et la prévention des appels vides.
+Version avec héritage BaseDiscoverySchema pour la Progressive Disclosure.
 """
+
 import json
 from enum import Enum
 from typing import List, Dict, Any, Optional
@@ -12,7 +14,8 @@ from pydantic import BaseModel, Field, model_validator
 from core.constants import OrchestratorMode
 from core.i18n import _
 from core.execution_models import ExecutionTree
-from core.execution_models import ExecutionTree, FailureClass  # <--- NOUVEAU
+from core.execution_models import ExecutionTree, FailureClass
+from core.base_schema import BaseDiscoverySchema  # <-- NOUVEAU
 
 # =====================================================
 # ÉNUMÉRATIONS
@@ -26,14 +29,15 @@ class ExecutionStatus(str, Enum):
     PENDING = "pending"
     SUCCESS = "success"
     FAILED = "failed"
-    SKIPPED = "skipped"  # NOUVEAU : Pour marquer les étapes sautées par une condition false
+    SKIPPED = "skipped"
     MAX_RETRIES_REACHED = "max_retries_reached"
     RUNNING = "running"
 
 # =====================================================
-# NOUVEAU MODÈLE DE RÉFLEXION
+# MODÈLES (héritent désormais de BaseDiscoverySchema)
 # =====================================================
-class FeasibilityDecision(BaseModel):
+
+class FeasibilityDecision(BaseDiscoverySchema):
     """Décision initiale du Solver sur la faisabilité de l'objectif."""
     is_possible: bool = Field(
         ..., 
@@ -48,9 +52,7 @@ class FeasibilityDecision(BaseModel):
         description=_("La stratégie globale d'approche à transmettre au Planner. Laisser vide si is_possible est False.")
     )
 
-# =====================================================
-# MODÈLES DE PLANIFICATION
-# =====================================================
+
 class PlanStep(BaseModel):
     id: str = Field(..., description=_("Identifiant unique de l'étape (ex: step_1)"))
     description: str = Field(..., description=_("Ce que cette étape est censée accomplir"))
@@ -75,7 +77,6 @@ class PlanStep(BaseModel):
         description=_("Description de ce que représente cette donnée dans le registre.")
     )
 
-    # --- NOUVEAUTÉ : Logique Conditionnelle Directe ---
     execute_if: Optional[str] = Field(
         None,
         description=_("Condition déterministe STRICTEMENT booléenne. Ex: '$@_nom == True'.")
@@ -83,13 +84,10 @@ class PlanStep(BaseModel):
 
     @model_validator(mode='after')
     def validate_tool_integrity(self) -> 'PlanStep':
-        """Sécurité d'infrastructure : Empêche le LLM de générer un appel d'outil vide ou invalide."""
-        # 1. Vérification du nom de l'outil
         if self.type == StepType.TOOL_CALL:
             if not self.tool_name or not str(self.tool_name).strip():
                 raise ValueError(_("Un step de type 'tool_call' exige obligatoirement un 'tool_name' non vide."))
         
-        # 2. Validation stricte du Flux de Contrôle dans execute_if
         if self.execute_if:
             v_lower = self.execute_if.lower()
             if "_data" in v_lower:
@@ -101,7 +99,6 @@ class PlanStep(BaseModel):
                 
         return self
 
-    # --- Le Blackboarding (Variable Registry) --
     response_text: Optional[str] = Field(None)
     tool_name: Optional[str] = Field(None)
     tool_args_json: str = Field(default="{}")
@@ -116,7 +113,8 @@ class PlanStep(BaseModel):
         except Exception:
             return {}
     
-class Plan(BaseModel):
+
+class Plan(BaseDiscoverySchema):
     """Le plan global proposé par un Solver."""
     goal: str = Field(..., description=_("L'objectif global de ce plan"))
     steps: List[PlanStep] = Field(default_factory=list, description=_("Liste ordonnée des étapes à exécuter"))
@@ -124,47 +122,41 @@ class Plan(BaseModel):
     def is_complete(self) -> bool:
         return all(step.status in [ExecutionStatus.SUCCESS, ExecutionStatus.SKIPPED] for step in self.steps)
 
+
 class SolverResult(BaseModel):
     """Contrat de retour unifié du Solver vers l'Orchestrateur."""
     status: ExecutionStatus
     final_context: str 
     response: str = "" 
     error_reason: Optional[str] = None
-    
-    # ---> NOUVEAU : Remontée des données du sous-agent <---
     resolved_data: Optional[Dict[str, Any]] = Field(default_factory=dict, description=_("Données du registre local renvoyées au parent."))
     execution_tree: Optional[ExecutionTree] = None
-
-    # ---> NOUVEAU : Transport de la classe d'échec depuis l'Executor ---
     failure_class: Optional[FailureClass] = Field(
         None,
         description=_("Classe d'échec détectée par l'Executor (EXECUTION_FAILURE ou CONVERGENCE_FAILURE).")
     )
-
-    # ---> NOUVEAU : Blâme explicite (voir PlanAttempt.target_entity dans execution_models.py) ---
     target_entity: Optional[str] = Field(
         None,
         description=_("Entité tenue pour responsable, fixée par le code au point d'échec exact (Executor pour EXECUTION_FAILURE/CONVERGENCE_FAILURE).")
     )
 
+
 class MissionSignature(BaseModel):
-    """Représente une mission simple extraite du message utilisateur."""
     action: str = Field(..., description="L'action à effectuer (ex: ouvrir, fermer, lancer)")
     object: str = Field(..., description="L'objet de l'action (ex: chrome, excel, notepad)")
     desired_state: Optional[str] = Field(None, description="État final souhaité (optionnel, ex: ouvert, fermé)")
 
 
-class OrchestratorDecision(BaseModel):
+class OrchestratorDecision(BaseDiscoverySchema):
     type: OrchestratorMode = Field(..., description=_("Mode de traitement : direct ou mission"))
     output: str = Field(..., description=_("Réponse utilisateur directe OU description analytique de la mission."))
-    # NOUVEAU : liste des signatures extraites (peut être vide)
     signatures: List[MissionSignature] = Field(
         default_factory=list,
         description=_("Liste des missions simples extraites de la demande, si applicable.")
     )
 
-class ConvergenceDecision(BaseModel):
-    """Contrat de données strict pour l'évaluation de la convergence d'une étape par le LLM."""
+
+class ConvergenceDecision(BaseDiscoverySchema):
     is_convergent: bool = Field(
         ..., 
         description=_("True si le résultat réel de l'action remplit et valide l'output attendu, False sinon.")
@@ -174,8 +166,8 @@ class ConvergenceDecision(BaseModel):
         description=_("Analyse technique de la convergence ou explication précise de la divergence constatée.")
     )
 
-class CompactedAdvice(BaseModel):
-    """Résultat structuré du MissionCompactor."""
+
+class CompactedAdvice(BaseDiscoverySchema):
     advice: str = Field(..., description="Conseil stratégique (stratégies clés + pièges à éviter) pour le Planner.")
     is_novel: bool = Field(..., description="True si la mission actuelle semble réellement nouvelle (peu de patterns connus), False si elle est déjà bien couverte par les missions similaires.")
     confidence: float = Field(default=0.5, ge=0.0, le=1.0, description="Niveau de confiance du compactor dans son jugement (optionnel).")

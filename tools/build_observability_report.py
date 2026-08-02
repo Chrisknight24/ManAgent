@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-build_observability_report.py (v8.16)
+build_observability_report.py (v8.17)
 =====================================
-- Correction : chaque abstract_task affiche sa propre ConvergenceDecision
-  en filtrant par step_id.
-- Suppression des affichages redondants.
-- Recherche récursive des ConvergenceDecision dans les tentatives et _other_calls.
+- Ajout de la section Discovery (Progressive Disclosure)
+- Affichage du plan généré par l'Explorer (LLM call)
+- Affichage des étapes, outils, questions/réponses
+- Rattachement des découvertes aux entités et missions
 """
+
 import argparse
 import json
 import os
@@ -20,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.constants import RETRIEVAL_THRESHOLD, RETRIEVAL_TOP_K
 
 # =====================================================
-# CHARGEMENT DES DONNÉES (inchangé)
+# CHARGEMENT DES DONNÉES
 # =====================================================
 
 def load_episodes(db_path: str) -> List[Dict[str, Any]]:
@@ -70,6 +71,7 @@ def load_episodes(db_path: str) -> List[Dict[str, Any]]:
             "signatures": [],
             "_solver_preparations": {},
             "_solver_retrieval": {},
+            "_discovery_sessions": [],
         })
     return episodes
 
@@ -122,6 +124,7 @@ PRESENTATOR_TAGS = {"generate_text", "Presentator_report", "Presentator_error", 
 FEASIBILITY_TAGS = {"FeasibilityDecision", "SignatureExtractor"}
 PLANNING_TAGS = {"Plan", "RerankedLessons", "MissionCompactor"}
 CONVERGENCE_TAGS = {"ConvergenceDecision"}
+EXPLORER_PLAN_TAGS = {"explorer_plan_generation"}
 
 # =====================================================
 # UTILITAIRES
@@ -180,10 +183,6 @@ def _collect_attempts(tree, attempt_index, all_attempts):
                 _collect_attempts(child_tree, attempt_index, all_attempts)
 
 def build_solver_to_mission_map(episodes):
-    """
-    Parcourt tous les épisodes et construit un dictionnaire {solver_id: mission_id}
-    à partir des arbres d'exécution.
-    """
     solver_to_mission = {}
     for ep in episodes:
         mission_id = ep.get("mission_id")
@@ -192,13 +191,12 @@ def build_solver_to_mission_map(episodes):
         tree = ep.get("execution_tree")
         if not tree:
             continue
-        # Parcours récursif de l'arbre
         def traverse(node):
             if not node:
                 return
             sid = node.get("solver_id")
             if sid:
-                solver_to_mission[sid] = mission_id
+                solver_to_mission.setdefault(sid, mission_id)
             for attempt in node.get("attempts", []):
                 for step_node in attempt.get("nodes", []):
                     child = step_node.get("child_execution_tree")
@@ -208,11 +206,101 @@ def build_solver_to_mission_map(episodes):
     return solver_to_mission
 
 # =====================================================
+# NOUVEAU : RATTACHEMENT DES ÉVÉNEMENTS DISCOVERY
+# =====================================================
+
+def build_discovery_data(events: List[Dict], llm_calls: List[Dict]) -> Dict[str, Any]:
+    """
+    Extrait les événements Discovery et les organise par mission.
+    Chaque session contient :
+      - session_id, entity_id, entity_name, entity_role
+      - goal, data_type, target, technical_goal
+      - exit_policy, summary (RefinedContext)
+      - steps: liste des étapes
+      - explorer_plan_call: l'appel LLM qui a généré le plan (si présent)
+      - cache_hit: bool
+    """
+    discovery_events = [e for e in events if e.get("event", "").startswith("discovery.")]
+    sessions_by_id = {}
+
+    # Index des llm_calls par session_id
+    llm_calls_by_session = {}
+    for call in llm_calls:
+        tag = call.get("tag", "")
+        if tag in EXPLORER_PLAN_TAGS:
+            sid = call.get("session_id")
+            if sid:
+                llm_calls_by_session.setdefault(sid, []).append(call)
+
+    for ev in discovery_events:
+        session_id = ev.get("session_id")
+        if not session_id:
+            continue
+        if session_id not in sessions_by_id:
+            sessions_by_id[session_id] = {
+                "session_id": session_id,
+                "entity_id": ev.get("entity_id"),
+                "entity_name": ev.get("entity_name"),
+                "entity_role": ev.get("entity_role"),
+                "mission_id": ev.get("mission_id"),
+                "goal": None,
+                "data_type": None,
+                "target": None,
+                "technical_goal": None,
+                "exit_policy": None,
+                "summary": None,
+                "steps": [],
+                "cache_hit": False,
+                "explorer_plan_calls": llm_calls_by_session.get(session_id, []),
+                "start_time": None,
+                "end_time": None,
+            }
+        session = sessions_by_id[session_id]
+
+        if ev.get("event") == "discovery.session_start":
+            session["goal"] = ev.get("goal")
+            session["data_type"] = ev.get("data_type")
+            session["target"] = ev.get("target")
+            session["technical_goal"] = ev.get("technical_goal")
+            session["start_time"] = ev.get("ts")
+        elif ev.get("event") == "discovery.session_end":
+            session["exit_policy"] = ev.get("exit_policy")
+            session["summary"] = ev.get("summary")
+            session["end_time"] = ev.get("ts")
+        elif ev.get("event") == "discovery.step":
+            step = {
+                "step_id": ev.get("step_id"),
+                "step_type": ev.get("step_type"),
+                "description": ev.get("description"),
+                "tool_name": ev.get("tool_name"),
+                "question": ev.get("question"),
+                "result": ev.get("result", {}),
+                "timestamp": ev.get("ts"),
+            }
+            session["steps"].append(step)
+        elif ev.get("event") == "discovery.cache_hit":
+            session["cache_hit"] = True
+
+    # Organiser par mission
+    by_mission = {}
+    for session_id, session in sessions_by_id.items():
+        mission_id = session.get("mission_id")
+        if mission_id:
+            by_mission.setdefault(mission_id, []).append(session)
+
+    return {"by_mission": by_mission}
+
+def attach_discovery_to_episodes(episodes, discovery_data):
+    for ep in episodes:
+        mission_id = ep["mission_id"]
+        if mission_id in discovery_data["by_mission"]:
+            ep["_discovery_sessions"] = discovery_data["by_mission"][mission_id]
+
+# =====================================================
 # RATTACHEMENT DES APPELS LLM AUX TENTATIVES
 # =====================================================
 
 def attach_llm_calls_by_mission(episodes, llm_calls):
-    # 1. Regrouper les appels par mission_id (ceux qui en ont un)
     calls_by_mission = {}
     orphan_calls = []
     for call in llm_calls:
@@ -222,7 +310,6 @@ def attach_llm_calls_by_mission(episodes, llm_calls):
         else:
             orphan_calls.append(call)
 
-    # 2. Rattacher les appels aux épisodes
     ep_index = {ep["mission_id"]: ep for ep in episodes if ep.get("mission_id")}
 
     for mid, calls in calls_by_mission.items():
@@ -296,9 +383,6 @@ def attach_llm_calls_by_mission(episodes, llm_calls):
 
             _store_call_in_episode(ep, call, tag)
 
-    # 3. Fallback pour les appels orphelins (sans mission_id)
-    # On utilise un mapping solver_id -> mission_id construit à partir des épisodes
-    # mais on l'utilise UNIQUEMENT pour les appels qui n'ont pas de mission_id
     if orphan_calls:
         solver_to_mission = {}
         for ep in episodes:
@@ -313,7 +397,6 @@ def attach_llm_calls_by_mission(episodes, llm_calls):
                     return
                 sid = node.get("solver_id")
                 if sid:
-                    # On n'écrase pas les clés existantes (on pourrait avoir des doublons)
                     solver_to_mission.setdefault(sid, mission_id)
                 for attempt in node.get("attempts", []):
                     for step_node in attempt.get("nodes", []):
@@ -328,12 +411,7 @@ def attach_llm_calls_by_mission(episodes, llm_calls):
             if mission_id:
                 ep = ep_index.get(mission_id)
                 if ep:
-                    # On rattache l'appel à l'épisode (avec la logique existante)
-                    # mais on le met dans _other_calls pour debug
                     ep.setdefault("_other_calls", []).append(call)
-            else:
-                # On les met dans un dictionnaire global "unattached"
-                pass
 
 # =====================================================
 # RATTACHEMENT DES RETRIEVAL AUX SOLVERS
@@ -413,6 +491,10 @@ def build_data(db_path: str, events_path: str) -> Dict[str, Any]:
     attach_llm_calls_by_mission(episodes, llm_calls)
     attach_retrieval_to_episodes(episodes, retrieval_events)
 
+    # Discovery
+    discovery_data = build_discovery_data(events, llm_calls)
+    attach_discovery_to_episodes(episodes, discovery_data)
+
     for turn in session_turns:
         mission_id = turn.get("mission_id")
         if mission_id:
@@ -462,7 +544,7 @@ def render_html(data: Dict[str, Any]) -> str:
     return HTML_TEMPLATE.replace("__DATA_JSON__", json_blob)
 
 # =====================================================
-# GABARIT HTML COMPLET (v8.16)
+# GABARIT HTML COMPLET (v8.17)
 # =====================================================
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -571,7 +653,8 @@ h3.sub-title { font-size: 15px; font-weight: 800; text-transform: uppercase; let
 .badge--score-high { background: var(--success-bg); color: var(--success); }
 .badge--score-medium { background: #fef9e7; color: #b7950b; }
 .badge--score-low { background: var(--failure-bg); color: var(--failure); }
-.badge--cancelled { background: #fef3c7; color: #92400e; }  /* Orange doux */
+.badge--cancelled { background: #fef3c7; color: #92400e; }
+.badge--cache { background: #dbeafe; color: #1e40af; }
 
 .lesson-card.polarity-avoid { border-left: 6px solid var(--failure); }
 .lesson-card.polarity-prefer { border-left: 6px solid var(--success); }
@@ -725,6 +808,7 @@ h3.sub-title { font-size: 15px; font-weight: 800; text-transform: uppercase; let
 .entity-block--presentator { border-left-color: var(--accent-2); }
 .entity-block--feasibility { border-left-color: #e67e22; }
 .entity-block--preparation { border-left-color: #e67e22; }
+.entity-block--discovery { border-left-color: var(--accent-2); }
 .entity-block--other { border-left-color: #7f8c8d; }
 .entity-block__label {
   font-family: var(--mono);
@@ -736,7 +820,7 @@ h3.sub-title { font-size: 15px; font-weight: 800; text-transform: uppercase; let
   margin-bottom: 6px;
 }
 
-details.attempt, details.step, details.llm-call, details.plan-detail {
+details.attempt, details.step, details.llm-call, details.plan-detail, details.discovery-session {
   border: 1.5px solid var(--border);
   border-radius: 10px;
   background: var(--surface);
@@ -744,8 +828,11 @@ details.attempt, details.step, details.llm-call, details.plan-detail {
   box-shadow: var(--shadow-sm);
   transition: box-shadow .12s ease;
 }
-details.attempt:hover, details.step:hover, details.llm-call:hover { box-shadow: var(--shadow-md); }
-details.attempt > summary, details.step > summary, details.llm-call > summary, details.plan-detail > summary {
+details.attempt:hover, details.step:hover, details.llm-call:hover, details.discovery-session:hover {
+  box-shadow: var(--shadow-md);
+}
+details.attempt > summary, details.step > summary, details.llm-call > summary,
+details.plan-detail > summary, details.discovery-session > summary {
   padding: 12px 16px;
   cursor: pointer;
   list-style: none;
@@ -771,7 +858,7 @@ details > summary::-webkit-details-marker { display: none; }
   transition: transform .12s ease;
 }
 details[open] > summary .chevron { transform: rotate(90deg); }
-.attempt-body, .step-body, .llm-call-body, .plan-detail-body {
+.attempt-body, .step-body, .llm-call-body, .plan-detail-body, .discovery-body {
   padding: 6px 18px 16px 46px;
   font-size: 15px;
   color: var(--text-muted);
@@ -973,7 +1060,6 @@ function renderLlmCall(c) {
   const ok = c.success !== false;
   const durationStr = c.duration_ms ? formatDuration(c.duration_ms) : '';
   const tag = (c.tag || c.schema || '').trim();
-  // Par défaut fermé
   return `<details class="llm-call">
     <summary>
       <span class="chevron">▸</span>
@@ -996,6 +1082,87 @@ function renderLlmCalls(calls) {
 }
 
 // =====================================================
+// RENDU DISCOVERY (Progressive Disclosure)
+// =====================================================
+function renderDiscoverySessions(ep) {
+  const sessions = ep._discovery_sessions || [];
+  if (!sessions || sessions.length === 0) return '';
+
+  let html = `<div style="margin-top: 24px; border-top: 2px solid var(--border); padding-top: 16px;">
+    <h3 style="font-size: 18px; font-weight: 800; color: var(--accent-2); margin: 0 0 12px;">🔍 Découvertes (Progressive Disclosure)</h3>`;
+
+  sessions.forEach((s, idx) => {
+    const steps = s.steps || [];
+    const calls = s.explorer_plan_calls || [];
+
+    html += `<details class="discovery-session" ${idx === 0 ? 'open' : ''}>
+      <summary>
+        <span class="chevron">▸</span>
+        <span style="font-weight:700;">🧠 ${esc(s.entity_name || '?')} (${esc(s.entity_role || '?')})</span>
+        <span class="badge badge--entity">${esc(s.goal || '?')}</span>
+        <span class="badge badge--info" style="background:var(--accent-bg);color:var(--accent);">${esc(s.data_type || '?')} / ${esc(s.target || '?')}</span>
+        ${s.cache_hit ? '<span class="badge badge--cache">⚡ Cache</span>' : ''}
+        ${s.exit_policy ? `<span class="badge badge--${s.exit_policy === 'plan_completed' ? 'success' : 'failed'}">${esc(s.exit_policy)}</span>` : ''}
+        <span style="font-size:13px;color:var(--text-faint);font-family:var(--mono);margin-left:auto;">${steps.length} étapes</span>
+      </summary>
+      <div class="discovery-body">
+        <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 16px;font-size:14px;margin-bottom:12px;">
+          <div style="font-weight:600;color:var(--text-faint);">Goal technique</div>
+          <div style="font-family:var(--mono);">${esc(s.technical_goal || '—')}</div>
+          <div style="font-weight:600;color:var(--text-faint);">Data type</div>
+          <div>${esc(s.data_type || '—')}</div>
+          <div style="font-weight:600;color:var(--text-faint);">Target</div>
+          <div style="font-family:var(--mono);">${esc(s.target || '—')}</div>
+          <div style="font-weight:600;color:var(--text-faint);">Exit policy</div>
+          <div><span class="badge badge--${s.exit_policy === 'plan_completed' ? 'success' : 'failed'}">${esc(s.exit_policy || '—')}</span></div>
+        </div>
+
+        <!-- Plan généré par l'Explorer (LLM call) -->
+        ${calls.length ? `<div class="field-label">📐 Plan généré par l'Explorer</div>${renderLlmCalls(calls)}` : ''}
+
+        <!-- Étapes -->
+        ${steps.length ? `<div class="field-label" style="margin-top:12px;">🔄 Étapes exécutées</div>` : ''}
+        <div style="padding-left:8px;">
+        ${steps.map((step, i) => {
+          const result = step.result || {};
+          const success = result.success !== false;
+          let detailHtml = '';
+          if (step.step_type === 'tool') {
+            detailHtml = `<span class="step-tool">🔧 ${esc(step.tool_name || '?')}</span>
+                          <div style="font-size:13px;color:var(--text-muted);margin-top:4px;">
+                            <span style="font-weight:600;">Résultat :</span>
+                            ${success ? '<span style="color:var(--success);">✅ succès</span>' : '<span style="color:var(--failure);">❌ échec</span>'}
+                            ${result.data ? `<div style="font-family:var(--mono);font-size:12px;background:var(--surface-alt);padding:4px 8px;border-radius:4px;margin-top:4px;">${esc(typeof result.data === 'string' ? result.data : JSON.stringify(result.data))}</div>` : ''}
+                          </div>`;
+          } else if (step.step_type === 'semantic') {
+            detailHtml = `<div style="font-size:13px;color:var(--text-muted);"><span style="font-weight:600;">Question :</span> ${esc(step.question || '?')}</div>
+                          <div style="font-size:13px;color:var(--text-muted);"><span style="font-weight:600;">Réponse :</span> ${success ? esc(result.data || '—') : '<span style="color:var(--failure);">❌ échec</span>'}</div>`;
+          }
+          return `<div style="display:flex;gap:10px;padding:6px 0;border-bottom:1px solid var(--surface-alt);align-items:flex-start;">
+            <span style="font-family:var(--mono);font-size:12px;color:var(--text-faint);min-width:60px;">#${i+1}</span>
+            <div style="flex:1;">
+              <div style="font-weight:600;">${esc(step.description || '?')}</div>
+              ${detailHtml}
+            </div>
+            <span class="badge badge--${success ? 'success' : 'failed'}">${success ? 'OK' : 'KO'}</span>
+          </div>`;
+        }).join('')}
+        </div>
+
+        <!-- RefinedContext final -->
+        ${s.summary ? `<div style="margin-top:14px;padding:12px 16px;background:var(--accent-bg);border-radius:8px;border-left:4px solid var(--accent);">
+          <div style="font-weight:700;font-size:14px;color:var(--text);">📝 RefinedContext (connaissance acquise)</div>
+          <div style="white-space:pre-wrap;font-size:14px;color:var(--text-muted);margin-top:4px;">${esc(s.summary)}</div>
+        </div>` : ''}
+      </div>
+    </details>`;
+  });
+
+  html += `</div>`;
+  return html;
+}
+
+// =====================================================
 // RENDU RETRIEVAL
 // =====================================================
 function renderRetrievalSection(retrievals) {
@@ -1005,33 +1172,33 @@ function renderRetrievalSection(retrievals) {
     <div style="font-size:13px;color:var(--text-faint);margin-bottom:8px;font-family:var(--mono);">
       Top‑K : ${TOP_K} · Seuil : ${THRESHOLD.toFixed(2)}
     </div>`;
-  
+
   retrievals.forEach(r => {
     const score = r.score || 0;
     let scoreClass = 'score-low';
     let scoreLabel = 'Faible';
-    if (score >= THRESHOLD) { 
-      scoreClass = 'score-high'; 
-      scoreLabel = 'Élevée'; 
-    } else if (score >= THRESHOLD - 0.15) { 
-      scoreClass = 'score-medium'; 
-      scoreLabel = 'Moyenne'; 
+    if (score >= THRESHOLD) {
+      scoreClass = 'score-high';
+      scoreLabel = 'Élevée';
+    } else if (score >= THRESHOLD - 0.15) {
+      scoreClass = 'score-medium';
+      scoreLabel = 'Moyenne';
     }
-    
+
     const foundId = r.found_mission_id || r.mission_id;
-    // Résumé sémantique, fallback sur le goal si absent
     const summary = r.summary || r.goal || 'Mission sans résumé';
-    
+
     html += `<div class="retrieval-item">
       <span class="retrieval-item__goal">${esc(summary)}</span>
       <span class="retrieval-item__score retrieval-item__${scoreClass}">${score.toFixed(3)} (${scoreLabel})</span>
       <span class="retrieval-item__link" onclick="openMission('${esc(foundId)}')">↳ voir</span>
     </div>`;
   });
-  
+
   html += `</div>`;
   return html;
 }
+
 // =====================================================
 // RENDU RECURSIF DE L'ARBRE DES SOLVERS
 // =====================================================
@@ -1040,11 +1207,9 @@ function renderSolverTree(ep, tree) {
     const solverId = tree.solver_id;
     if (!solverId) return '';
 
-    // Récupère les préparations et retrieval pour ce solver
     const prepCalls = (ep._solver_preparations && ep._solver_preparations[solverId]) || [];
     const retrievalResults = (ep._solver_retrieval && ep._solver_retrieval[solverId]) || [];
 
-    // Extraire les signatures de l'appel SignatureExtractor si présent
     let extractedSignatures = [];
     prepCalls.forEach(c => {
         if (c.tag === 'SignatureExtractor' && c.response && c.response.signatures) {
@@ -1052,7 +1217,6 @@ function renderSolverTree(ep, tree) {
         }
     });
 
-    // Préparer un résumé du goal pour le titre
     const goal = tree.goal || 'Objectif non défini';
     const shortGoal = goal.length > 80 ? goal.substring(0, 80) + '…' : goal;
 
@@ -1064,7 +1228,6 @@ function renderSolverTree(ep, tree) {
       </span>
     </div>`;
 
-    // 1. SignatureExtractor (si présent)
     const sigCalls = prepCalls.filter(c => c.tag === 'SignatureExtractor');
     if (sigCalls.length) {
         html += `<div class="entity-block entity-block--preparation">
@@ -1082,24 +1245,20 @@ function renderSolverTree(ep, tree) {
         html += `</div>`;
     }
 
-    // 2. Retrieval
     if (retrievalResults.length) {
         html += renderRetrievalSection(retrievalResults);
     }
 
-        // 3. FeasibilityDecision
     const feasCalls = prepCalls.filter(c => c.tag === 'FeasibilityDecision');
     if (feasCalls.length) {
         html += `<div class="entity-block entity-block--feasibility">
           <div class="entity-block__label">📋 Évaluation de la faisabilité</div>`;
-        // Afficher chaque appel FeasibilityDecision
         for (const call of feasCalls) {
-            // On récupère la réponse pour extraire le refined_strategy
             const response = call.response || {};
             const isPossible = response.is_possible;
             const reason = response.reason || '';
             const refinedStrategy = response.refined_strategy || '';
-            
+
             html += `<div style="margin-bottom:12px;padding:8px 12px;background:var(--surface-alt);border-radius:8px;border-left:3px solid ${isPossible ? 'var(--success)' : 'var(--failure)'};">`;
             html += `<div style="font-weight:700;">${isPossible ? '✅ Faisable' : '❌ Non faisable'}</div>`;
             if (reason) {
@@ -1113,12 +1272,10 @@ function renderSolverTree(ep, tree) {
             }
             html += `</div>`;
         }
-        // On garde aussi les appels LLM complets (déjà rendus par renderLlmCalls)
         html += renderLlmCalls(feasCalls);
         html += `</div>`;
     }
 
-    // 4. Tentatives
     const attempts = (tree.attempts || []).map((a, i) => renderAttempt(a, i, ep)).join('');
     html += attempts;
 
@@ -1140,12 +1297,7 @@ function renderNode(node, ep) {
   }
   const nodeCalls = node._node_calls || [];
 
-  // Récupérer les ConvergenceDecision associées à ce step_id
   let convCalls = [];
-  // Chercher dans les tentatives de ce solver (parent) - mais en fait la convergence est dans l'enfant
-  // On va plutôt chercher dans all_attempts via ep ou dans _other_calls
-  // Méthode : on collecte toutes les ConvergenceDecision de toutes les tentatives de l'épisode
-  // qui ont step_id === node.step_id
   const allAttempts = [];
   function collectAttempts(tree) {
     if (!tree) return;
@@ -1157,7 +1309,6 @@ function renderNode(node, ep) {
     }
   }
   collectAttempts(ep.execution_tree);
-  // Filtrer les ConvergenceDecision des tentatives qui ont step_id === node.step_id
   for (let attempt of allAttempts) {
     if (attempt._convergence_calls) {
       for (let call of attempt._convergence_calls) {
@@ -1167,7 +1318,6 @@ function renderNode(node, ep) {
       }
     }
   }
-  // Si rien trouvé, chercher dans ep._other_calls
   if (convCalls.length === 0) {
     const otherCalls = ep._other_calls || [];
     for (let call of otherCalls) {
@@ -1177,7 +1327,6 @@ function renderNode(node, ep) {
     }
   }
 
-  // Dédoublonner
   const seen = new Set();
   const uniqueConv = convCalls.filter(c => {
     const key = c.ts + c.tag + (c.step_id || '');
@@ -1194,7 +1343,6 @@ function renderNode(node, ep) {
     </div>`;
   }
 
-  // Gestion du sous‑solver : si child_execution_tree existe, on le rend à l'intérieur
   let childHtml = '';
   if (node.child_execution_tree) {
       childHtml = `<div style="margin-top:12px; border-top: 1px dashed var(--border-strong); padding-top:12px;">
@@ -1289,7 +1437,6 @@ function renderMissionDetail(missionId) {
       <span>${analyzed}</span>
     </div>`;
 
-  // Signatures globales
   const signatures = ep.signatures || [];
   if (signatures.length > 0) {
     html += `<div class="context-signatures">
@@ -1305,13 +1452,15 @@ function renderMissionDetail(missionId) {
     html += `</div></div>`;
   }
 
-  // Arbre d'exécution : appel récursif
   const tree = ep.execution_tree;
   if (tree && tree.solver_id) {
     html += renderSolverTree(ep, tree);
   } else {
     html += '<div class="empty-state">Aucun arbre d\'exécution disponible.</div>';
   }
+
+  // --- SECTION DISCOVERY ---
+  html += renderDiscoverySessions(ep);
 
   // Presentator
   const presCalls = ep._presentator_calls || [];
@@ -1321,7 +1470,6 @@ function renderMissionDetail(missionId) {
     ${presCalls.length ? renderLlmCalls(presCalls) : '<div style="color:var(--text-faint);font-size:13.5px">Aucun appel capturé.</div>'}
   </div>`;
 
-  // Autres appels non rattachés (debug)
   const otherCalls = ep._other_calls || [];
   if (otherCalls.length) {
     html += `<div class="entity-block entity-block--other">
@@ -1512,7 +1660,7 @@ selectNav('sessions');
 # =====================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Génère le rapport d'observabilité HTML autonome (v8.16).")
+    parser = argparse.ArgumentParser(description="Génère le rapport d'observabilité HTML autonome (v8.17).")
     parser.add_argument("--db", default="memory.db")
     parser.add_argument("--events", default="observability/events.jsonl")
     parser.add_argument("--out", default="observability_report.html")

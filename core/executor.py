@@ -37,7 +37,6 @@ class Executor:
                         failure_class=FailureClass.USER_CANCELLED
                     )
 
-                # OBSERVABILITY : pousser le step_id pour cette étape
                 with self.solver.runtime_state.execution_context.scope(step_id=step.id):
                     node = ExecutionNode(
                         step_id=step.id,
@@ -113,9 +112,12 @@ class Executor:
                         failure_trace = self._build_failure_trace(
                             executed_steps_trace, step, _("Échec d'exécution de l'action"), step.result_context
                         )
+                        # On inclut la vue métadonnée du registre dans le contexte final
+                        registry_meta = self.solver._get_registry_metadata_view()
+                        final_context = accumulated_context + f"\n{failure_trace}\n\n--- Registre (métadonnées) ---\n{self._format_registry_view(registry_meta)}"
                         return SolverResult(
                             status=ExecutionStatus.FAILED,
-                            final_context=accumulated_context + f"\n{failure_trace}",
+                            final_context=final_context,
                             error_reason=_("Échec à l'étape {} : {}").format(step.id, step.result_context),
                             failure_class=FailureClass.EXECUTION_FAILURE,
                             target_entity="Executor"
@@ -135,6 +137,9 @@ class Executor:
                     if convergence.is_convergent:
                         Logger.info(f"[Executor] ✅ Étape [{step.id}] validée.")
                         step.status = ExecutionStatus.SUCCESS
+                        # On tronque éventuellement les gros résultats pour éviter de polluer le contexte
+                        if isinstance(execution_output, str) and len(execution_output) > 500:
+                            execution_output = execution_output[:500] + "... (tronqué)"
                         step.result_context = execution_output
                         node.status = ExecutionStatus.SUCCESS
                         node.actual_result = execution_output
@@ -170,9 +175,11 @@ class Executor:
                         failure_trace = self._build_failure_trace(
                             executed_steps_trace, step, _("Divergence de résultat (Non-convergence)"), convergence.reason
                         )
+                        registry_meta = self.solver._get_registry_metadata_view()
+                        final_context = accumulated_context + f"\n{failure_trace}\n\n--- Registre (métadonnées) ---\n{self._format_registry_view(registry_meta)}"
                         return SolverResult(
                             status=ExecutionStatus.FAILED,
-                            final_context=accumulated_context + f"\n{failure_trace}",
+                            final_context=final_context,
                             error_reason=_("Divergence détectée à l'étape {} : {}").format(step.id, convergence.reason),
                             failure_class=FailureClass.CONVERGENCE_FAILURE,
                             target_entity="Executor"
@@ -182,17 +189,47 @@ class Executor:
             final_user_text = self._interpolate_text(final_user_text)
 
             Logger.info("[Executor] 🎉 Fin de traitement : toutes les étapes ont convergé.")
+
+            # Construction du contexte final allégé
+            # 1. Résumé des étapes
+            steps_summary = "\n".join(executed_steps_trace) if executed_steps_trace else _("Aucune étape exécutée.")
+            # 2. Vue métadonnée du registre
+            registry_meta = self.solver._get_registry_metadata_view()
+            registry_text = self._format_registry_view(registry_meta)
+
+            final_context = (
+                _("=== RÉSUMÉ DE L'EXÉCUTION ===\n")
+                + steps_summary
+                + _("\n\n--- REGISTRE (MÉTADONNÉES) ---\n")
+                + registry_text
+            )
+
             return SolverResult(
                 status=ExecutionStatus.SUCCESS,
-                final_context=accumulated_context,
+                final_context=final_context,
                 response=final_user_text or _("Mission [{}] accomplie.").format(self.solver.id),
-                resolved_data=self.solver.variable_registry,
+                resolved_data=self.solver.variable_registry,  # On garde le registre complet pour le stockage, mais on ne l'affiche plus dans le contexte
                 failure_class=None
             )
 
         except Exception as e:
             Logger.error(f"[Executor] 🔥 Exception critique : {str(e)}")
             raise e
+
+    # =====================================================
+    # MÉTHODES PRIVÉES (inchangées sauf ajout de _format_registry_view)
+    # =====================================================
+
+    def _format_registry_view(self, registry_view: dict) -> str:
+        """Formate la vue métadonnée du registre en texte lisible."""
+        if not registry_view:
+            return _("(registre vide)")
+        lines = []
+        for key, meta in registry_view.items():
+            lines.append(f"- {key} : {meta.get('description', '')} (source: {meta.get('source', '')}, type: {meta.get('type', '')})")
+            lines.append(f"  hint: {meta.get('value_hint', '')}")
+        return "\n".join(lines)
+
 
     # =====================================================
     # MÉTHODES PRIVÉES (inchangées sauf si besoin)

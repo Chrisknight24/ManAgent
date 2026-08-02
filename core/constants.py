@@ -39,6 +39,16 @@ class Events:
 
     LEARNER_ANALYZE_STARTED = "learner.analyze_started"
     LEARNER_ANALYZE_FINISHED = "learner.analyze_finished"
+    # Discovery Framework
+    DISCOVERY_SESSION_START = "discovery.session_start"
+    DISCOVERY_SESSION_END = "discovery.session_end"
+    DISCOVERY_STEP = "discovery.step"
+    DISCOVERY_CACHE_HIT = "discovery.cache_hit"
+
+    # Dans Events
+    DISCOVERY_PLAN_GENERATION_START = "discovery.plan_generation_start"
+    DISCOVERY_PLAN_GENERATION_END = "discovery.plan_generation_end"
+    DISCOVERY_PLAN_GENERATION_ERROR = "discovery.plan_generation_error"
     
 class Providers:
     GEMINI = "gemini"
@@ -81,3 +91,9 @@ CACHE_TTL_SECONDS = 7 * 24 * 3600  # 7 jours
 # ENTITY LEARNER
 # =====================================================
 ENTITY_LEARNER_MIN_EVIDENCE = 3   # Nombre minimal d'évidences pour consolider un groupe
+
+# =====================================================
+# DISCOVERY FRAMEWORK
+# =====================================================
+DISCOVERY_MAX_ITERATIONS = 10      # Nombre maximum d'étapes dans une DiscoverySession
+DISCOVERY_CACHE_TTL = 7 * 24 * 3600  # 7 jours pour le cache des RefinedContexts

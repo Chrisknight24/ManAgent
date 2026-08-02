@@ -2,14 +2,27 @@
 llm.py
 ======
 Interface unifiée représentant un moteur cognitif (Le Cerveau).
-Encapsule les fournisseurs d'IA de manière "Stateless" pour éviter les conflits asynchrones.
+Version avec Progressive Disclosure via discovery_request imbriqué.
 """
 
+from __future__ import annotations
+
 import time
-from typing import Type, AsyncGenerator, List, Dict, Optional
+from typing import (
+    Type, AsyncGenerator, List, Dict, Optional, Union, Any,
+    TYPE_CHECKING
+)
 from pydantic import BaseModel
 from providers.provider_manager import ProviderManager
 from utils.logger import Logger
+from core.prompt_loader import get_prompt_loader
+from core.i18n import _
+
+if TYPE_CHECKING:
+    from core.entity import Entity
+    from core.discovery.data_provider import DataProvider
+    from core.discovery.models import DiscoveryRequest, RefinedContext
+
 
 class Llm:
     """
@@ -17,16 +30,46 @@ class Llm:
     Maintient son propre contexte de travail sans polluer le Provider partagé.
     """
 
-    def __init__(self, provider_manager: ProviderManager, provider_id: str, model_id: str, 
-                 system_prompt: str = "", runtime_state=None):
+    def __init__(
+        self,
+        provider_manager: ProviderManager,
+        provider_id: str,
+        model_id: str,
+        system_prompt: str = "",
+        runtime_state=None
+    ):
         self.provider_manager = provider_manager
         self.provider_id = provider_id
         self.model_id = model_id
         self.system_prompt = system_prompt
-        self.runtime_state = runtime_state  # <--- NOUVEAU
-        
-        # Le contexte cognitif local de ce cerveau
+        self.runtime_state = runtime_state
+
         self.context: List[Dict[str, str]] = []
+
+        # --- PROGRESSIVE DISCLOSURE ---
+        self._discovery_enabled = False
+        self._discovery_engine = None
+        self._entity = None
+        self._entity_id: Optional[str] = None
+        self._prompt_loader = get_prompt_loader()
+        self._max_iterations = 5
+
+    # =====================================================
+    # MÉTHODES PUBLIQUES
+    # =====================================================
+
+    def enable_discovery(self, engine, entity: 'Entity') -> None:
+        self._discovery_enabled = True
+        self._discovery_engine = engine
+        self._entity = entity
+        self._entity_id = entity.entity_id
+        Logger.info(
+            _("[Llm] Discovery activé pour {entity_id} avec {count} provider(s).")
+            .format(entity_id=self._entity_id, count=len(entity.get_data_providers()))
+        )
+
+    def update_discovery_providers(self, providers: Dict[str, 'DataProvider']) -> None:
+        pass
 
     def set_system_prompt(self, prompt: str):
         self.system_prompt = prompt
@@ -40,6 +83,166 @@ class Llm:
     def clear_context(self):
         self.context.clear()
 
+    # =====================================================
+    # MÉTHODES DE GÉNÉRATION
+    # =====================================================
+
+    async def generate_text(self, prompt: str, tag: Optional[str] = None) -> str:
+        provider = self.provider_manager.get_provider(self.provider_id)
+        if not provider:
+            raise RuntimeError(_("Provider {provider_id} introuvable.").format(provider_id=self.provider_id))
+
+        ephemeral_context = self._build_full_context()
+        ephemeral_context.append({"role": "user", "content": prompt})
+
+        provider.model_name = self.model_id
+
+        start_time = time.monotonic()
+        try:
+            response = await provider.generate_text(
+                prompt=prompt,
+                context=ephemeral_context
+            )
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            event_fields = {
+                "tag": tag or "generate_text",
+                "kind": "text",
+                "provider_id": self.provider_id,
+                "model_id": self.model_id,
+                "prompt": prompt,
+                "response": response,
+                "duration_ms": duration_ms,
+                "success": True
+            }
+            Logger.event("llm_call", **event_fields)
+            return response
+        except Exception as e:
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            event_fields = {
+                "tag": tag or "generate_text",
+                "kind": "text",
+                "provider_id": self.provider_id,
+                "model_id": self.model_id,
+                "prompt": prompt,
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "duration_ms": duration_ms,
+                "success": False
+            }
+            Logger.event("llm_call", **event_fields)
+            raise
+
+    async def stream(
+        self,
+        prompt: str,
+        tools: list = None,
+        tag: Optional[str] = None
+    ) -> AsyncGenerator[str | dict, None]:
+        provider = self.provider_manager.get_provider(self.provider_id)
+        if not provider:
+            raise RuntimeError(_("Provider {provider_id} introuvable.").format(provider_id=self.provider_id))
+
+        ephemeral_context = self._build_full_context()
+        ephemeral_context.append({"role": "user", "content": prompt})
+
+        provider.model_name = self.model_id
+
+        try:
+            async for chunk in provider.stream(
+                prompt=prompt,
+                context=ephemeral_context,
+                tools=tools or []
+            ):
+                yield chunk
+        except Exception as e:
+            Logger.event(
+                "llm_call",
+                tag=tag or "stream",
+                kind="stream",
+                provider_id=self.provider_id,
+                model_id=self.model_id,
+                prompt=prompt,
+                error=str(e),
+                error_type=type(e).__name__,
+                success=False
+            )
+            raise
+
+    async def generate_structured(
+        self,
+        prompt: str,
+        schema: Type[BaseModel],
+        tag: Optional[str] = None,
+        mission_id: Optional[str] = None
+    ) -> BaseModel:
+        """
+        Point d'entrée principal pour la génération structurée.
+        Gère la boucle de Progressive Discovery via discovery_request imbriqué.
+        """
+        if not self._discovery_enabled:
+            return await self._generate_structured_legacy(prompt, schema, tag, mission_id)
+
+        # --- MODE DISCOVERY ACTIVÉ ---
+        from core.base_schema import BaseDiscoverySchema
+
+        # Vérifier que le schéma hérite de BaseDiscoverySchema
+        if not issubclass(schema, BaseDiscoverySchema):
+            # Si le schéma n'hérite pas de BaseDiscoverySchema, on appelle la version legacy
+            Logger.warning(
+                _("[LLM] Le schéma {schema} n'hérite pas de BaseDiscoverySchema. "
+                  "La Progressive Disclosure ne peut pas être utilisée.")
+                .format(schema=schema.__name__)
+            )
+            return await self._generate_structured_legacy(prompt, schema, tag, mission_id)
+
+        # Construire le prompt enrichi avec la section Discovery
+        base_prompt = self._build_discovery_prompt(prompt, schema)
+        full_prompt = base_prompt
+
+        iteration = 0
+        while iteration < self._max_iterations:
+            iteration += 1
+
+            # Appeler le LLM avec le schéma cible (pas d'Union)
+            result = await self._call_llm_with_schema(
+                prompt=full_prompt,
+                schema=schema,
+                tag=tag,
+                mission_id=mission_id
+            )
+
+            # Vérifier si le résultat contient une demande de découverte
+            if hasattr(result, 'discovery_request') and result.discovery_request is not None:
+                discovery_req = result.discovery_request
+                Logger.debug(
+                    _("[LLM] Découverte demandée : data_type={data_type}, target={target}, technical_goal={technical_goal}")
+                    .format(
+                        data_type=discovery_req.data_type,
+                        target=discovery_req.target,
+                        technical_goal=discovery_req.technical_goal
+                    )
+                )
+
+                # Exécuter la découverte
+                refined = await self._execute_discovery(discovery_req)
+
+                # Enrichir le prompt et reboucler
+                full_prompt = base_prompt + f"\n\n[RÉSULTAT DE L'INVESTIGATION]\n{refined.summary}"
+                continue
+
+            # Pas de demande de découverte → retourner le résultat
+            Logger.debug(_("[LLM] Réponse finale reçue (type: {schema})").format(schema=schema.__name__))
+            return result
+
+        raise RuntimeError(
+            _("Nombre maximum d'itérations ({max_iterations}) atteint sans réponse finale.")
+            .format(max_iterations=self._max_iterations)
+        )
+
+    # =====================================================
+    # MÉTHODES INTERNES
+    # =====================================================
+
     def _build_full_context(self) -> List[Dict[str, str]]:
         full_context = []
         if self.system_prompt:
@@ -47,153 +250,239 @@ class Llm:
         full_context.extend(self.context)
         return full_context
 
-    async def generate_text(self, prompt: str, tag: Optional[str] = None) -> str:
-        Logger.debug(f"[LLM] Inférence texte demandée ({self.provider_id}/{self.model_id})")
+    def _emit_llm_event(self, tag: str, prompt: str, response: Optional[BaseModel] = None,
+                        error: Optional[Exception] = None, duration_ms: Optional[int] = None,
+                        mission_id: Optional[str] = None, schema_name: Optional[str] = None,
+                        context: Optional[List[Dict]] = None, kind: str = "structured"):
+        event_fields = {
+            "tag": tag or "llm_call",
+            "kind": kind,
+            "provider_id": self.provider_id,
+            "model_id": self.model_id,
+            "prompt": prompt,
+        }
+        if schema_name:
+            event_fields["schema"] = schema_name
+        if response is not None:
+            event_fields["response"] = response.model_dump(mode='json')
+        if error is not None:
+            event_fields["error"] = str(error)
+            event_fields["error_type"] = type(error).__name__
+            event_fields["success"] = False
+        else:
+            event_fields["success"] = True
+        if duration_ms is not None:
+            event_fields["duration_ms"] = duration_ms
+        if mission_id is not None:
+            event_fields["mission_id"] = mission_id
+        if context is not None:
+            event_fields["context"] = context
+        Logger.event("llm_call", **event_fields)
+
+    async def _generate_structured_legacy(
+        self,
+        prompt: str,
+        schema: Type[BaseModel],
+        tag: Optional[str] = None,
+        mission_id: Optional[str] = None
+    ) -> BaseModel:
+        """Version originale (sans Discovery)."""
         provider = self.provider_manager.get_provider(self.provider_id)
         if not provider:
-            raise RuntimeError(f"Provider {self.provider_id} introuvable.")
-        
+            raise RuntimeError(_("Provider {provider_id} introuvable.").format(provider_id=self.provider_id))
+
         ephemeral_context = self._build_full_context()
         ephemeral_context.append({"role": "user", "content": prompt})
-        
-        text_prompt = "\n".join([f"{m['role'].upper()}: {m['content']}" for m in ephemeral_context])
+
         provider.model_name = self.model_id
 
-        # --- Récupération auto du mission_id depuis le contexte ---
-        mission_id = None
-        if self.runtime_state and hasattr(self.runtime_state, 'execution_context'):
-            mission_id = self.runtime_state.execution_context.get("mission_id")
-
-        event_tag = tag or "generate_text"
-        started = time.monotonic()
+        start_time = time.monotonic()
         try:
-            response = await provider.generate_response(text_prompt)
-            Logger.event(
-                "llm_call",
-                mission_id=mission_id,
-                tag=event_tag,
-                kind="text",
-                provider_id=self.provider_id,
-                model_id=self.model_id,
-                prompt=text_prompt,
-                response=response,
-                duration_ms=int((time.monotonic() - started) * 1000),
-                success=True
-            )
-            return response
-        except Exception as e:
-            Logger.event(
-                "llm_call",
-                mission_id=mission_id,
-                tag=event_tag,
-                kind="text",
-                provider_id=self.provider_id,
-                model_id=self.model_id,
-                prompt=text_prompt,
-                error=str(e),
-                error_type=type(e).__name__,
-                duration_ms=int((time.monotonic() - started) * 1000),
-                success=False
-            )
-            raise
-
-    async def generate_structured(self, prompt: str, schema: Type[BaseModel], tag: Optional[str] = None,
-                                  mission_id: Optional[str] = None) -> BaseModel:
-        Logger.debug(f"[LLM] Inférence structurée demandée : {schema.__name__}")
-
-        # --- Récupération auto du mission_id si non fourni ---
-        if mission_id is None and self.runtime_state and hasattr(self.runtime_state, 'execution_context'):
-            mission_id = self.runtime_state.execution_context.get("mission_id")
-
-        event_tag = tag or schema.__name__
-        full_context = self._build_full_context()
-        started = time.monotonic()
-        try:
-            result = await self.provider_manager.generate_structured_output(
+            result = await provider.generate_structured_output(
                 prompt=prompt,
-                provider_id=self.provider_id,
-                model_id=self.model_id,
                 response_schema=schema,
-                context=full_context
+                context=ephemeral_context
             )
-            Logger.event(
-                "llm_call",
-                mission_id=mission_id,
-                tag=event_tag,
-                kind="structured",
-                schema=schema.__name__,
-                provider_id=self.provider_id,
-                model_id=self.model_id,
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            self._emit_llm_event(
+                tag=tag or schema.__name__,
                 prompt=prompt,
-                context=full_context,
-                response=result.model_dump(mode='json') if hasattr(result, "model_dump") else str(result),
-                duration_ms=int((time.monotonic() - started) * 1000),
-                success=True
+                response=result,
+                duration_ms=duration_ms,
+                mission_id=mission_id,
+                schema_name=schema.__name__,
+                context=ephemeral_context,
+                kind="structured"
             )
             return result
         except Exception as e:
-            Logger.event(
-                "llm_call",
-                mission_id=mission_id,
-                tag=event_tag,
-                kind="structured",
-                schema=schema.__name__,
-                provider_id=self.provider_id,
-                model_id=self.model_id,
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            self._emit_llm_event(
+                tag=tag or schema.__name__,
                 prompt=prompt,
-                context=full_context,
-                error=str(e),
-                error_type=type(e).__name__,
-                duration_ms=int((time.monotonic() - started) * 1000),
-                success=False
+                error=e,
+                duration_ms=duration_ms,
+                mission_id=mission_id,
+                schema_name=schema.__name__,
+                context=ephemeral_context,
+                kind="structured"
             )
             raise
 
-    async def stream(self, prompt: str, tools: list = None, tag: Optional[str] = None) -> AsyncGenerator[str | dict, None]:
-        Logger.debug(f"[LLM] Inférence stream demandée avec {len(tools) if tools else 0} outils.")
+    async def _call_llm_with_schema(
+        self,
+        prompt: str,
+        schema: Type[BaseModel],
+        tag: Optional[str] = None,
+        mission_id: Optional[str] = None
+    ) -> BaseModel:
+        """Appelle le provider avec un schéma unique (pas d'Union)."""
+        provider = self.provider_manager.get_provider(self.provider_id)
+        if not provider:
+            raise RuntimeError(_("Provider {provider_id} introuvable.").format(provider_id=self.provider_id))
 
-        mission_id = None
-        if self.runtime_state and hasattr(self.runtime_state, 'execution_context'):
-            mission_id = self.runtime_state.execution_context.get("mission_id")
+        ephemeral_context = self._build_full_context()
+        ephemeral_context.append({"role": "user", "content": prompt})
 
-        event_tag = tag or "stream"
-        started = time.monotonic()
-        chunk_count = 0
+        provider.model_name = self.model_id
+
+        start_time = time.monotonic()
         try:
-            async for chunk in self.provider_manager.stream_response(
-                message=prompt,
-                provider_id=self.provider_id,
-                model_id=self.model_id,
-                context=self._build_full_context(),
-                tools=tools
-            ):
-                chunk_count += 1
-                yield chunk
-            Logger.event(
-                "llm_call",
-                mission_id=mission_id,
-                tag=event_tag,
-                kind="stream",
-                provider_id=self.provider_id,
-                model_id=self.model_id,
+            result = await provider.generate_structured_output(
                 prompt=prompt,
-                chunk_count=chunk_count,
-                duration_ms=int((time.monotonic() - started) * 1000),
-                success=True
+                response_schema=schema,
+                context=ephemeral_context
             )
-        except Exception as e:
-            Logger.event(
-                "llm_call",
-                mission_id=mission_id,
-                tag=event_tag,
-                kind="stream",
-                provider_id=self.provider_id,
-                model_id=self.model_id,
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            effective_tag = tag or schema.__name__
+            self._emit_llm_event(
+                tag=effective_tag,
                 prompt=prompt,
-                chunk_count=chunk_count,
-                error=str(e),
-                error_type=type(e).__name__,
-                duration_ms=int((time.monotonic() - started) * 1000),
-                success=False
+                response=result,
+                duration_ms=duration_ms,
+                mission_id=mission_id,
+                schema_name=schema.__name__,
+                context=ephemeral_context,
+                kind="structured"
+            )
+            return result
+        except Exception as e:
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            self._emit_llm_event(
+                tag=tag or schema.__name__,
+                prompt=prompt,
+                error=e,
+                duration_ms=duration_ms,
+                mission_id=mission_id,
+                schema_name=schema.__name__,
+                context=ephemeral_context,
+                kind="structured"
             )
             raise
+
+    async def _execute_discovery(self, discovery_req: 'DiscoveryRequest') -> 'RefinedContext':
+        """Exécute une découverte à partir d'un DiscoveryRequest."""
+        from core.discovery.models import RefinedContext
+
+        if not self._discovery_engine:
+            raise RuntimeError(_("Discovery activé mais _discovery_engine est None."))
+
+        # Récupérer l'Explorer correspondant
+        explorer = self._discovery_engine.get_explorer(discovery_req.data_type)
+        if explorer is None:
+            raise ValueError(_("Aucun Explorer enregistré pour le type '{data_type}'").format(
+                data_type=discovery_req.data_type
+            ))
+
+        # Vérifier que le technical_goal est supporté
+        available_goals = explorer.get_available_goals()
+        if discovery_req.technical_goal not in available_goals:
+            raise ValueError(
+                _("Le goal technique '{technical_goal}' n'est pas supporté par l'Explorer {data_type}. Goals disponibles : {goals}")
+                .format(
+                    technical_goal=discovery_req.technical_goal,
+                    data_type=discovery_req.data_type,
+                    goals=", ".join(available_goals)
+                )
+            )
+
+        # Construire la signature
+        signature = explorer.create_signature(discovery_req.technical_goal, discovery_req.target)
+
+        # Vérifier le cache
+        cached = await self._discovery_engine.get_refined_context(signature)
+        if cached:
+            Logger.debug(_("[LLM] Cache hit pour la signature {signature}").format(signature=signature))
+            return cached
+
+        # Cache miss → générer le plan avec l'Explorer
+        plan = await explorer.generate_plan(
+            goal=discovery_req.goal,
+            technical_goal=discovery_req.technical_goal,
+            target=discovery_req.target,
+            llm=self  # <-- on passe le LLM de l'entité
+        )
+
+        # Exécuter la découverte
+        refined = await self._discovery_engine.start_discovery(
+            entity_id=self._entity_id,
+            plan=plan,
+            llm=self
+        )
+
+        return refined
+
+    def _build_discovery_prompt(self, original_prompt: str, schema: Type[BaseModel]) -> str:
+        """Construit le prompt enrichi avec la section Discovery."""
+        from core.discovery.data_provider import DataProvider
+
+        if not self._discovery_engine:
+            raise RuntimeError(_("Impossible de construire le prompt Discovery : _discovery_engine est None."))
+        if not self._entity:
+            raise RuntimeError(_("Aucune entité associée au LLM pour construire le prompt."))
+
+        schema_desc = self._get_schema_description(schema)
+
+        data_types_info = {}
+        for provider_name, provider in self._entity.get_data_providers().items():
+            data_type = provider.get_data_type()
+            explorer = self._discovery_engine.get_explorer(data_type)
+            if not explorer:
+                Logger.warning(_("Aucun Explorer pour le type '{data_type}' (provider: {provider_name})").format(
+                    data_type=data_type, provider_name=provider_name
+                ))
+                continue
+            goals = explorer.get_available_goals()
+            targets = provider.get_targets()
+            data_types_info[provider_name] = {
+                "data_type": data_type,
+                "goals": goals,
+                "targets": targets
+            }
+
+        discovery_section = self._prompt_loader.load(
+            "discovery_injection.md",
+            lang=getattr(self.runtime_state, "language", "en"),
+            schema_description=schema_desc,
+            data_types_info=data_types_info
+        )
+
+        return original_prompt + "\n\n" + discovery_section
+
+    def _get_schema_description(self, schema: Type[BaseModel]) -> str:
+        json_schema = schema.model_json_schema()
+        lines = []
+        properties = json_schema.get("properties", {})
+        required = json_schema.get("required", [])
+        for prop_name, prop_schema in properties.items():
+            if prop_name == "discovery_request":
+                lines.append(
+                    f"- `discovery_request` (object) **optionnel**: "
+                    f"Remplissez ce champ UNIQUEMENT si vous avez besoin d'investiguer une donnée."
+                )
+                continue
+            prop_type = prop_schema.get("type", "any")
+            prop_desc = prop_schema.get("description", "")
+            required_marker = _("**requis**") if prop_name in required else _("optionnel")
+            lines.append(f"- `{prop_name}` ({prop_type}) {required_marker}: {prop_desc}")
+        return "\n".join(lines)

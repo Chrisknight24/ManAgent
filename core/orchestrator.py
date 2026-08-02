@@ -1083,5 +1083,12 @@ class Orchestrator(Supervisor, Entity):
         self.runtime_state.cache_manager = cache_mgr
         Logger.info(f"[Orchestrator] Cache configuré : max_entries={cache_max_entries}, ttl={cache_ttl_seconds}s")
 
+        from core.discovery import DiscoveryEngine, RegistryExplorer
+        if not self.runtime_state.discovery_engine:
+            self.runtime_state.discovery_engine = DiscoveryEngine(self.runtime_state)
+            registry_explorer = RegistryExplorer(self.runtime_state)
+            self.runtime_state.discovery_engine.register_explorer(registry_explorer)
+            Logger.info("[Orchestrator] DiscoveryEngine initialisé avec RegistryExplorer.")
+            
         await self.propagate_event(Events.RUNTIME_CONFIGURED, {"available_models": validated_models})
         return ResponsePacket(type="response", status="success", payload={"models_count": len(validated_models)})
