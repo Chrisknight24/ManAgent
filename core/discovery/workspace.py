@@ -7,7 +7,7 @@ Gestionnaire du Workspace (mémoire temporaire).
 from typing import List, Optional, Dict, Any
 from core.discovery.models import WorkspaceEntry, RefinedContext, ExitPolicy
 from utils.logger import Logger
-
+import json
 
 class Workspace:
     """
@@ -25,12 +25,17 @@ class Workspace:
         self,
         step_id: str,
         question: str,
-        answer: str,
+        answer: Any,  # <-- changer le type en Any
         tool_name: Optional[str] = None,
         tool_args_raw: Optional[Dict[str, Any]] = None,
         tool_result: Optional[Dict[str, Any]] = None
     ) -> None:
-        """Ajoute une entrée au Workspace."""
+        # Convertir answer en str si nécessaire
+        if not isinstance(answer, str):
+            try:
+                answer = json.dumps(answer, ensure_ascii=False, default=str)
+            except Exception:
+                answer = str(answer)
         entry = WorkspaceEntry(
             step_id=step_id,
             question=question,
@@ -71,7 +76,8 @@ class Workspace:
         signature: str,
         data_type: str,
         target: str,
-        goal: str
+        goal: str,
+        technical_goal: str  # <-- NOUVEAU
     ) -> RefinedContext:
         """
         Produit un RefinedContext à partir du Workspace.
@@ -84,6 +90,7 @@ class Workspace:
             data_type=data_type,
             target=target,
             goal=goal,
+            technical_goal=technical_goal,  # <-- NOUVEAU
             entries=self._entries.copy(),
             summary=self._summary,
             exit_policy=self._exit_policy or ExitPolicy.PLAN_COMPLETED

@@ -3,8 +3,10 @@ core/discovery/explorers/registry_explorer.py
 =============================================
 Explorer pour le registre des variables.
 Génère un plan d'investigation en utilisant un LLM dédié.
+Version avec data_provider et data_context (partage implicite).
 """
 
+import json
 from typing import Dict, Any, List, Optional
 from core.discovery.base_explorer import BaseExplorer
 from core.discovery.models import DiscoveryPlan, DiscoveryStep, StepType, ExplorerStep
@@ -15,6 +17,7 @@ from core.i18n import _
 from core.constants import Events
 from utils.logger import Logger
 from pydantic import BaseModel, Field
+from core.discovery.data_provider import DataProvider
 
 
 class ExplorerPlanOutput(BaseModel):
@@ -32,11 +35,7 @@ class RegistryExplorer(BaseExplorer):
         super().__init__(runtime_state)
         self._data_type = "registry"
         self._prompt_loader = get_prompt_loader()
-        self.llm = llm  # LLM dédié pour la génération de plan
-
-    # =====================================================
-    # MÉTHODES D'INTERFACE
-    # =====================================================
+        self.llm = llm
 
     def get_data_type(self) -> str:
         return self._data_type
@@ -48,12 +47,12 @@ class RegistryExplorer(BaseExplorer):
         return [
             {
                 "name": "list_keys",
-                "description": _("Retourne la liste des noms de variables disponibles."),
+                "description": _("Retourne la liste des noms de variables disponibles. Aucun paramètre requis."),
                 "parameters": {"type": "object", "properties": {}, "required": []}
             },
             {
                 "name": "describe_value",
-                "description": _("Retourne les métadonnées d'une variable (type, description, source)."),
+                "description": _("Retourne les métadonnées d'une variable (type, description, source). Paramètre requis : 'target' (le nom de la variable)."),
                 "parameters": {
                     "type": "object",
                     "properties": {"target": {"type": "string"}},
@@ -62,7 +61,7 @@ class RegistryExplorer(BaseExplorer):
             },
             {
                 "name": "inspect_value",
-                "description": _("Retourne une portion de la valeur brute d'une variable (paginée)."),
+                "description": _("Retourne une portion de la valeur brute d'une variable (paginée). Paramètres requis : 'target' (le nom de la variable), optionnel : 'offset' et 'limit'."),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -75,12 +74,7 @@ class RegistryExplorer(BaseExplorer):
             }
         ]
 
-    # =====================================================
-    # EXÉCUTION DES OUTILS
-    # =====================================================
-
     async def execute_tool(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Exécute un outil du registre."""
         try:
             if tool_name == "list_keys":
                 return await self._list_keys()
@@ -98,20 +92,19 @@ class RegistryExplorer(BaseExplorer):
             Logger.error(f"[RegistryExplorer] {_('Erreur {tool_name}')}: {e}".format(tool_name=tool_name))
             return {"success": False, "data": str(e)}
 
-    # =====================================================
-    # GÉNÉRATION DE PLAN (AVEC VRAI LLM)
-    # =====================================================
-
-    async def generate_plan(self, goal: str, technical_goal: str, target: str, llm: Optional[Llm] = None) -> DiscoveryPlan:
-        """
-        Génère un plan d'investigation en utilisant le LLM fourni ou celui de l'Explorer.
-        """
-        # Utiliser le LLM passé en priorité, sinon self.llm
+    async def generate_plan(
+        self,
+        goal: str,
+        technical_goal: str,
+        target: str,
+        llm: Optional[Llm] = None,
+        data_provider: Optional['DataProvider'] = None,
+        data_context: Optional[Any] = None
+    ) -> DiscoveryPlan:
         effective_llm = llm or self.llm
         if not effective_llm:
             raise RuntimeError(_("RegistryExplorer n'a pas de LLM pour générer un plan."))
 
-        # 1. Vérifier que le technical_goal est supporté
         available_goals = self.get_available_goals()
         if technical_goal not in available_goals:
             raise ValueError(
@@ -119,14 +112,31 @@ class RegistryExplorer(BaseExplorer):
                 .format(technical_goal=technical_goal, goals=", ".join(available_goals))
             )
 
-        # 2. Préparer la description des outils
+        # --- RÉCUPÉRATION DU REGISTRE (priorité au data_context) ---
+        registry = None
+        if data_context is not None and isinstance(data_context, dict):
+            registry = data_context
+        elif llm and hasattr(llm, 'get_data_context'):
+            ctx = llm.get_data_context()
+            if isinstance(ctx, dict):
+                registry = ctx
+        if registry is None:
+            registry = self._get_registry()
+
+        # --- VALIDATION ---
+        if data_provider:
+            if target not in data_provider.get_targets():
+                raise ValueError(_("La cible '{target}' n'existe pas dans les données fournies.").format(target=target))
+        else:
+            if target not in registry:
+                raise ValueError(_("Cible '{target}' invalide pour registry").format(target=target))
+
         tools_desc = self.get_tools_description()
         tools_text = "\n".join([
             f"- **{t['name']}** : {t['description']} (paramètres : {t.get('parameters', {})})"
             for t in tools_desc
         ])
 
-        # 3. Charger le prompt
         prompt = self._prompt_loader.load(
             "explorer_plan_generation.md",
             lang=getattr(self.runtime_state, "language", "en"),
@@ -137,16 +147,15 @@ class RegistryExplorer(BaseExplorer):
             tools_description=tools_text
         )
 
-        # 4. Émettre un événement de début
         Logger.event(
             Events.DISCOVERY_PLAN_GENERATION_START,
             data_type=self._data_type,
             technical_goal=technical_goal,
             target=target,
-            goal=goal
+            goal=goal,
+            mission_id=self.runtime_state.current_mission_id
         )
 
-        # 5. Appeler le LLM (effectif) pour obtenir les étapes
         try:
             result: ExplorerPlanOutput = await effective_llm.generate_structured(
                 prompt=prompt,
@@ -160,30 +169,64 @@ class RegistryExplorer(BaseExplorer):
                 data_type=self._data_type,
                 technical_goal=technical_goal,
                 target=target,
-                error=str(e)
+                error=str(e),
+                mission_id=self.runtime_state.current_mission_id
             )
             raise ValueError(
                 _("Échec de la génération du plan par le LLM de l'Explorer : {error}")
                 .format(error=e)
             )
 
-        # 6. Valider et convertir les ExplorerStep en DiscoveryStep
         discovery_steps = []
         tool_names = [t["name"] for t in tools_desc]
         for idx, step in enumerate(steps):
-            # ... (même validation)
-            pass
+            if step.type == "tool":
+                if not step.tool_name:
+                    raise ValueError(_("Étape {idx} de type 'tool' sans tool_name").format(idx=idx))
+                if step.tool_name not in tool_names:
+                    raise ValueError(
+                        _("L'outil '{tool_name}' demandé n'existe pas pour le RegistryExplorer. Outils disponibles : {tools}")
+                        .format(tool_name=step.tool_name, tools=", ".join(tool_names))
+                    )
+                try:
+                    tool_args = json.loads(step.tool_args_json) if step.tool_args_json else {}
+                except json.JSONDecodeError:
+                    raise ValueError(_("tool_args_json invalide pour l'étape {idx}").format(idx=idx))
 
-        # 7. Construire la signature
+                discovery_steps.append(
+                    DiscoveryStep(
+                        id=f"step_{idx}",
+                        type=StepType.TOOL,
+                        description=step.description,
+                        tool_name=step.tool_name,
+                        tool_args=tool_args,
+                        expected_result=step.expected_result
+                    )
+                )
+            elif step.type == "semantic":
+                if not step.question:
+                    raise ValueError(_("Étape {idx} de type 'semantic' sans question").format(idx=idx))
+                discovery_steps.append(
+                    DiscoveryStep(
+                        id=f"step_{idx}",
+                        type=StepType.SEMANTIC,
+                        description=step.description,
+                        question=step.question,
+                        expected_result=step.expected_result
+                    )
+                )
+            else:
+                raise ValueError(_("Type d'étape inconnu : {type}").format(type=step.type))
+
         signature = self.create_signature(technical_goal, target)
 
-        # 8. Émettre un événement de fin
         Logger.event(
             Events.DISCOVERY_PLAN_GENERATION_END,
             data_type=self._data_type,
             technical_goal=technical_goal,
             target=target,
-            step_count=len(discovery_steps)
+            step_count=len(discovery_steps),
+            mission_id=self.runtime_state.current_mission_id
         )
 
         return DiscoveryPlan(
@@ -196,20 +239,20 @@ class RegistryExplorer(BaseExplorer):
         )
 
     # =====================================================
-    # MÉTHODES DE VALIDATION ET SIGNATURE
+    # VALIDATION AVEC DATA_PROVIDER
     # =====================================================
 
-    def validate_target(self, target: str) -> bool:
-        """Vérifie que la cible existe dans le registre."""
+    def validate_target(self, target: str, provider: Optional['DataProvider'] = None) -> bool:
+        if provider:
+            return target in provider.get_targets()
         registry = self._get_registry()
         return target in registry
 
     def create_signature(self, technical_goal: str, target: str) -> str:
-        """Crée une signature normalisée."""
         return f"{self._data_type}://{target}/{technical_goal}"
 
     def _get_registry(self) -> Dict[str, Any]:
-        """Récupère le registre depuis le runtime_state."""
+        # Fallback : si on a pas de data_context, on cherche dans runtime_state
         if hasattr(self.runtime_state, "variable_registry"):
             return self.runtime_state.variable_registry
         Logger.warning("[RegistryExplorer] Aucun registre trouvé.")

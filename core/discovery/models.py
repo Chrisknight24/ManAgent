@@ -6,9 +6,11 @@ Modèles de données pour le Discovery Framework.
 
 from enum import Enum
 from typing import List, Dict, Any, Optional, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from datetime import datetime
 import uuid
+import json
+from core.i18n import _
 
 
 class StepType(str, Enum):
@@ -96,13 +98,12 @@ class WorkspaceEntry(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
 
 
-# Assurez-vous que RefinedContext a bien un champ technical_goal
 class RefinedContext(BaseModel):
     signature: str
     data_type: str
     target: str
     goal: str
-    technical_goal: str  # <-- ajouté
+    technical_goal: str
     entries: List[WorkspaceEntry] = Field(default_factory=list)
     summary: str
     exit_policy: ExitPolicy
@@ -124,7 +125,10 @@ class DiscoverySessionState(BaseModel):
     ended_at: Optional[datetime] = None
 
 
-# Modèle pour la génération d'étapes par l'Explorer (son LLM)
+# =====================================================
+# NOUVEAU : ExplorerStep avec tool_args_json
+# =====================================================
+
 class ExplorerStep(BaseModel):
     """
     Une étape produite par le LLM de l'Explorer.
@@ -133,6 +137,29 @@ class ExplorerStep(BaseModel):
     type: Literal["tool", "semantic"] = Field(..., description="Type d'étape")
     description: str = Field(..., description="Description de l'étape")
     tool_name: Optional[str] = Field(None, description="Nom de l'outil (si type='tool')")
-    tool_args: Dict[str, Any] = Field(default_factory=dict, description="Arguments de l'outil (si type='tool')")
+    tool_args_json: str = Field(
+        default="{}",
+        description="Chaîne JSON contenant les arguments de l'outil (obligatoire si type='tool')"
+    )
     question: Optional[str] = Field(None, description="Question sémantique (si type='semantic')")
     expected_result: str = Field("true", description="Résultat attendu : 'true', 'false' ou 'any'")
+
+    @model_validator(mode='after')
+    def validate_tool_args(self) -> 'ExplorerStep':
+        """Valide que les arguments sont cohérents avec le type d'étape."""
+        if self.type == "tool":
+            if not self.tool_name:
+                raise ValueError(_("Une étape de type 'tool' doit avoir un tool_name."))
+            # Vérifier que tool_args_json est un JSON valide
+            try:
+                args = json.loads(self.tool_args_json) if self.tool_args_json else {}
+            except json.JSONDecodeError:
+                raise ValueError(_("tool_args_json n'est pas un JSON valide."))
+            # Vérification spécifique à l'outil (ex: describe_value nécessite target)
+            if self.tool_name == "describe_value" and "target" not in args:
+                raise ValueError(_("L'outil 'describe_value' nécessite un argument 'target' dans tool_args."))
+            # On pourrait ajouter d'autres vérifications ici
+        elif self.type == "semantic":
+            if not self.question:
+                raise ValueError(_("Une étape de type 'semantic' doit avoir une question."))
+        return self

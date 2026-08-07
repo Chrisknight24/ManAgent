@@ -5,6 +5,7 @@ Le contrat de données strict pour l'architecture 'Tout est Plan'.
 Mis à jour avec la méthode Stringified JSON pour les arguments d'outils,
 la logique conditionnelle par registre et la prévention des appels vides.
 Version avec héritage BaseDiscoverySchema pour la Progressive Disclosure.
+Ajout : champ is_crucial et validation stricte du nommage des variables.
 """
 
 import json
@@ -15,7 +16,8 @@ from core.constants import OrchestratorMode
 from core.i18n import _
 from core.execution_models import ExecutionTree
 from core.execution_models import ExecutionTree, FailureClass
-from core.base_schema import BaseDiscoverySchema  # <-- NOUVEAU
+from core.base_schema import BaseDiscoverySchema
+from utils.logger import Logger  # <-- NOUVEAU pour les warnings
 
 # =====================================================
 # ÉNUMÉRATIONS
@@ -79,7 +81,13 @@ class PlanStep(BaseModel):
 
     execute_if: Optional[str] = Field(
         None,
-        description=_("Condition déterministe STRICTEMENT booléenne. Ex: '$@_nom == True'.")
+        description=_("Condition déterministe STRICTEMENT booléenne. Ex: '$@_bool_nom == True'.")
+    )
+
+    # --- NOUVEAU : Variable cruciale pour le RUM ---
+    is_crucial: bool = Field(
+        False,
+        description=_("Si True, cette variable sera ajoutée au Registre Utile de Mission (RUM) visible par le Présentateur. Utilisez ce flag pour les preuves directes de succès/échec de la mission.")
     )
 
     @model_validator(mode='after')
@@ -91,12 +99,24 @@ class PlanStep(BaseModel):
         if self.execute_if:
             v_lower = self.execute_if.lower()
             if "_data" in v_lower:
-                raise ValueError("CRITICAL REJECTION: Le champ 'execute_if' ne doit jamais analyser les variables de données complexes (ex: $@_nom_data). Utilisez uniquement le signal binaire $@_nom.")
+                raise ValueError("CRITICAL REJECTION: Le champ 'execute_if' ne doit jamais analyser les variables de données complexes (ex: $@_data_nom). Utilisez uniquement le signal binaire $@_bool_nom.")
             if "." in self.execute_if:
                 raise ValueError("CRITICAL REJECTION: La notation pointée (ex: .result, .data) est strictement prohibée dans 'execute_if'.")
             if "contains" in v_lower or " in " in v_lower:
                 raise ValueError("CRITICAL REJECTION: Les opérateurs sémantiques (IN, CONTAINS) sont interdits dans l'infrastructure de flux. Utilisez des outils dédiés en amont.")
                 
+        return self
+
+    # --- NOUVEAU : Validation stricte du nommage des variables ---
+    @model_validator(mode='after')
+    def validate_variable_naming(self) -> 'PlanStep':
+        if self.output_variable_name:
+            if not (self.output_variable_name.startswith("bool_") or self.output_variable_name.startswith("data_")):
+                # On lève une erreur pour forcer le Planner à respecter la convention
+                raise ValueError(
+                    _("La variable '{}' ne respecte pas la convention de nommage. Elle doit commencer par 'bool_' ou 'data_'.")
+                    .format(self.output_variable_name)
+                )
         return self
 
     response_text: Optional[str] = Field(None)

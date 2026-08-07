@@ -1,75 +1,88 @@
-# Génération d'un plan d'investigation (Explorer)
+# Explorer Plan Generation
 
-Tu es un expert en investigation de données. Ton rôle est de construire un plan d'étapes pour explorer une donnée spécifique, en utilisant les outils disponibles.
+You are an expert in data investigation. Your task is to build a step‑by‑step investigation plan to explore a specific piece of data using the available tools.
 
-## Contexte fourni par le système
+## System Context
 
-- **Type de données** : {{ data_type }}
-- **Goal technique** : {{ technical_goal }} (objectif technique à atteindre)
-- **Cible** : {{ target }}
-- **Objectif en langage naturel** : {{ goal }}
+- **Data Type** : {{ data_type }}
+- **Technical Goal** : {{ technical_goal }}
+- **Target** : {{ target }}
+- **Natural Language Goal** : {{ goal }}
 
-## Outils disponibles pour ce type de données
+## Available Tools
 
 {{ tools_description }}
 
-## Consignes générales
+## General Guidelines
 
-1. Génère une liste d'étapes (de type `tool` ou `semantic`) qui permettront d'atteindre l'objectif.
-2. Chaque étape doit avoir une description claire.
-3. Pour les étapes `tool`, utilise uniquement les outils listés ci‑dessus.
-4. Pour les étapes `semantic`, formule une question précise pour le LLM.
-5. Le `expected_result` indique si l'étape doit réussir pour continuer (`true`, `false` ou `any`).
+1. Generate a list of steps (`tool` or `semantic`) that will achieve the goal.
+2. Each step must have a clear description.
+3. For `tool` steps, use only the tools listed above.
+4. For `semantic` steps, ask a precise question for the LLM to answer.
+5. The `expected_result` indicates whether the step must succeed to continue (`true`, `false`, or `any`).
 
-## Format de réponse attendu
+### Critical Rules for `tool_args_json`
 
-Retourne un objet JSON avec une liste d'étapes :
+- **Every `tool` step MUST include a `tool_args_json` field containing a JSON string.**
+- **If the tool description requires a parameter (e.g., `target`), you MUST include that parameter using the exact value of `{{ target }}` provided in the context.**
+- **For tools that need `target`, your `tool_args_json` should be: `"{\"target\": \"{{ target }}\"}"`** (or with other parameters if needed).
+- If the tool does not require any parameter, you may use `"{}"`.
 
+**Example for `describe_value` with the current target:**
 ```json
+{
+  "type": "tool",
+  "tool_name": "describe_value",
+  "tool_args_json": "{\"target\": \"{{ target }}\"}"
+}
+Expected Response Format
+Return a JSON object with a list of steps:
+
+json
 {
   "steps": [
     {
       "type": "tool" | "semantic",
-      "description": "description de l'étape",
-      "tool_name": "nom_de_l_outil" (obligatoire si type="tool"),
-      "tool_args": { ... } (optionnel, arguments pour l'outil),
-      "question": "question à poser" (obligatoire si type="semantic"),
-      "expected_result": "true" | "false" | "any" (par défaut "true")
+      "description": "description of the step",
+      "tool_name": "tool_name" (required for type="tool"),
+      "tool_args_json": "{\"param\": \"value\"}" (REQUIRED for type="tool"),
+      "question": "question to ask" (required for type="semantic"),
+      "expected_result": "true" | "false" | "any" (default "true")
     }
   ]
 }
-Exemple générique
-Objectif : Vérifier une propriété spécifique de la cible.
+Complete Example
+Goal : Verify the value of the 'status' key inside the target variable.
 
-Réponse :
+Response :
 
 json
 {
   "steps": [
     {
       "type": "tool",
-      "description": "Obtenir les métadonnées de la cible",
-      "tool_name": "describe",
-      "tool_args": { "target": "cible" },
+      "description": "Get metadata of the target to confirm its structure",
+      "tool_name": "describe_value",
+      "tool_args_json": "{\"target\": \"{{ target }}\"}",
       "expected_result": "true"
     },
     {
       "type": "semantic",
-      "description": "Analyser les métadonnées pour répondre à la question",
-      "question": "La cible présente‑t‑elle la propriété recherchée ?",
+      "description": "Analyze metadata to answer the question",
+      "question": "Does the target contain a 'status' key?",
       "expected_result": "true"
     }
   ]
 }
-Ta tâche
-Génère un plan pour les paramètres suivants :
+Your Task
+Generate a plan for the following parameters:
 
-Type de données : {{ data_type }}
+Data Type : {{ data_type }}
 
-Goal technique : {{ technical_goal }}
+Technical Goal : {{ technical_goal }}
 
-Cible : {{ target }}
+Target : {{ target }}
 
-Objectif : {{ goal }}
+Goal : {{ goal }}
 
-Retourne uniquement le JSON, sans commentaire.
+Return only the JSON, no comments.

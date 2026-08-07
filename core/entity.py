@@ -2,7 +2,8 @@
 entity.py
 =========
 Définit le concept d'Entité (Employé) dans l'architecture d'Entreprise.
-Version corrigée : retrait de l'activation automatique de la Progressive Disclosure.
+Version corrigée : retrait de l'activation automatique de la Progressive Disclosure,
+ajout de get_data_context pour le partage implicite.
 """
 
 from __future__ import annotations
@@ -60,6 +61,19 @@ class Entity(ABC):
     def get_data_provider(self, name: str) -> Optional[DataProvider]:
         """Retourne un DataProvider spécifique par son nom."""
         return self._data_providers.get(name)
+
+    # =====================================================
+    # CONTEXTE DE DONNÉES POUR LA PROGRESSIVE DISCLOSURE
+    # =====================================================
+
+    def get_data_context(self) -> Any:
+        """
+        Retourne le contexte de données que cette entité souhaite partager
+        avec le Discovery Framework pour la Progressive Disclosure.
+        Par défaut, retourne None. Les entités filles peuvent surcharger
+        pour fournir leur registre, historique, etc.
+        """
+        return None
 
     # =====================================================
     # OBSERVABILITÉ & HIÉRARCHIE

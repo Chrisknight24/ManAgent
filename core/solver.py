@@ -3,7 +3,8 @@ core/solver.py
 ==============
 Solver – exécute une mission en orchestrant Planner et Executor.
 Version avec enregistrement d'un DataProvider pour le registre,
-et activation explicite de la Progressive Disclosure.
+activation explicite de la Progressive Disclosure,
+et vue normalisée du registre utilisant les types stockés (bool/data).
 """
 
 from typing import Optional, Any, Dict, List
@@ -30,6 +31,7 @@ from memory.mission_profile_store import MissionProfileStore
 import asyncio
 from core.discovery.providers.registry_provider import SolverRegistryProvider
 import json
+import re
 
 MAX_DEPTH = 10
 MAX_EXECUTION_TRIES = 3
@@ -103,13 +105,17 @@ class Solver(Supervisor, Entity):
                 .format(id=self.id)
             )
 
-            # --- Activation explicite de la Progressive Disclosure ---
+            # Activation explicite de la Progressive Disclosure
             if not self.llm._discovery_enabled:
                 self.llm.enable_discovery(self.runtime_state.discovery_engine, self)
                 Logger.info(
                     _("[Solver:{id}] Progressive Disclosure activée.")
                     .format(id=self.id)
                 )
+
+            # --- NOUVEAU : partager le registre avec le LLM pour la Progressive Disclosure ---
+            if self.llm and self.runtime_state.discovery_engine:
+                self.llm.set_data_context(self.variable_registry)
 
         self.planner = Planner(
             name=f"planner_{solver_id}",
@@ -119,37 +125,52 @@ class Solver(Supervisor, Entity):
         )
         self.executor = Executor(solver_node=self)
 
+    # =====================================================
+    # VUE NORMALISÉE DU REGISTRE (METTRE À JOUR POUR UTILISER LES TYPES STOCKÉS)
+    # =====================================================
+
+    # Dans solver.py, la méthode _get_registry_metadata_view doit utiliser le champ 'type' stocké.
+    # Voici la version corrigée :
+
     def _get_registry_metadata_view(self) -> Dict[str, Any]:
-        """Vue normalisée du registre (métadonnées uniquement)."""
         view = {}
         for key, info in self.variable_registry.items():
             value = info.get("value")
-            hint = _("(donnée cachée, accessible via Progressive Disclosure)")
-            if isinstance(value, dict):
-                keys = list(value.keys())[:3]
-                hint = _("(objet JSON avec clés: {keys})").format(keys=", ".join(keys))
-            elif isinstance(value, list):
-                hint = _("(liste de {count} éléments)").format(count=len(value))
-            elif isinstance(value, str):
-                if len(value) > 100:
-                    hint = _("(chaîne de {length} caractères)").format(length=len(value))
-                else:
-                    hint = _("(chaîne: {preview}...)").format(preview=value[:50])
-            elif value is None:
-                hint = _("(null)")
+            var_type = info.get("type", self._get_type_string(value))
+
+            if var_type == "bool":
+                hint = f"(bool: {str(value).lower()})"
+            elif var_type == "data":
+                hint = _("(donnée masquée – utilisez Progressive Disclosure pour inspecter)")
             else:
-                hint = _("(type: {type})").format(type=type(value).__name__)
+                # Fallback
+                hint = _("(donnée cachée, accessible via Progressive Disclosure)")
+                if isinstance(value, dict):
+                    keys = list(value.keys())[:3]
+                    hint = _("(objet JSON avec clés: {keys})").format(keys=", ".join(keys))
+                elif isinstance(value, list):
+                    hint = _("(liste de {count} éléments)").format(count=len(value))
+                elif isinstance(value, str):
+                    if len(value) > 100:
+                        hint = _("(chaîne de {length} caractères)").format(length=len(value))
+                    else:
+                        hint = _("(chaîne: {preview}...)").format(preview=value[:50])
+                elif value is None:
+                    hint = _("(null)")
+                else:
+                    hint = _("(type: {type})").format(type=type(value).__name__)
 
             view[key] = {
                 "description": info.get("description", _("Pas de description")),
                 "source": info.get("source", _("Inconnu")),
                 "timestamp": info.get("timestamp", "N/A"),
-                "type": self._get_type_string(value),
+                "type": var_type,
                 "value_hint": hint,
             }
         return view
 
     def _get_type_string(self, value) -> str:
+        """Méthode de fallback pour déduire le type si non stocké."""
         if value is None:
             return "null"
         if isinstance(value, bool):
@@ -163,6 +184,10 @@ class Solver(Supervisor, Entity):
         if isinstance(value, dict):
             return "object"
         return "unknown"
+
+    # =====================================================
+    # MÉTHODES EXISTANTES (inchangées)
+    # =====================================================
 
     def assign_signatures(self, signatures: List[MissionSignature]) -> None:
         self.signatures = signatures
@@ -194,6 +219,8 @@ class Solver(Supervisor, Entity):
                 started_at=time.time(),
                 status="failed"
             )
+
+            proposed_plan = None  # Initialisation avant le try
 
             try:
                 similar_missions_context = None
@@ -280,13 +307,14 @@ class Solver(Supervisor, Entity):
                     Logger.warning(f"[Solver:{self.id}] 🛑 Objectif impossible. Raison : {decision.reason}")
                     self.execution_tree.ended_at = time.time()
                     self.execution_tree.status = "failed"
+                    # Enrichir le contexte avec la raison de l'échec
+                    enriched_context = self.context + f"\n\n[RAISON DE L'ÉCHEC] {decision.reason}"
                     return SolverResult(
                         status=ExecutionStatus.FAILED,
-                        final_context=self.context,
+                        final_context=enriched_context,  # <-- on utilise le contexte enrichi
                         error_reason=decision.reason,
                         execution_tree=self.execution_tree
                     )
-
                 Logger.info(f"[Solver:{self.id}] 💡 Stratégie adoptée : {decision.refined_strategy}")
 
                 success = False
@@ -357,19 +385,27 @@ class Solver(Supervisor, Entity):
                                 "max_attempts": MAX_PREEXECUTION_FAILURES
                             })
 
+                            # --- CORRECTION : vérifier si proposed_plan existe ---
+                            if proposed_plan is not None:
+                                rejected_plan_summary = self._summarize_plan(proposed_plan)
+                            else:
+                                rejected_plan_summary = "Aucun plan généré (erreur de validation JSON)"
+
                             feedback_msg = (
-                                _("\n[⚠️ REJET DU PLAN PRÉCÉDENT]\n") +
-                                _("Le système a rejeté votre plan pour l'erreur suivante :\n{}\n").format(error_msg) +
-                                _("Veuillez corriger cette erreur de logique/syntaxe dans votre nouveau plan.")
+                                _("\n[⚠️ REJET DU PLAN PRÉCÉDENT]\n")
+                                + _("Le système a rejeté votre plan pour l'erreur suivante :\n{}\n").format(error_msg)
+                                + _("Voici la structure de votre plan rejeté pour vous aider à identifier l'erreur :\n")
+                                + rejected_plan_summary
+                                + _("\nVeuillez corriger cette erreur dans votre nouveau plan.")
                             )
                             self.context = f"{self.context}\n{feedback_msg}" if self.context else feedback_msg
                             self._preexecution_failures += 1
                             if self._preexecution_failures >= MAX_PREEXECUTION_FAILURES:
                                 break
                             continue
-
                         except ValueError as plan_error:
                             self.runtime_state.update_marker("plan_rejected", True)
+                            error_msg = str(plan_error)  # <-- Défini ici
                             Logger.warning(f"[Solver:{self.id}] ⚠️ Plan invalide (Validation personnalisée) : {plan_error}")
                             if hasattr(self, 'planner') and hasattr(self.planner, '_last_proposed_plan'):
                                 Logger.debug(f"[Solver:{self.id}] Plan rejeté : {self.planner._last_proposed_plan}")
@@ -386,10 +422,16 @@ class Solver(Supervisor, Entity):
                                 "max_attempts": MAX_PREEXECUTION_FAILURES
                             })
 
+                            if proposed_plan is not None:
+                                rejected_plan_summary = self._summarize_plan(proposed_plan)
+                            else:
+                                rejected_plan_summary = "Aucun plan généré (erreur de validation)"
                             feedback_msg = (
-                                _("\n[⚠️ REJET DU PLAN PRÉCÉDENT]\n") +
-                                _("Le système d'exécution a rejeté votre plan pour l'erreur suivante :\n{}\n").format(plan_error) +
-                                _("Veuillez corriger cette erreur de logique/syntaxe dans votre nouveau plan.")
+                                _("\n[⚠️ REJET DU PLAN PRÉCÉDENT]\n")
+                                + _("Le système a rejeté votre plan pour l'erreur suivante :\n{}\n").format(error_msg)
+                                + _("Voici la structure de votre plan rejeté pour vous aider à identifier l'erreur :\n")
+                                + rejected_plan_summary
+                                + _("\nVeuillez corriger cette erreur dans votre nouveau plan.")
                             )
                             self.context = f"{self.context}\n{feedback_msg}" if self.context else feedback_msg
                             self._preexecution_failures += 1
@@ -530,13 +572,47 @@ class Solver(Supervisor, Entity):
                 raise general_error
 
             finally:
+                # --- OBSERVABILITÉ : Émettre le registre du solver ---
+                try:
+                    registry_metadata_view = self._get_registry_metadata_view()
+                    Logger.event(
+                        "solver_registry",
+                        solver_id=self.id,
+                        registry=registry_metadata_view,
+                        attempt_number=self.current_attempt.attempt_number if self.current_attempt else None,
+                        goal=self.goal,
+                        status=self.execution_tree.status if self.execution_tree else "unknown"
+                    )
+                except Exception as e:
+                    Logger.warning(f"[Solver:{self.id}] Échec de l'émission du registre : {e}")
+
                 if self.id in self.runtime_state.solver_registry:
                     del self.runtime_state.solver_registry[self.id]
                     Logger.debug(f"[Solver:{self.id}] Entrée supprimée du registre.")
 
     # =====================================================
-    # MÉTHODES UTILITAIRES
+    # MÉTHODES UTILITAIRES (inchangées)
     # =====================================================
+
+    def _summarize_plan(self, plan: Plan) -> str:
+        """Génère un résumé concis d'un plan pour le feedback."""
+        lines = ["Structure du plan rejeté :"]
+        for step in plan.steps:
+            lines.append(
+                f"  - {step.id}: type={step.type.value}, "
+                f"output_var={step.output_variable_name or 'None'}, "
+                f"expected={step.expected_result}, "
+                f"tool={getattr(step, 'tool_name', 'None')}"
+            )
+        # Variables utilisées dans les conditions et réponses
+        used_vars = set()
+        for step in plan.steps:
+            for field in [step.execute_if, step.response_text, step.tool_args_json]:
+                if field:
+                    matches = re.findall(r'\$@_([a-zA-Z0-9_]+)', field)
+                    used_vars.update(matches)
+        lines.append(f"Variables utilisées : {', '.join(used_vars) if used_vars else 'aucune'}")
+        return "\n".join(lines)
 
     def _format_similar_missions(self, similar: List[Dict]) -> str:
         lines = []
@@ -549,8 +625,14 @@ class Solver(Supervisor, Entity):
 
     async def _check_feasibility(self, similar_missions_context: Optional[List[Dict]] = None) -> FeasibilityDecision:
         Logger.info(f"[Solver:{self.id}] 🤔 Évaluation de la faisabilité...")
+
         tools_view = await self.runtime_state.tools_manager.get_tools_view(goal_query=self.goal)
         formatted_tools = [f"- {t['name']} ({t['role']}): {t['description']}" for t in tools_view]
+
+        # --- NOUVEAU : construire la vue du registre ---
+        registry_view = self._get_registry_metadata_view()
+        registry_text = self._format_registry_metadata(registry_view)  # méthode à ajouter
+
         loader = get_prompt_loader()
         prompt = loader.load(
             "feasibility.md",
@@ -558,8 +640,10 @@ class Solver(Supervisor, Entity):
             goal=self.goal,
             context=self.context,
             tools="\n".join(formatted_tools),
-            similar_missions=similar_missions_context
+            similar_missions=similar_missions_context,
+            registry=registry_text  # <-- NOUVEAU
         )
+
         decision: FeasibilityDecision = await self.llm.generate_structured(
             prompt=prompt,
             schema=FeasibilityDecision,
@@ -604,11 +688,27 @@ class Solver(Supervisor, Entity):
     async def validate_plan(self, plan: Plan, child_solver_id: str) -> bool:
         return await self.parent.validate_plan(plan, child_solver_id)
 
+    def _format_registry_metadata(self, registry_view: dict) -> str:
+        """Formate la vue des métadonnées du registre pour l'affichage dans un prompt."""
+        if not registry_view:
+            return _("(registre vide)")
+        lines = []
+        for key, meta in registry_view.items():
+            lines.append(f"- **`$@_{key}`** : {meta.get('description', '')}")
+            lines.append(f"  - Type : {meta.get('type', 'unknown')} | Source : {meta.get('source', 'N/A')}")
+            lines.append(f"  - Hint : {meta.get('value_hint', '')}")
+        return "\n".join(lines)
+
     async def report_critical_failure(self, error_context: str, child_solver_id: str):
         await self.parent.report_critical_failure(error_context, child_solver_id)
 
     async def execute_tool(self, tool_name: str, arguments: dict) -> str:
-        return await self.parent.execute_tool(tool_name, arguments)
+        """
+        Délègue l'exécution de l'outil au ToolsManager en passant le LLM du Solver.
+        """
+        return await self.runtime_state.tools_manager.execute_tool(
+            tool_name, arguments, llm=self.llm
+        )
 
     async def propagate_event(self, event_name: str, payload: dict):
         await self.parent.propagate_event(event_name, payload)

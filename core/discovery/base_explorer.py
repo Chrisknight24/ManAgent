@@ -7,9 +7,11 @@ et la transformer en un plan d'action technique (DiscoveryPlan).
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from core.discovery.models import DiscoveryPlan
 from core.runtime_state import RuntimeState
+from core.discovery.data_provider import DataProvider
+from core.llm import Llm  # <-- AJOUT pour le typage
 
 
 class BaseExplorer(ABC):
@@ -62,12 +64,15 @@ class BaseExplorer(ABC):
         """
         pass
 
-    @abstractmethod
-    def validate_target(self, target: str) -> bool:
+    def validate_target(self, target: str, provider: Optional['DataProvider'] = None) -> bool:
         """
-        Valide que la cible (ex: 'img_data') est accessible pour ce type de données.
+        Valide que la cible est accessible.
+        Si un provider est passé, l'utilise pour valider.
+        Par défaut, retourne True (à surcharger).
         """
-        pass
+        if provider:
+            return target in provider.get_targets()
+        return True
 
     @abstractmethod
     def create_signature(self, goal: str, target: str) -> str:
@@ -78,13 +83,25 @@ class BaseExplorer(ABC):
         pass
 
     @abstractmethod
-    async def generate_plan(self, goal: str, technical_goal: str, target: str) -> DiscoveryPlan:
+    async def generate_plan(
+        self,
+        goal: str,
+        technical_goal: str,
+        target: str,
+        llm: Optional[Llm] = None,
+        data_provider: Optional['DataProvider'] = None,
+        data_context: Optional[Any] = None  # <-- NOUVEAU PARAMÈTRE
+    ) -> DiscoveryPlan:
         """
         Génère un DiscoveryPlan à partir d'un goal en langage naturel,
         d'un technical_goal choisi par le LLM de l'entité, et d'une target.
+
+        - llm : LLM à utiliser pour la génération du plan.
+        - data_provider : fournisseur de données pour la validation et l'accès.
+        - data_context : contexte de données générique (ex: un registre, un objet, etc.)
+                         qui peut être utilisé par l'Explorer sans fixette.
         """
         pass
-
 
     def supports(self, data_type: str) -> bool:
         """Vérifie si cet Explorer supporte le type de données donné."""

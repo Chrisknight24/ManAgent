@@ -26,6 +26,9 @@ class Executor:
         executed_steps_trace: List[str] = []
         accumulated_context = current_context
 
+        if not hasattr(self.solver.runtime_state, 'mission_rum'):
+            self.solver.runtime_state.mission_rum = {}
+
         try:
             for step in plan.steps:
                 if self.solver.runtime_state.cancel_requested:
@@ -66,7 +69,28 @@ class Executor:
                             })
 
                             step.result_context = _("Étape ignorée par branchement conditionnel : {}").format(step.execute_if)
-                            executed_steps_trace.append(_("- [{}] Sautée (Condition non remplie)").format(step.id))
+
+                            # --- TRACE SAUTÉE (ENRICHIE, SANS TRONCATURE) ---
+                            tool_info = f" [{step.tool_name}]" if step.type == StepType.TOOL_CALL and step.tool_name else ""
+                            executed_steps_trace.append(
+                                _("- [{}] {} {} : Sautée (Condition non remplie)").format(
+                                    step.id,
+                                    step.description,
+                                    step.type.value + tool_info
+                                )
+                            )
+
+                            # Définir une variable de contrôle pour l'étape sautée (si output_variable_name est défini)
+                            if step.output_variable_name:
+                                self.solver.variable_registry[step.output_variable_name] = {
+                                    "value": "false",
+                                    "description": step.output_variable_desc or _("Statut de l'étape sautée {}").format(step.id),
+                                    "source": self.solver.id,
+                                    "timestamp": datetime.now().isoformat()
+                                }
+                                if step.is_crucial:
+                                    self._propagate_crucial_variable(step.output_variable_name)
+
                             continue
 
                     Logger.info(f"[Executor] ⚙️ Traitement de l'étape [{step.id}] -> {step.description}")
@@ -112,7 +136,6 @@ class Executor:
                         failure_trace = self._build_failure_trace(
                             executed_steps_trace, step, _("Échec d'exécution de l'action"), step.result_context
                         )
-                        # On inclut la vue métadonnée du registre dans le contexte final
                         registry_meta = self.solver._get_registry_metadata_view()
                         final_context = accumulated_context + f"\n{failure_trace}\n\n--- Registre (métadonnées) ---\n{self._format_registry_view(registry_meta)}"
                         return SolverResult(
@@ -137,9 +160,7 @@ class Executor:
                     if convergence.is_convergent:
                         Logger.info(f"[Executor] ✅ Étape [{step.id}] validée.")
                         step.status = ExecutionStatus.SUCCESS
-                        # On tronque éventuellement les gros résultats pour éviter de polluer le contexte
-                        if isinstance(execution_output, str) and len(execution_output) > 500:
-                            execution_output = execution_output[:500] + "... (tronqué)"
+                        # Ne pas tronquer l'output pour le contexte final, seule l'affichage dans la trace est modifié
                         step.result_context = execution_output
                         node.status = ExecutionStatus.SUCCESS
                         node.actual_result = execution_output
@@ -151,12 +172,26 @@ class Executor:
                             "result": execution_output
                         })
 
-                        executed_steps_trace.append(_("- [{}] Validée : Output={}").format(step.id, execution_output))
+                        # --- TRACE VALIDÉE (ENRICHIE, SANS TRONCATURE) ---
+                        tool_info = f" [{step.tool_name}]" if step.type == StepType.TOOL_CALL and step.tool_name else ""
+                        executed_steps_trace.append(
+                            _("- [{}] {} {} : {}").format(
+                                step.id,
+                                step.description,
+                                step.type.value + tool_info,
+                                execution_output if execution_output else "succès"
+                            )
+                        )
+
                         accumulated_context += f"\n[Succès {step.id}] : {execution_output}"
 
                         if step.type in [StepType.DIRECT_ANSWER, StepType.ABSTRACT_TASK]:
                             if execution_output:
                                 user_responses.append(execution_output)
+
+                        if step.is_crucial and step.output_variable_name:
+                            self._propagate_crucial_variable(step.output_variable_name)
+
                     else:
                         Logger.error(f"[Executor] ❌ Échec de convergence à l'étape [{step.id}].")
                         step.status = ExecutionStatus.FAILED
@@ -186,14 +221,11 @@ class Executor:
                         )
 
             final_user_text = "\n\n".join([r for r in user_responses if r])
-            final_user_text = self._interpolate_text(final_user_text)
+            final_user_text = self._interpolate_text(final_user_text, for_json=False)
 
             Logger.info("[Executor] 🎉 Fin de traitement : toutes les étapes ont convergé.")
 
-            # Construction du contexte final allégé
-            # 1. Résumé des étapes
             steps_summary = "\n".join(executed_steps_trace) if executed_steps_trace else _("Aucune étape exécutée.")
-            # 2. Vue métadonnée du registre
             registry_meta = self.solver._get_registry_metadata_view()
             registry_text = self._format_registry_view(registry_meta)
 
@@ -208,20 +240,33 @@ class Executor:
                 status=ExecutionStatus.SUCCESS,
                 final_context=final_context,
                 response=final_user_text or _("Mission [{}] accomplie.").format(self.solver.id),
-                resolved_data=self.solver.variable_registry,  # On garde le registre complet pour le stockage, mais on ne l'affiche plus dans le contexte
+                resolved_data=self.solver.variable_registry,
                 failure_class=None
             )
 
         except Exception as e:
             Logger.error(f"[Executor] 🔥 Exception critique : {str(e)}")
-            raise e
+            raise e    # =====================================================
+    # PROPAGATION DES VARIABLES CRUCIALES
+    # =====================================================
+
+    def _propagate_crucial_variable(self, base_name: str) -> None:
+        rum = self.solver.runtime_state.mission_rum
+        if base_name in self.solver.variable_registry:
+            rum[base_name] = self.solver.variable_registry[base_name]
+            Logger.debug(f"[Executor] Variable cruciale '{base_name}' propagée vers le RUM.")
+
+        if base_name.startswith("bool_"):
+            data_var_name = "data_" + base_name[5:]
+            if data_var_name in self.solver.variable_registry:
+                rum[data_var_name] = self.solver.variable_registry[data_var_name]
+                Logger.debug(f"[Executor] Variable cruciale '{data_var_name}' propagée vers le RUM.")
 
     # =====================================================
-    # MÉTHODES PRIVÉES (inchangées sauf ajout de _format_registry_view)
+    # FORMATAGE REGISTRE
     # =====================================================
 
     def _format_registry_view(self, registry_view: dict) -> str:
-        """Formate la vue métadonnée du registre en texte lisible."""
         if not registry_view:
             return _("(registre vide)")
         lines = []
@@ -230,32 +275,68 @@ class Executor:
             lines.append(f"  hint: {meta.get('value_hint', '')}")
         return "\n".join(lines)
 
+    # =====================================================
+    # INTERPOLATION (MÉTHODE CENTRALE AMÉLIORÉE)
+    # =====================================================
+
+    def _interpolate_text(self, text: str, for_json: bool = False) -> str:
+        """
+        Remplace les références $@_nom dans le texte par la valeur de la variable.
+        Si for_json=True, les valeurs complexes (dict, list) sont sérialisées en JSON.
+        Si for_json=False, on utilise str() pour un affichage lisible.
+        """
+        if not text:
+            return text
+        def replace_var(match):
+            var_name = match.group(1)
+            if var_name in self.solver.variable_registry:
+                value = self.solver.variable_registry[var_name]["value"]
+                if for_json:
+                    # Contexte JSON : on sérialise en JSON si possible
+                    try:
+                        return json.dumps(value, ensure_ascii=False)
+                    except TypeError:
+                        Logger.warning(f"[Executor] Impossible de sérialiser '{var_name}' en JSON. Utilisation de str().")
+                        return str(value)
+                else:
+                    # Contexte textuel : affichage lisible
+                    if isinstance(value, (dict, list)):
+                        # Pour les structures, on peut afficher un JSON compact mais lisible
+                        return json.dumps(value, ensure_ascii=False)
+                    else:
+                        return str(value)
+            return f"__UNKNOWN_VAR_{var_name}__"
+        return re.sub(r'\$@_([a-zA-Z0-9_]+)', replace_var, text)
+
+    def _interpolate_dict(self, obj, for_json: bool = True):
+        """
+        Parcourt récursivement un objet et interpole les chaînes.
+        Par défaut, on utilise le mode JSON (for_json=True) car appelé pour tool_args_json.
+        """
+        if isinstance(obj, dict):
+            return {k: self._interpolate_dict(v, for_json) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._interpolate_dict(item, for_json) for item in obj]
+        elif isinstance(obj, str):
+            return self._interpolate_text(obj, for_json)
+        else:
+            return obj
 
     # =====================================================
-    # MÉTHODES PRIVÉES (inchangées sauf si besoin)
+    # EXÉCUTION DES ÉTAPES
     # =====================================================
+
     async def _execute_step_action(self, step: PlanStep, runtime_context: str) -> Tuple[bool, str, Optional[str]]:
         if step.type == StepType.DIRECT_ANSWER:
             final_text = step.response_text or _("Réponse formulée.")
             if final_text:
-                final_text = self._interpolate_text(final_text)
+                final_text = self._interpolate_text(final_text, for_json=False)
             return True, final_text, None
         elif step.type == StepType.TOOL_CALL:
             return await self._handle_tool_call(step)
         else:
             Logger.error(f"[Executor] 🛑 Type de step non pris en charge dans _execute_step_action : '{step.type}'")
             return False, "", _("Erreur de spécification : Le type d'étape '{}' est introuvable.").format(step.type)
-
-    def _interpolate_text(self, text: str) -> str:
-        if not text:
-            return text
-        def replace_var(match):
-            var_name = match.group(1)
-            if var_name in self.solver.variable_registry:
-                return str(self.solver.variable_registry[var_name]["value"])
-            # Marqueur spécial pour variable inconnue
-            return f"__UNKNOWN_VAR_{var_name}__"
-        return re.sub(r'\$@_([a-zA-Z0-9_]+)', replace_var, text)
 
     async def _handle_abstract_task(self, step: PlanStep, runtime_context: str) -> Tuple[bool, str, Optional[str], Optional[SolverResult]]:
         from .solver import Solver, MAX_DEPTH
@@ -287,24 +368,44 @@ class Executor:
         if step.output_variable_name:
             base_name = step.output_variable_name
             status_value = "true" if child_result.status == ExecutionStatus.SUCCESS else "false"
+
+            # --- 1. Création du booléen (inchangé) ---
             self.solver.variable_registry[base_name] = {
                 "value": status_value,
                 "description": step.output_variable_desc or _("Statut de l'étape abstraite {}").format(step.id),
                 "source": child_solver.id,
                 "timestamp": datetime.now().isoformat()
             }
-            data_var_name = base_name + "_data"
-            data_value = child_result.response if child_result.status == ExecutionStatus.SUCCESS else (child_result.error_reason or "Échec")
+
+            # --- 2. Création de la variable data_* (améliorée) ---
+            if base_name.startswith("bool_"):
+                data_var_name = "data_" + base_name[5:]
+            else:
+                data_var_name = base_name + "_data"
+
+            if child_result.status == ExecutionStatus.SUCCESS:
+                data_value = child_result.response or _("Succès de l'étape abstraite {}").format(step.id)
+                data_description = (
+                    step.output_variable_desc or _("Réponse de l'étape abstraite {}").format(step.id)
+                ) + _(" (statut: {})").format(status_value)
+            else:
+                data_value = child_result.error_reason or _("Échec de l'étape abstraite {}").format(step.id)
+                data_description = (
+                    step.output_variable_desc or _("Erreur de l'étape abstraite {}").format(step.id)
+                ) + _(" (statut: {})").format(status_value)
+
             self.solver.variable_registry[data_var_name] = {
                 "value": data_value,
-                "description": step.output_variable_desc or _("Réponse de l'étape abstraite {}").format(step.id),
+                "description": data_description,
                 "source": child_solver.id,
                 "timestamp": datetime.now().isoformat()
             }
 
+            if step.is_crucial:
+                self._propagate_crucial_variable(base_name)
+
         if child_result.status == ExecutionStatus.SUCCESS:
             final_response = child_result.response or _("Objectif de la sous-tâche [{}] atteint.").format(step.id)
-            # On ajoute l'indicateur pour la convergence
             enriched_response = f"[TOOLS OK] {final_response}"
             return True, enriched_response, child_result.final_context, child_result
         else:
@@ -314,24 +415,28 @@ class Executor:
         
     async def _handle_tool_call(self, step: PlanStep) -> Tuple[bool, str, Optional[str]]:
         try:
-            # Utilisation de la méthode de parsing sécurisée
             tool_args = self._safe_json_loads(step.tool_args_json)
         except json.JSONDecodeError as e:
             error_detail = f"{e.msg} at line {e.lineno} column {e.colno} (pos {e.pos})"
             return False, "", _("Échec de désérialisation JSON initial : {}").format(error_detail)
 
-        # Le reste de la méthode reste inchangé
-        tool_args = self._interpolate_dict(tool_args, self.solver.variable_registry)
-        hardware_result_str = await self.solver.execute_tool(step.tool_name, tool_args)
+        # --- SI tool_manager, on garde les arguments bruts (avec $@_) ---
+        if step.tool_name == "tool_manager":
+            tool_args_raw = tool_args.copy()
+            Logger.debug(f"[Executor] tool_manager appelé avec arguments bruts : {tool_args_raw}")
+            # PASSER LE REGISTRE DU SOLVER AU RUNTIME_STATE (via le solver)
+            self.solver.runtime_state._solver_registry_for_tools = self.solver.variable_registry
+        else:
+            tool_args_raw = self._interpolate_dict(tool_args, for_json=True)
 
-        # ----- NETTOYAGE AVANT PARSING -----
+        hardware_result_str = await self.solver.execute_tool(step.tool_name, tool_args_raw)
+
+        # --- NETTOYER L'ATTRIBUT TEMPORAIRE ---
+        if step.tool_name == "tool_manager":
+            self.solver.runtime_state._solver_registry_for_tools = None
+
         if hardware_result_str:
-            # Échappe les caractères de contrôle (sauf ceux autorisés dans JSON)
-            # Version simple : remplace \n, \r, \t
             hardware_result_str = hardware_result_str.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
-            # Version avancée (plus robuste) : échappe tous les caractères de contrôle 0x00-0x1F
-            # import re
-            # hardware_result_str = re.sub(r'[\x00-\x1f\x7f]', lambda m: f'\\u{ord(m.group(0)):04x}', hardware_result_str)
 
         try:
             parsed_result = json.loads(hardware_result_str)
@@ -340,28 +445,50 @@ class Executor:
 
             if step.output_variable_name:
                 base_name = step.output_variable_name
+
+                # --- 1. Création du booléen (inchangé) ---
                 self.solver.variable_registry[base_name] = {
                     "value": is_success_flag,
                     "description": step.output_variable_desc or _("Statut de l'opération {}").format(step.tool_name),
                     "source": self.solver.id,
                     "timestamp": datetime.now().isoformat()
                 }
-                if actual_data is not None:
+
+                # --- 2. Création de la variable data_* (améliorée) ---
+                if base_name.startswith("bool_"):
+                    data_var_name = "data_" + base_name[5:]
+                else:
                     data_var_name = base_name + "_data"
-                    self.solver.variable_registry[data_var_name] = {
-                        "value": actual_data,
-                        "description": step.output_variable_desc or _("Données retournées par {}").format(step.tool_name),
-                        "source": self.solver.id,
-                        "timestamp": datetime.now().isoformat()
-                    }
+
+                if actual_data is not None:
+                    data_description = (
+                        step.output_variable_desc or _("Données retournées par {}").format(step.tool_name)
+                    ) + _(" (statut: {})").format(is_success_flag)
+                else:
+                    data_description = _("Aucune donnée retournée par {} (statut: {})").format(
+                        step.tool_name, is_success_flag
+                    )
+
+                self.solver.variable_registry[data_var_name] = {
+                    "value": actual_data,  # peut être None
+                    "description": data_description,
+                    "source": self.solver.id,
+                    "timestamp": datetime.now().isoformat()
+                }
+
+                if step.is_crucial:
+                    self._propagate_crucial_variable(base_name)
 
             return True, is_success_flag, None
 
         except json.JSONDecodeError:
-            # On logue le contenu problématique pour debug
             Logger.warning(f"[Executor] Échec de parsing JSON pour l'outil {step.tool_name}. Contenu reçu : {hardware_result_str[:200]}")
             return False, "", "Le retour de l'outil C++ ne respecte pas le format JSON strict."
         
+    # =====================================================
+    # CONVERGENCE ET VALIDATION
+    # =====================================================
+
     async def _check_convergence(self, step: PlanStep, actual_result: str) -> ConvergenceDecision:
         if not step.expected_result:
             Logger.info(f"[Executor] Aucun critère défini pour [{step.id}]. Convergence implicite acceptée.")
@@ -377,7 +504,7 @@ class Executor:
 
         Logger.info(f"[Executor] [Analyse Sémantique] Invocation du LLM pour l'étape abstraite [{step.id}]...")
         return await self._evaluate_semantic_convergence(step, actual_result)
-    
+
     def _verify_rigid_outcome(self, expected: str, actual: str) -> Tuple[bool, str]:
         expected_clean = expected.strip().lower()
         actual_clean = actual.strip().lower()
@@ -394,7 +521,6 @@ class Executor:
         return False, _("Rejet matériel : L'outil a renvoyé '{}', mais le plan exigeait expressément '{}'.").format(actual_clean, expected_clean)
 
     async def _evaluate_semantic_convergence(self, step: PlanStep, actual_result: str) -> ConvergenceDecision:
-        # --- RÉCUPÉRATION AUTO DU MISSION_ID DEPUIS LE CONTEXTE ---
         mission_id = None
         if hasattr(self.solver, 'runtime_state') and self.solver.runtime_state:
             mission_id = self.solver.runtime_state.execution_context.get("mission_id")
@@ -412,47 +538,40 @@ class Executor:
                 prompt=prompt,
                 schema=ConvergenceDecision,
                 tag="ConvergenceDecision",
-                mission_id=mission_id  # <--- TRANSMISSION EXPLICITE
+                mission_id=mission_id
             )
         except Exception as e:
             Logger.error(f"[Executor] 🔥 Panne de l'infrastructure de validation sémantique à l'étape [{step.id}] : {str(e)}")
             raise e
-        
+
+    # =====================================================
+    # UTILITAIRES (JSON, conditions, etc.)
+    # =====================================================
+
     def _safe_json_loads(self, json_str: str) -> dict:
-        """
-        Parse une chaîne JSON de manière robuste en réparant les séquences d'échappement
-        invalides (ex: \l, \s, \d) sans toucher aux séquences valides (\n, \t, \\, etc.).
-        """
         try:
             return json.loads(json_str)
         except json.JSONDecodeError as e:
-            # Si l'erreur n'est pas liée à un échappement invalide, on la propage.
             if "Invalid \\escape" not in str(e):
                 raise
 
-            # Réparation ciblée
             result = []
             i = 0
             while i < len(json_str):
                 if json_str[i] == '\\' and i + 1 < len(json_str):
                     nxt = json_str[i + 1]
-                    # Séquences d'échappement JSON valides
                     if nxt in ('"', '\\', '/', 'b', 'f', 'n', 'r', 't'):
-                        # Conserver telles quelles
                         result.append(json_str[i])
                         result.append(nxt)
                         i += 2
                         continue
                     elif nxt == 'u':
-                        # Séquence Unicode (ex: \u1234). On la conserve telle quelle.
-                        # (On ne vérifie pas les 4 hexadécimaux pour simplifier, JSON le fera)
                         result.append(json_str[i])
                         result.append(nxt)
                         i += 2
                         continue
                     else:
-                        # Séquence invalide (ex: \l, \s, \d, \x) => on la transforme en \\
-                        result.append('\\\\')  # deux backslashes pour représenter un seul dans la chaîne JSON
+                        result.append('\\\\')
                         result.append(nxt)
                         i += 2
                         continue
@@ -460,17 +579,14 @@ class Executor:
                 i += 1
 
             fixed_str = ''.join(result)
-            # Tentative de parsing de la chaîne réparée
             return json.loads(fixed_str)
-        
+
     def _normalize_condition(self, expr: str) -> str:
         import re
-        # Remplacer les opérateurs symboliques
         expr = expr.replace('!=', '___NEQ___')
         expr = expr.replace('&&', ' and ')
         expr = expr.replace('||', ' or ')
         expr = expr.replace('!', ' not ')
-        # Remplacer les opérateurs textuels (AND, OR, NOT) - insensibles à la casse
         expr = re.sub(r'\bAND\b', ' and ', expr, flags=re.IGNORECASE)
         expr = re.sub(r'\bOR\b', ' or ', expr, flags=re.IGNORECASE)
         expr = re.sub(r'\bNOT\b', ' not ', expr, flags=re.IGNORECASE)
@@ -507,9 +623,8 @@ class Executor:
         import operator
         import re
 
-        interpolated = self._interpolate_text(condition_raw).strip()
+        interpolated = self._interpolate_text(condition_raw, for_json=False)
 
-        # Détection de variable inconnue
         if "__UNKNOWN_VAR_" in interpolated:
             Logger.debug(f"[Executor] Condition contient une variable inconnue, évaluée à False : {condition_raw}")
             return False
@@ -562,19 +677,3 @@ class Executor:
         except Exception as e:
             Logger.error(f"[Executor] ⚠️ Erreur syntaxique ou typage dans la condition '{condition_raw}' (Normalisé: '{interpolated}'). Motif: {e}")
             return False
-        
-    def _interpolate_dict(self, obj, variable_registry: dict):
-        if isinstance(obj, dict):
-            return {k: self._interpolate_dict(v, variable_registry) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [self._interpolate_dict(item, variable_registry) for item in obj]
-        elif isinstance(obj, str):
-            def replace_var(match):
-                var_name = match.group(1)
-                if var_name in variable_registry:
-                    return variable_registry[var_name]["value"]
-                else:
-                    return match.group(0)
-            return re.sub(r'\$@_([a-zA-Z0-9_]+)', replace_var, obj)
-        else:
-            return obj

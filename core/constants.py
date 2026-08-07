@@ -49,6 +49,11 @@ class Events:
     DISCOVERY_PLAN_GENERATION_START = "discovery.plan_generation_start"
     DISCOVERY_PLAN_GENERATION_END = "discovery.plan_generation_end"
     DISCOVERY_PLAN_GENERATION_ERROR = "discovery.plan_generation_error"
+
+    TOOLS_MANAGER_DECISION = "tools_manager.decision"
+    TOOLS_MANAGER_EXECUTION = "tools_manager.execution"
+    TOOLS_MANAGER_RESULT = "tools_manager.result"
+    TOOLS_MANAGER_ERROR = "tools_manager.error"
     
 class Providers:
     GEMINI = "gemini"

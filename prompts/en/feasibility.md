@@ -30,6 +30,10 @@ Voici un conseil stratégique synthétisé à partir de missions passées simila
 ## OUTILS DISPONIBLES
 {{ tools }}
 
+## REGISTRE DES VARIABLES DISPONIBLES
+{{ registry }}
+
+
 ## INSTRUCTIONS
 
 ### 1. Faisabilité par convergence d’outils

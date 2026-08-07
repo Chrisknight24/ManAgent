@@ -54,6 +54,9 @@ class Llm:
         self._prompt_loader = get_prompt_loader()
         self._max_iterations = 5
 
+        # --- NOUVEAU : contexte de données partagé ---
+        self._data_context: Optional[Any] = None
+
     # =====================================================
     # MÉTHODES PUBLIQUES
     # =====================================================
@@ -63,12 +66,21 @@ class Llm:
         self._discovery_engine = engine
         self._entity = entity
         self._entity_id = entity.entity_id
+
+        # Définir le contexte de données à partir de l'entité
+        if hasattr(entity, 'get_data_context'):
+            self.set_data_context(entity.get_data_context())
+        else:
+            self.set_data_context(entity)
+
         Logger.info(
             _("[Llm] Discovery activé pour {entity_id} avec {count} provider(s).")
             .format(entity_id=self._entity_id, count=len(entity.get_data_providers()))
         )
 
     def update_discovery_providers(self, providers: Dict[str, 'DataProvider']) -> None:
+        """Met à jour la liste des DataProviders (appelé après enregistrement)."""
+        # Conservé pour compatibilité
         pass
 
     def set_system_prompt(self, prompt: str):
@@ -82,6 +94,21 @@ class Llm:
 
     def clear_context(self):
         self.context.clear()
+
+    # =====================================================
+    # GESTION DU CONTEXTE DE DONNÉES (PROGRESSIVE DISCLOSURE)
+    # =====================================================
+
+    def set_data_context(self, context: Any) -> None:
+        """
+        Définit le contexte de données que l'entité souhaite partager
+        avec le Discovery Framework.
+        """
+        self._data_context = context
+
+    def get_data_context(self) -> Any:
+        """Retourne le contexte de données partagé, ou None."""
+        return self._data_context
 
     # =====================================================
     # MÉTHODES DE GÉNÉRATION
@@ -185,9 +212,7 @@ class Llm:
         # --- MODE DISCOVERY ACTIVÉ ---
         from core.base_schema import BaseDiscoverySchema
 
-        # Vérifier que le schéma hérite de BaseDiscoverySchema
         if not issubclass(schema, BaseDiscoverySchema):
-            # Si le schéma n'hérite pas de BaseDiscoverySchema, on appelle la version legacy
             Logger.warning(
                 _("[LLM] Le schéma {schema} n'hérite pas de BaseDiscoverySchema. "
                   "La Progressive Disclosure ne peut pas être utilisée.")
@@ -195,7 +220,6 @@ class Llm:
             )
             return await self._generate_structured_legacy(prompt, schema, tag, mission_id)
 
-        # Construire le prompt enrichi avec la section Discovery
         base_prompt = self._build_discovery_prompt(prompt, schema)
         full_prompt = base_prompt
 
@@ -203,7 +227,6 @@ class Llm:
         while iteration < self._max_iterations:
             iteration += 1
 
-            # Appeler le LLM avec le schéma cible (pas d'Union)
             result = await self._call_llm_with_schema(
                 prompt=full_prompt,
                 schema=schema,
@@ -211,7 +234,6 @@ class Llm:
                 mission_id=mission_id
             )
 
-            # Vérifier si le résultat contient une demande de découverte
             if hasattr(result, 'discovery_request') and result.discovery_request is not None:
                 discovery_req = result.discovery_request
                 Logger.debug(
@@ -223,14 +245,11 @@ class Llm:
                     )
                 )
 
-                # Exécuter la découverte
                 refined = await self._execute_discovery(discovery_req)
 
-                # Enrichir le prompt et reboucler
                 full_prompt = base_prompt + f"\n\n[RÉSULTAT DE L'INVESTIGATION]\n{refined.summary}"
                 continue
 
-            # Pas de demande de découverte → retourner le résultat
             Logger.debug(_("[LLM] Réponse finale reçue (type: {schema})").format(schema=schema.__name__))
             return result
 
@@ -251,9 +270,9 @@ class Llm:
         return full_context
 
     def _emit_llm_event(self, tag: str, prompt: str, response: Optional[BaseModel] = None,
-                        error: Optional[Exception] = None, duration_ms: Optional[int] = None,
-                        mission_id: Optional[str] = None, schema_name: Optional[str] = None,
-                        context: Optional[List[Dict]] = None, kind: str = "structured"):
+                    error: Optional[Exception] = None, duration_ms: Optional[int] = None,
+                    mission_id: Optional[str] = None, schema_name: Optional[str] = None,
+                    context: Optional[List[Dict]] = None, kind: str = "structured"):
         event_fields = {
             "tag": tag or "llm_call",
             "kind": kind,
@@ -273,12 +292,32 @@ class Llm:
             event_fields["success"] = True
         if duration_ms is not None:
             event_fields["duration_ms"] = duration_ms
+
+        # --- NOUVEAU : propager le mission_id depuis le runtime_state si non fourni ---
+        if mission_id is None and self.runtime_state:
+            mission_id = getattr(self.runtime_state, 'current_mission_id', None)
         if mission_id is not None:
             event_fields["mission_id"] = mission_id
+
         if context is not None:
             event_fields["context"] = context
-        Logger.event("llm_call", **event_fields)
 
+        # Ajouter solver_id, attempt_number, step_id depuis le contexte d'exécution
+        if self.runtime_state:
+            exec_ctx = getattr(self.runtime_state, 'execution_context', {})
+            if exec_ctx:
+                solver_id = exec_ctx.get("solver_id")
+                if solver_id:
+                    event_fields["solver_id"] = solver_id
+                attempt_num = exec_ctx.get("attempt_number")
+                if attempt_num is not None:
+                    event_fields["attempt_number"] = attempt_num
+                step_id = exec_ctx.get("step_id")
+                if step_id:
+                    event_fields["step_id"] = step_id
+
+        Logger.event("llm_call", **event_fields)
+        
     async def _generate_structured_legacy(
         self,
         prompt: str,
@@ -286,7 +325,6 @@ class Llm:
         tag: Optional[str] = None,
         mission_id: Optional[str] = None
     ) -> BaseModel:
-        """Version originale (sans Discovery)."""
         provider = self.provider_manager.get_provider(self.provider_id)
         if not provider:
             raise RuntimeError(_("Provider {provider_id} introuvable.").format(provider_id=self.provider_id))
@@ -336,7 +374,6 @@ class Llm:
         tag: Optional[str] = None,
         mission_id: Optional[str] = None
     ) -> BaseModel:
-        """Appelle le provider avec un schéma unique (pas d'Union)."""
         provider = self.provider_manager.get_provider(self.provider_id)
         if not provider:
             raise RuntimeError(_("Provider {provider_id} introuvable.").format(provider_id=self.provider_id))
@@ -381,20 +418,17 @@ class Llm:
             raise
 
     async def _execute_discovery(self, discovery_req: 'DiscoveryRequest') -> 'RefinedContext':
-        """Exécute une découverte à partir d'un DiscoveryRequest."""
         from core.discovery.models import RefinedContext
 
         if not self._discovery_engine:
             raise RuntimeError(_("Discovery activé mais _discovery_engine est None."))
 
-        # Récupérer l'Explorer correspondant
         explorer = self._discovery_engine.get_explorer(discovery_req.data_type)
         if explorer is None:
             raise ValueError(_("Aucun Explorer enregistré pour le type '{data_type}'").format(
                 data_type=discovery_req.data_type
             ))
 
-        # Vérifier que le technical_goal est supporté
         available_goals = explorer.get_available_goals()
         if discovery_req.technical_goal not in available_goals:
             raise ValueError(
@@ -406,34 +440,28 @@ class Llm:
                 )
             )
 
-        # Construire la signature
-        signature = explorer.create_signature(discovery_req.technical_goal, discovery_req.target)
+        data_provider = self._entity.get_data_provider(discovery_req.data_type)
 
-        # Vérifier le cache
-        cached = await self._discovery_engine.get_refined_context(signature)
-        if cached:
-            Logger.debug(_("[LLM] Cache hit pour la signature {signature}").format(signature=signature))
-            return cached
-
-        # Cache miss → générer le plan avec l'Explorer
         plan = await explorer.generate_plan(
             goal=discovery_req.goal,
             technical_goal=discovery_req.technical_goal,
             target=discovery_req.target,
-            llm=self  # <-- on passe le LLM de l'entité
+            llm=self,
+            data_provider=data_provider,
+            data_context=self._data_context
         )
 
-        # Exécuter la découverte
         refined = await self._discovery_engine.start_discovery(
             entity_id=self._entity_id,
             plan=plan,
-            llm=self
+            llm=self,
+            data_provider=data_provider,
+            data_context=self._data_context
         )
 
         return refined
 
     def _build_discovery_prompt(self, original_prompt: str, schema: Type[BaseModel]) -> str:
-        """Construit le prompt enrichi avec la section Discovery."""
         from core.discovery.data_provider import DataProvider
 
         if not self._discovery_engine:

@@ -2,8 +2,8 @@
 core/presentator.py
 ===================
 Entité spécialisée dans la reformulation et la présentation des résultats de mission.
-Prend le contexte technique brut et le registre pour en faire un rapport clair pour l'utilisateur.
-Mise à jour v5 : héritage BaseDiscoverySchema, activation PD unique.
+Mise à jour v6 : utilisation du Registre Utile de Mission (RUM) par défaut,
+vue normalisée avec affichage des booléens et masquage des données.
 """
 
 import asyncio
@@ -25,7 +25,7 @@ class PresentatorOutput(BaseDiscoverySchema):
 
 
 # ============================================================
-# DataProvider dynamique pour le Presentator (basé sur un registre externe)
+# DataProvider dynamique pour le Presentator (basé sur le RUM ou un registre externe)
 # ============================================================
 class PresentatorRegistryProvider(DataProvider):
     """
@@ -119,7 +119,7 @@ class Presentator(Entity):
         Logger.info("[Presentator] Progressive Disclosure activée avec DataProvider dynamique.")
 
     # ============================================================
-    # MÉTHODE STRUCTURÉE – AVEC VUE NORMALISÉE
+    # MÉTHODE STRUCTURÉE – AVEC VUE NORMALISÉE ET RUM
     # ============================================================
 
     async def generate_mission_output(
@@ -134,11 +134,23 @@ class Presentator(Entity):
     ) -> PresentatorOutput:
         Logger.info(f"[Presentator] 📝 Génération structurée (rapport + résumé) pour statut: {mission_status}")
 
-        # --- Activation de la PD (une seule fois) ---
-        self._ensure_discovery_activated(variable_registry)
+        # --- Utiliser le RUM si disponible, sinon le registre passé ---
+        # Le RUM est stocké dans runtime_state.mission_rum par l'Orchestrateur et les Solvers.
+        rum = getattr(self.runtime_state, 'mission_rum', None)
+        if rum:
+            # On utilise le RUM comme source principale
+            source_registry = rum
+            Logger.debug("[Presentator] Utilisation du Registre Utile de Mission (RUM).")
+        else:
+            # Fallback : utiliser le registre passé (comportement legacy)
+            source_registry = variable_registry
+            Logger.debug("[Presentator] Aucun RUM trouvé, utilisation du registre legacy.")
 
-        # Construire la vue normalisée du registre
-        registry_metadata_view = self._build_registry_metadata_view(variable_registry)
+        # --- Activation de la PD (avec le registre source) ---
+        self._ensure_discovery_activated(source_registry)
+
+        # Construire la vue normalisée du registre (métadonnées uniquement)
+        registry_metadata_view = self._build_registry_metadata_view(source_registry)
 
         # Récupération du mood
         mood = None
@@ -180,7 +192,7 @@ class Presentator(Entity):
             return self._build_fallback_output(goal, mission_status, error_reason, str(e))
 
     # ============================================================
-    # MÉTHODE UTILITAIRE : Vue normalisée du registre
+    # MÉTHODE UTILITAIRE : Vue normalisée du registre (avec types bool/data)
     # ============================================================
 
     def _build_registry_metadata_view(self, registry: dict) -> Dict[str, Any]:
@@ -190,33 +202,45 @@ class Presentator(Entity):
         view = {}
         for key, info in registry.items():
             value = info.get("value")
+            # Utiliser le type stocké, ou le déduire si absent
+            var_type = info.get("type", self._get_type_string(value))
 
-            hint = _("(donnée cachée, accessible via Progressive Disclosure)")
-            if isinstance(value, dict):
-                keys = list(value.keys())[:3]
-                hint = _("(objet JSON avec clés: {keys})").format(keys=", ".join(keys))
-            elif isinstance(value, list):
-                hint = _("(liste de {count} éléments)").format(count=len(value))
-            elif isinstance(value, str):
-                if len(value) > 100:
-                    hint = _("(chaîne de {length} caractères)").format(length=len(value))
-                else:
-                    hint = _("(chaîne: {preview}...)").format(preview=value[:50])
-            elif value is None:
-                hint = _("(null)")
+            # Construire le hint en fonction du type
+            if var_type == "bool":
+                # Les booléens sont affichés directement
+                hint = f"(bool: {str(value).lower()})"
+            elif var_type == "data":
+                # Les données sont masquées
+                hint = _("(donnée masquée – utilisez Progressive Disclosure pour inspecter)")
             else:
-                hint = _("(type: {type})").format(type=type(value).__name__)
+                # Fallback : ancienne logique
+                hint = _("(donnée cachée, accessible via Progressive Disclosure)")
+                if isinstance(value, dict):
+                    keys = list(value.keys())[:3]
+                    hint = _("(objet JSON avec clés: {keys})").format(keys=", ".join(keys))
+                elif isinstance(value, list):
+                    hint = _("(liste de {count} éléments)").format(count=len(value))
+                elif isinstance(value, str):
+                    if len(value) > 100:
+                        hint = _("(chaîne de {length} caractères)").format(length=len(value))
+                    else:
+                        hint = _("(chaîne: {preview}...)").format(preview=value[:50])
+                elif value is None:
+                    hint = _("(null)")
+                else:
+                    hint = _("(type: {type})").format(type=type(value).__name__)
 
             view[key] = {
                 "description": info.get("description", _("Pas de description")),
                 "source": info.get("source", _("Inconnu")),
                 "timestamp": info.get("timestamp", "N/A"),
-                "type": self._get_type_string(value),
+                "type": var_type,
                 "value_hint": hint,
             }
         return view
 
     def _get_type_string(self, value) -> str:
+        """Méthode de fallback pour déduire le type si non stocké."""
         if value is None:
             return "null"
         if isinstance(value, bool):

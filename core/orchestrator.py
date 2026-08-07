@@ -50,6 +50,8 @@ from memory.mission_profile_store import MissionProfileStore
 from core.markers.manager import MarkerManager
 from memory.fingerprint_store import FingerprintStore
 
+from tools.tools_manager import ToolsManager
+
 class Orchestrator(Supervisor, Entity):
     """
     Orchestrateur central – Point d'entrée unique du runtime.
@@ -433,6 +435,10 @@ class Orchestrator(Supervisor, Entity):
         return ResponsePacket(type="response", status="success", payload={"message": final_response})
 
     
+    # =====================================================
+    # DANS core/orchestrator.py – remplacer la méthode _handle_mission_decision
+    # =====================================================
+
     async def _handle_mission_decision(
         self,
         decision: OrchestratorDecision,
@@ -445,9 +451,10 @@ class Orchestrator(Supervisor, Entity):
         """
         Traite une mission.
         NOUVEAU FLUX (Phase 1) :
-        1. Solver
-        2. Presentator (rapport + résumé structuré)
-        3. Sauvegarde complète de l'épisode (avec le résumé)
+        1. Initialisation du RUM (Registre Utile de Mission)
+        2. Solver
+        3. Presentator (rapport + résumé structuré) utilisant le RUM
+        4. Sauvegarde complète de l'épisode (avec le résumé)
         """
         Logger.info(f"[Orchestrator] Mission identifiée. Initialisation du RootSolver.")
 
@@ -511,6 +518,9 @@ class Orchestrator(Supervisor, Entity):
         try:
             # OBSERVABILITY : pousser le mission_id
             with self.runtime_state.execution_context.scope(mission_id=mission_id):
+                # --- NOUVEAU : Initialiser le RUM avant d'exécuter le Solver ---
+                self.runtime_state.mission_rum = {}
+
                 result = await self.root_solver.run()
 
                 # ============================================================
@@ -529,10 +539,8 @@ class Orchestrator(Supervisor, Entity):
                             mission_cache.execution_tree = {"error": "Solver not instantiated"}
                             mission_cache.resolved_data = {}
 
-                        # Résumé concis pour l'annulation
                         mission_cache.summary = f"Mission '{refined_goal}' annulée par l'utilisateur."
 
-                        # Sauvegarde directe (pas de Presentator)
                         await asyncio.to_thread(
                             self.mission_store.save_episode,
                             mission_cache,
@@ -541,28 +549,23 @@ class Orchestrator(Supervisor, Entity):
                         )
                         await self._invalidate_cache_for_mission(mission_cache.mission_id, self.root_solver.signatures if self.root_solver else [])
 
-                        # Mise à jour du contexte de session
                         session_memory.context.last_mission_status = "cancelled"
                         session_memory.context.unresolved_issues.append(
                             f"Mission {mission_cache.mission_id} annulée par l'utilisateur."
                         )
                         await self._save_session_context(session_id, session_memory.context.to_dict())
 
-                        # Envoi d'un événement pour que l'UI passe en état "échec/annulé"
                         await self.propagate_event(Events.MISSION_FAILED, {
                             "reason": "Mission annulée par l'utilisateur",
                             "mission_id": mission_cache.mission_id,
                             "session_id": session_id
                         })
 
-                    # Réponse pour que l'UI reprenne le contrôle
                     await self.propagate_event(Events.THINKING_FINISHED, {})
                     return ResponsePacket(type="response", status="success",
                                         payload={"message": _("Mission annulée par l'utilisateur")})
 
-                
         except asyncio.CancelledError as e:
-            # CAS : ANNULATION PAR L'UTILISATEUR
             Logger.warning(f"[Orchestrator] Mission annulée par l'utilisateur : {e}")
             mission_cache = session_memory.get_active_mission()
             if mission_cache:
@@ -574,9 +577,7 @@ class Orchestrator(Supervisor, Entity):
                 else:
                     mission_cache.execution_tree = {"error": "Solver not instantiated"}
                     mission_cache.resolved_data = {}
-                # Résumé minimal pour annulation
                 mission_cache.summary = f"Mission '{refined_goal}' annulée par l'utilisateur."
-                # Sauvegarde directe (pas de Presentator)
                 await asyncio.to_thread(
                     self.mission_store.save_episode,
                     mission_cache,
@@ -584,8 +585,6 @@ class Orchestrator(Supervisor, Entity):
                     self.runtime_state.environment
                 )
                 await self._invalidate_cache_for_mission(mission_cache.mission_id, self.root_solver.signatures if self.root_solver else [])
-
-                # Mettre à jour le contexte
                 session_memory.context.last_mission_status = "cancelled"
                 session_memory.context.unresolved_issues.append(
                     f"Mission {mission_cache.mission_id} annulée par l'utilisateur."
@@ -610,20 +609,18 @@ class Orchestrator(Supervisor, Entity):
                     self.runtime_state.environment
                 )
                 await self._invalidate_cache_for_mission(mission_cache.mission_id, self.root_solver.signatures if self.root_solver else [])
-
                 session_memory.context.last_mission_status = "failed"
                 session_memory.context.unresolved_issues.append(
                     f"Mission {mission_cache.mission_id} interrompue par une erreur système."
                 )
                 await self._save_session_context(session_id, session_memory.context.to_dict())
-
-                # --- NOUVEAU : Envoi de l'événement d'échec au frontend ---
                 await self.propagate_event(Events.MISSION_FAILED, {
                     "reason": str(e),
                     "mission_id": mission_cache.mission_id,
                     "session_id": session_id
                 })
             raise
+
         # ============================================================
         # SUITE NORMALE : le Solver a retourné un résultat
         # ============================================================
@@ -656,7 +653,7 @@ class Orchestrator(Supervisor, Entity):
             await self.propagate_event(Events.THINKING_FINISHED, {})
             return ErrorPacket(type="error", message=_("Génération annulée"))
 
-        # 8. PRESENTATOR (rapport + résumé structuré)
+        # 8. PRESENTATOR (rapport + résumé structuré) – UTILISE LE RUM
         try:
             presentator = Presentator(
                 provider_manager=self.provider_manager,
@@ -665,24 +662,33 @@ class Orchestrator(Supervisor, Entity):
                 model_id=forced_model
             )
 
-            # On détermine le statut de la mission pour le Presentator
             mission_status = "success" if result.status == ExecutionStatus.SUCCESS else "failed"
 
-            # Appel unique structuré (sans mission_id explicite)
-            output = await presentator.generate_mission_output(
-                goal=refined_goal,
-                final_context=result.final_context,
-                variable_registry=self.root_solver.variable_registry,
-                accumulated_response=result.response or "",
-                mission_status=mission_status,
-                error_reason=result.error_reason if mission_status == "failed" else None,
-                mission_id=mission_cache.mission_id  # <--- AJOUT
-            )
+            # --- NOUVEAU : Utiliser le RUM comme registre pour le Presentator ---
+            rum = getattr(self.runtime_state, 'mission_rum', None)
+            if rum:
+                Logger.debug("[Orchestrator] RUM passé au Presentator.")
+            else:
+                Logger.debug("[Orchestrator] Aucun RUM trouvé, utilisation du registre legacy.")
+                # Fallback : utiliser le registre du root solver
+                rum = self.root_solver.variable_registry if self.root_solver else {}
+
+            # Appel unique structuré
+            # Dans _handle_mission_decision, après avoir obtenu le résultat du Solver
+            with self.runtime_state.execution_context.scope(mission_id=mission_id):
+                output = await presentator.generate_mission_output(
+                    goal=refined_goal,
+                    final_context=result.final_context,
+                    variable_registry=rum,
+                    accumulated_response=result.response or "",
+                    mission_status=mission_status,
+                    error_reason=result.error_reason if mission_status == "failed" else None,
+                    mission_id=mission_cache.mission_id if mission_cache else None
+                )
 
             final_response = output.user_report
             summary = output.summary
 
-            # On enregistre la télémétrie du Presentator dans le cache
             if mission_cache:
                 mission_cache.summary = summary
                 mission_cache.presentator_result = {"status": "success", "error_reason": None}
@@ -690,7 +696,6 @@ class Orchestrator(Supervisor, Entity):
         except Exception as e:
             # CAS : ÉCHEC DU PRESENTATOR (fallback rigide)
             Logger.error(f"[Orchestrator] ⚠️ Échec du Presentator. Motif: {e}")
-             # --- NOUVEAU PHASE 3 ---
             if mission_cache:
                 Logger.event(
                     "fallback_used",
@@ -698,9 +703,6 @@ class Orchestrator(Supervisor, Entity):
                     reason=str(e),
                     fallback_type="presentator"
                 )
-            # ------------------------
-            # On construit manuellement les réponses
-            # Fallback : on ne met pas l'erreur technique dans le résumé
             if result.status == ExecutionStatus.SUCCESS:
                 fallback_ctx = result.final_context[-500:] if result.final_context else "Aucun contexte disponible."
                 final_response = _("Mission achevée techniquement, mais le rapport final n'a pas pu être généré.\n\n**Dernier état :**\n```\n{}\n```").format(fallback_ctx)
@@ -726,54 +728,11 @@ class Orchestrator(Supervisor, Entity):
                     self.runtime_state.environment
                 )
                 await self._invalidate_cache_for_mission(mission_cache.mission_id, self.root_solver.signatures if self.root_solver else [])
-                
                 Logger.info(f"[Orchestrator] ✅ Épisode sauvegardé avec résumé : {mission_cache.mission_id}")
             except Exception as e:
                 Logger.error(f"[Orchestrator] Échec sauvegarde épisode : {e}")
 
-            # # --- Stockage des signatures comme MissionProfiles (seulement si succès) ---
-            # if result.status == ExecutionStatus.SUCCESS:
-            #     signatures = self.current_execution_context.get("signatures", [])
-            #     if signatures:
-            #         try:
-            #             # Utilisation du embedding_manager du runtime_state
-            #             embedding_manager = self.runtime_state.embedding_manager
-            #             if not embedding_manager or not embedding_manager.active_provider:
-            #                 raise RuntimeError("Aucun provider d'embedding actif.")
-
-            #             store = MissionProfileStore()
-            #             active_model = embedding_manager.active_provider.model_name
-
-            #             for idx, sig in enumerate(signatures):
-            #                 signature_text = f"{sig.action} {sig.object}"
-            #                 embedding = await embedding_manager.embed(signature_text)
-            #                 store.insert_profile(
-            #                     mission_id=mission_cache.mission_id,
-            #                     signature_text=signature_text,
-            #                     embedding=embedding,
-            #                     action=sig.action,
-            #                     object=sig.object,
-            #                     desired_state=sig.desired_state,
-            #                     signature_index=idx,
-            #                     signature_count=len(signatures),
-            #                     embedding_model=active_model,
-            #                     embedding_dimension= embedding_manager.dimension
-            #                 )
-            #             Logger.info(f"[Orchestrator] ✅ {len(signatures)} embedding(s) stocké(s) avec le modèle {active_model} pour la mission {mission_cache.mission_id}")
-            #         except Exception as e:
-            #             Logger.error(f"[Orchestrator] Échec stockage embeddings : {e}")
-
-        
-        # --- Consolidation des leçons (EntityLearner) ---
-        # try:
-        #     if self.runtime_state.learner:
-        #         consolidated = await self.runtime_state.learner.consolidate_lessons()
-        #         if consolidated > 0:
-        #             Logger.info(f"[Orchestrator] ✅ Consolidation déclenchée : {consolidated} groupe(s) traités.")
-        # except Exception as e:
-        #     Logger.error(f"[Orchestrator] Erreur lors de la consolidation : {e}")
         # --- RÉCUPÉRATION DES MARQUEURS D'EXÉCUTION DEPUIS RUNTIME_STATE ---
-                
         execution_markers = self.runtime_state.execution_markers
 
         # --- DÉCLENCHEMENT AUTO-LEARN (MARQUEURS) ---
@@ -787,10 +746,11 @@ class Orchestrator(Supervisor, Entity):
             "mission_id": mission_id,
             "solver_id": self.root_solver.id if self.root_solver else None,
             "session_id": session_id,
-            "plan": {},  # On ne stocke pas le plan complet pour éviter la lourdeur
+            "plan": {},
             "signatures": signatures,
         }
         await self._evaluate_learning_trigger(mission_context)
+
         # 10. Sauvegarde du SessionContext
         context_dict = {
             "goal_stack": session_memory.context.goal_stack,
@@ -818,7 +778,6 @@ class Orchestrator(Supervisor, Entity):
         # 12. Émettre la réponse finale
         await self.propagate_event(Events.RESPONSE_COMPLETED, {"content": final_response})
         return ResponsePacket(type="response", status="success", payload={"message": final_response})
-
 
     def _has_abstract_task_in_plan(self, plan) -> bool:
         if not plan or not hasattr(plan, 'steps'):
@@ -885,8 +844,21 @@ class Orchestrator(Supervisor, Entity):
         self.pending_tool_calls.clear()
         return ResponsePacket(type="response", status="success", payload={"message": _("Stop signal broadcasted")})
 
-    async def execute_tool(self, tool_name: str, arguments: dict) -> str:
-        """Demande d'exécution d'un outil (dispatch vers le frontend)."""
+    # Dans core/orchestrator.py, méthode execute_tool
+
+    async def execute_tool(self, tool_name: str, arguments: dict, llm: Optional[Llm] = None) -> str:
+        """
+        Point d'entrée pour l'exécution d'un outil.
+        Délègue au ToolsManager, qui gère la logique interne/externe.
+        """
+        return await self.runtime_state.tools_manager.execute_tool(tool_name, arguments, llm=llm)
+
+    # Dans core/orchestrator.py
+
+    async def _execute_external_tool(self, tool_name: str, arguments: dict) -> str:
+        """
+        Méthode privée appelée par ToolsManager pour exécuter un outil externe (C++).
+        """
         is_valid = self.runtime_state.tools_manager.validate_tool_call(tool_name, arguments)
         if not is_valid:
             return json.dumps({"result": False, "data": None, "message": "Tool not found"})
@@ -976,11 +948,26 @@ class Orchestrator(Supervisor, Entity):
         from core.i18n import setup_i18n
         setup_i18n(self.runtime_state.language)
 
-        from tools.tools_manager import ToolsManager
-        self.runtime_state.tools_manager = ToolsManager()
-        raw_tools = payload.get("tools", [])
-        self.runtime_state.tools_manager.load_tools_from_payload(raw_tools)
+        # Dans _handle_runtime_configure, remplacer le bloc concernant ToolsManager par :
 
+        raw_tools = payload.get("tools", [])
+
+        # Créer le ToolsManager en tant qu'entité (sans LLM dédié)
+        tools_manager = ToolsManager(
+            name="tools_manager",
+            llm=None,  # Pas de LLM par défaut
+            parent=self,
+            runtime_state=self.runtime_state
+        )
+        self.runtime_state.tools_manager = tools_manager
+
+        # Charger les outils externes depuis le payload
+        if raw_tools:
+            self.runtime_state.tools_manager.load_tools_from_payload(raw_tools)
+            Logger.info(f"[Orchestrator] {len(raw_tools)} outils externes chargés.")
+
+        # Référence à l'Orchestrateur pour les appels d'outils externes (C++)
+        self.runtime_state.orchestrator = self
         # =====================================================
         # INITIALISATION DES EMBEDDING PROVIDERS
         # =====================================================

@@ -98,10 +98,6 @@ class Planner(Entity):
                 )
 
     async def process(self, *args, **kwargs) -> Plan:
-        """
-        Implémentation de la méthode abstraite de Entity.
-        Délègue à propose_plan.
-        """
         goal = kwargs.get("goal", args[0] if args else "")
         context = kwargs.get("context", args[1] if len(args) > 1 else "")
         strategy = kwargs.get("strategy", args[2] if len(args) > 2 else "")
@@ -109,7 +105,6 @@ class Planner(Entity):
         return await self.propose_plan(goal, context, strategy, variable_registry)
 
     async def propose_plan(self, goal: str, context: str, strategy: str, variable_registry: dict) -> Plan:
-        """Construit un plan à partir de la stratégie."""
         Logger.info("[Planner] 🧠 Traduction de la stratégie en plan d'action structuré...")
 
         if self._cached_advice is None:
@@ -181,37 +176,73 @@ class Planner(Entity):
         errors = []
         warnings = []
 
+        # 1. Ajouter les variables créées par output_variable_name des étapes
         for step in plan.steps:
             if step.output_variable_name:
                 created_vars.add(step.output_variable_name)
+                # Convention : bool_xxx => data_xxx automatique
+                if step.output_variable_name.startswith("bool_"):
+                    created_vars.add("data_" + step.output_variable_name[5:])
 
+        # 2. Collecter toutes les utilisations de variables
         for step in plan.steps:
             for field in [step.execute_if, step.response_text, step.tool_args_json]:
                 if field:
                     matches = re.findall(r'\$@_([a-zA-Z0-9_]+)', field)
                     used_vars.update(matches)
 
-        filtered_used = set()
+        # 3. Vérifier les variables utilisées mais jamais créées
+        unknown = set()
         for var in used_vars:
-            if var.endswith("_data"):
-                base_var = var[:-5]
-                if base_var in created_vars:
+            if var in created_vars:
+                continue
+            # Si la variable est de type "data_*", on accepte si le "bool_*" correspondant existe
+            if var.startswith("data_"):
+                bool_var = "bool_" + var[5:]
+                if bool_var in created_vars:
                     continue
-            filtered_used.add(var)
+            unknown.add(var)
 
-        unknown = filtered_used - created_vars
         if unknown:
             errors.append(_("Variables utilisées mais jamais créées : {}").format(', '.join(unknown)))
 
+        # 4. Variables créées mais jamais utilisées (sauf héritées)
         inherited_vars = set(variable_registry.keys()) if variable_registry else set()
-        unused_plan_vars = (created_vars - filtered_used) - inherited_vars
-        if unused_plan_vars:
-            warnings.append(_("Variables créées dans le plan mais jamais utilisées : {}").format(', '.join(unused_plan_vars)))
+        unused_plan_vars = (created_vars - used_vars) - inherited_vars
+        # Filtrer les data_* qui ont leur bool_* utilisé
+        filtered_unused = set()
+        for var in unused_plan_vars:
+            if var.startswith("data_"):
+                bool_var = "bool_" + var[5:]
+                if bool_var in used_vars or bool_var in inherited_vars:
+                    continue
+            filtered_unused.add(var)
 
+        if filtered_unused:
+            warnings.append(_("Variables créées dans le plan mais jamais utilisées : {}").format(', '.join(filtered_unused)))
+
+        # 5. Vérifications spécifiques aux étapes
         for step in plan.steps:
+            # 5a. expected_result="any" => output_variable_name obligatoire
             if step.type == StepType.TOOL_CALL and step.expected_result == "any":
                 if not step.output_variable_name:
                     errors.append(_("L'étape '{}' a expected_result='any' mais ne définit aucun output_variable_name.").format(step.id))
+
+            # 5b. INTERDICTION : définir un output_variable_name dans tool_args_json
+            if step.type == StepType.TOOL_CALL and step.tool_args_json:
+                try:
+                    args = json.loads(step.tool_args_json)
+                    forbidden_keys = ["output_variable_name", "output_var", "var_name", "variable_name"]
+                    for key in forbidden_keys:
+                        if key in args:
+                            errors.append(
+                                _("L'étape '{}' définit '{}' dans tool_args_json, ce qui est interdit. "
+                                "Utilisez uniquement le champ output_variable_name de l'étape pour créer des variables.")
+                                .format(step.id, key)
+                            )
+                            break
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
         if not errors and not warnings:
             return True, []

@@ -5,7 +5,7 @@ Moteur principal du Discovery Framework.
 Version corrigée : register_explorer accepte un LLM optionnel.
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any  # <-- AJOUT de Any
 from core.runtime_state import RuntimeState
 from core.discovery.base_explorer import BaseExplorer
 from core.discovery.discovery_session import DiscoverySession
@@ -15,6 +15,8 @@ from utils.logger import Logger
 from core.cache import CacheManager
 from core.constants import Events
 from core.i18n import _
+from core.discovery.data_provider import DataProvider
+
 
 class DiscoveryEngine:
     """Moteur central du Discovery Framework."""
@@ -93,12 +95,14 @@ class DiscoveryEngine:
         self,
         entity_id: str,
         plan: DiscoveryPlan,
-        llm: Optional[Llm] = None
+        llm: Optional[Llm] = None,
+        data_provider: Optional['DataProvider'] = None,
+        data_context: Optional[Any] = None  # <-- NOUVEAU PARAMÈTRE
     ) -> RefinedContext:
         if not plan.signature:
             explorer = self.get_explorer(plan.data_type)
             if not explorer:
-                raise ValueError(...)
+                raise ValueError(f"{_('Aucun Explorer pour le type')} '{plan.data_type}'")
             plan.signature = explorer.create_signature(plan.technical_goal, plan.target)
 
         cached = await self.get_refined_context(plan.signature)
@@ -111,8 +115,12 @@ class DiscoveryEngine:
         if not explorer:
             raise ValueError(f"{_('Aucun Explorer pour le type')} '{plan.data_type}'")
 
-        if not explorer.validate_target(plan.target):
-            raise ValueError(f"{_('Cible')} '{plan.target}' {_('invalide pour')} {plan.data_type}")
+        if data_provider:
+            if not explorer.validate_target(plan.target, data_provider):
+                raise ValueError(f"{_('Cible')} '{plan.target}' {_('invalide pour')} {plan.data_type}")
+        else:
+            if not explorer.validate_target(plan.target):
+                raise ValueError(f"{_('Cible')} '{plan.target}' {_('invalide pour')} {plan.data_type}")
 
         session = DiscoverySession(
             entity_id=entity_id,
@@ -122,7 +130,8 @@ class DiscoveryEngine:
             llm=llm
         )
 
-        refined = await session.run()
+        # <-- TRANSMISSION DU data_context à la session
+        refined = await session.run(data_context=data_context)
 
         if refined.exit_policy not in (ExitPolicy.TOOL_FAILED, ExitPolicy.INVALID_PLAN):
             await self.store_refined_context(refined)
@@ -137,7 +146,8 @@ class DiscoveryEngine:
         goal: str,
         question: str,
         tools: Optional[List[Dict]] = None,
-        llm: Optional[Llm] = None
+        llm: Optional[Llm] = None,
+        data_context: Optional[Any] = None  # <-- NOUVEAU (optionnel)
     ) -> RefinedContext:
         explorer = self.get_explorer(data_type)
         if not explorer:
@@ -172,4 +182,4 @@ class DiscoveryEngine:
             technical_goal=goal  # fallback
         )
 
-        return await self.start_discovery(entity_id, plan, llm=llm)
+        return await self.start_discovery(entity_id, plan, llm=llm, data_context=data_context)

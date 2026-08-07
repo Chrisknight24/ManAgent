@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-build_observability_report.py (v8.17)
+build_observability_report.py (v8.18)
 =====================================
-- Ajout de la section Discovery (Progressive Disclosure)
+- Ajout de la section Discovery (Progressive Disclosure) avec rattachement aux étapes
 - Affichage du plan généré par l'Explorer (LLM call)
 - Affichage des étapes, outils, questions/réponses
 - Rattachement des découvertes aux entités et missions
+- Corrections des doublons et des variables manquantes
 """
 
 import argparse
@@ -100,6 +101,18 @@ def load_lessons(db_path: str) -> List[Dict[str, Any]]:
             source_episodes = []
         lessons.append({**row, "keywords": keywords, "source_episodes": source_episodes})
     return lessons
+
+def parse_tools_manager_events(events: List[Dict]) -> Dict[str, Any]:
+    by_mission = {}
+    for ev in events:
+        event_type = ev.get("event")
+        if not event_type or not event_type.startswith("tools_manager."):
+            continue
+        mission_id = ev.get("mission_id")
+        if not mission_id:
+            continue
+        by_mission.setdefault(mission_id, []).append(ev)
+    return by_mission
 
 def load_events(events_path: str) -> List[Dict[str, Any]]:
     if not os.path.exists(events_path):
@@ -206,7 +219,7 @@ def build_solver_to_mission_map(episodes):
     return solver_to_mission
 
 # =====================================================
-# NOUVEAU : RATTACHEMENT DES ÉVÉNEMENTS DISCOVERY
+# RATTACHEMENT DES ÉVÉNEMENTS DISCOVERY
 # =====================================================
 
 def build_discovery_data(events: List[Dict], llm_calls: List[Dict]) -> Dict[str, Any]:
@@ -217,7 +230,7 @@ def build_discovery_data(events: List[Dict], llm_calls: List[Dict]) -> Dict[str,
       - goal, data_type, target, technical_goal
       - exit_policy, summary (RefinedContext)
       - steps: liste des étapes
-      - explorer_plan_call: l'appel LLM qui a généré le plan (si présent)
+      - explorer_plan_calls: appels LLM liés à la génération du plan
       - cache_hit: bool
     """
     discovery_events = [e for e in events if e.get("event", "").startswith("discovery.")]
@@ -240,8 +253,8 @@ def build_discovery_data(events: List[Dict], llm_calls: List[Dict]) -> Dict[str,
             sessions_by_id[session_id] = {
                 "session_id": session_id,
                 "entity_id": ev.get("entity_id"),
-                "entity_name": ev.get("entity_name"),
-                "entity_role": ev.get("entity_role"),
+                "entity_name": ev.get("entity_name") or "?",
+                "entity_role": ev.get("entity_role") or "?",
                 "mission_id": ev.get("mission_id"),
                 "goal": None,
                 "data_type": None,
@@ -326,6 +339,21 @@ def attach_llm_calls_by_mission(episodes, llm_calls):
             attempt_num = call.get("attempt_number")
             tag = call.get("tag")
 
+            # --- Spécial : rattacher les appels tools_manager_decision ---
+            # (seuls ces appels sont rattachés par step_id)
+            if tag == "tools_manager_decision":
+                step_id = call.get("step_id")
+                if step_id and solver_id is not None and attempt_num is not None:
+                    attempt = attempt_index.get((solver_id, attempt_num))
+                    if attempt:
+                        for node in attempt.get("nodes", []):
+                            if node.get("step_id") == step_id:
+                                node.setdefault("_tools_manager_llm_calls", []).append(call)
+                                break
+                continue
+            # --------------------------------------------------------------
+
+            # --- Le reste est identique à la version qui fonctionnait ---
             if tag in FEASIBILITY_TAGS:
                 if solver_id:
                     ep.setdefault("_solver_preparations", {}).setdefault(solver_id, []).append(call)
@@ -380,8 +408,23 @@ def attach_llm_calls_by_mission(episodes, llm_calls):
                         continue
                 _store_call_in_episode(ep, call, tag)
                 continue
+            
 
+                        # --- Rattachement général pour les appels avec step_id ---
+            step_id = call.get("step_id")
+            if step_id and solver_id is not None and attempt_num is not None:
+                attempt = attempt_index.get((solver_id, attempt_num))
+                if attempt:
+                    for node in attempt.get("nodes", []):
+                        if node.get("step_id") == step_id:
+                            node.setdefault("_node_calls", []).append(call)
+                            break
+                continue
+            # --------------------------------------------------------
+
+            # Si aucun rattachement n'a eu lieu, on tombe dans _store_call_in_episode
             _store_call_in_episode(ep, call, tag)
+
 
     if orphan_calls:
         solver_to_mission = {}
@@ -412,6 +455,57 @@ def attach_llm_calls_by_mission(episodes, llm_calls):
                 ep = ep_index.get(mission_id)
                 if ep:
                     ep.setdefault("_other_calls", []).append(call)
+# =====================================================
+# RATTACHEMENT DES ÉVÉNEMENTS DISCOVERY AUX NŒUDS
+# =====================================================
+
+def attach_discovery_events_to_nodes(episodes, events):
+    """Rattache les événements Discovery aux nœuds correspondants via solver_id, attempt_number, step_id."""
+    discovery_events = [e for e in events if e.get("event", "").startswith("discovery.")]
+    if not discovery_events:
+        return
+
+    by_key = {}
+    for ev in discovery_events:
+        mission_id = ev.get("mission_id")
+        solver_id = ev.get("solver_id")
+        attempt_number = ev.get("attempt_number")
+        step_id = ev.get("step_id")
+        if mission_id and solver_id and attempt_number is not None:
+            key = (mission_id, solver_id, attempt_number, step_id)
+            by_key.setdefault(key, []).append(ev)
+
+    for ep in episodes:
+        mission_id = ep.get("mission_id")
+        if not mission_id:
+            continue
+        tree = ep.get("execution_tree")
+        if not tree:
+            continue
+
+        def traverse(node):
+            if not node:
+                return
+            solver_id = node.get("solver_id")
+            for attempt in node.get("attempts", []):
+                attempt_num = attempt.get("attempt_number")
+                key_without_step = (mission_id, solver_id, attempt_num, None)
+                events_for_attempt = by_key.get(key_without_step, [])
+                if events_for_attempt:
+                    attempt.setdefault("_discovery_events", []).extend(events_for_attempt)
+
+                for step_node in attempt.get("nodes", []):
+                    step_id = step_node.get("step_id")
+                    key_with_step = (mission_id, solver_id, attempt_num, step_id)
+                    events_for_step = by_key.get(key_with_step, [])
+                    if events_for_step:
+                        step_node.setdefault("_discovery_events", []).extend(events_for_step)
+
+                for step_node in attempt.get("nodes", []):
+                    child_tree = step_node.get("child_execution_tree")
+                    if child_tree:
+                        traverse(child_tree)
+        traverse(tree)
 
 # =====================================================
 # RATTACHEMENT DES RETRIEVAL AUX SOLVERS
@@ -424,6 +518,42 @@ def attach_retrieval_to_episodes(episodes, retrieval_events):
         if query_mission_id and query_mission_id in ep_index:
             ep = ep_index[query_mission_id]
             ep.setdefault("_solver_retrieval", {}).setdefault(query_mission_id, []).append(ev)
+
+def attach_tools_manager_events_to_attempts(episodes, tools_events):
+    by_key = {}
+    for ev in tools_events:
+        mission_id = ev.get("mission_id")
+        solver_id = ev.get("solver_id")
+        attempt_number = ev.get("attempt_number")
+        step_id = ev.get("step_id")
+        if mission_id and solver_id and attempt_number is not None and step_id:
+            key = (mission_id, solver_id, attempt_number, step_id)
+            by_key.setdefault(key, []).append(ev)
+
+    for ep in episodes:
+        mission_id = ep.get("mission_id")
+        if not mission_id:
+            continue
+        tree = ep.get("execution_tree")
+        if not tree:
+            continue
+        def traverse(node):
+            if not node:
+                return
+            solver_id = node.get("solver_id")
+            for attempt in node.get("attempts", []):
+                attempt_num = attempt.get("attempt_number")
+                for step_node in attempt.get("nodes", []):
+                    step_id = step_node.get("step_id")
+                    key = (mission_id, solver_id, attempt_num, step_id)
+                    events = by_key.get(key, [])
+                    if events:
+                        step_node.setdefault("_tools_manager_events", []).extend(events)
+                for step_node in attempt.get("nodes", []):
+                    child_tree = step_node.get("child_execution_tree")
+                    if child_tree:
+                        traverse(child_tree)
+        traverse(tree)
 
 # =====================================================
 # RATTACHEMENT DES ORCHESTRATOR AUX SESSION_TURNS
@@ -479,6 +609,15 @@ def parse_signature_string(s):
 # CONSTRUCTION DES DONNÉES
 # =====================================================
 
+def build_solver_registries(events: List[Dict]) -> Dict[str, Dict]:
+    registries = {}
+    for ev in events:
+        if ev.get("event") == "solver_registry":
+            solver_id = ev.get("solver_id")
+            if solver_id:
+                registries[solver_id] = ev.get("registry", {})
+    return registries
+
 def build_data(db_path: str, events_path: str) -> Dict[str, Any]:
     episodes = load_episodes(db_path)
     lessons = load_lessons(db_path)
@@ -487,13 +626,26 @@ def build_data(db_path: str, events_path: str) -> Dict[str, Any]:
     session_turns = [e for e in events if e.get("event") == "session_turn"]
     llm_calls = [e for e in events if e.get("event") == "llm_call"]
     retrieval_events = [e for e in events if e.get("event") == "retriever_results"]
+    tools_events = [e for e in events if e.get("event", "").startswith("tools_manager.")]
 
+    # Rattachement des appels LLM
     attach_llm_calls_by_mission(episodes, llm_calls)
     attach_retrieval_to_episodes(episodes, retrieval_events)
+    attach_tools_manager_events_to_attempts(episodes, tools_events)
 
-    # Discovery
+    # Registres des Solvers
+    solver_registries = build_solver_registries(events)
+    for ep in episodes:
+        ep["_registries"] = {}
+        for solver_id, registry in solver_registries.items():
+            ep["_registries"][solver_id] = registry
+
+    # Discovery Sessions (affichage global)
     discovery_data = build_discovery_data(events, llm_calls)
     attach_discovery_to_episodes(episodes, discovery_data)
+
+    # Rattachement des événements Discovery aux nœuds (pour affichage local)
+    attach_discovery_events_to_nodes(episodes, events)
 
     for turn in session_turns:
         mission_id = turn.get("mission_id")
@@ -511,6 +663,12 @@ def build_data(db_path: str, events_path: str) -> Dict[str, Any]:
                         else:
                             parsed_sigs.append(parse_signature_string(s))
                     ep["signatures"] = parsed_sigs
+
+    tools_manager_events = parse_tools_manager_events(events)
+    for ep in episodes:
+        mission_id = ep["mission_id"]
+        if mission_id in tools_manager_events:
+            ep["_tools_manager_events"] = tools_manager_events[mission_id]
 
     attach_routing_calls_to_turns(session_turns, llm_calls)
 
@@ -544,7 +702,7 @@ def render_html(data: Dict[str, Any]) -> str:
     return HTML_TEMPLATE.replace("__DATA_JSON__", json_blob)
 
 # =====================================================
-# GABARIT HTML COMPLET (v8.17)
+# GABARIT HTML COMPLET (v8.18)
 # =====================================================
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -554,7 +712,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Observabilité — ManAgent</title>
 <style>
-/* --- styles inchangés --- */
 :root {
   --bg: #f6f7f5;
   --surface: #ffffff;
@@ -987,7 +1144,6 @@ details[open] > summary .chevron { transform: rotate(90deg); }
 <script>
 const DATA = JSON.parse(document.getElementById('data-island').textContent);
 
-// Récupération des constantes
 const THRESHOLD = DATA.constants ? DATA.constants.RETRIEVAL_THRESHOLD : 0.85;
 const TOP_K = DATA.constants ? DATA.constants.RETRIEVAL_TOP_K : 20;
 
@@ -1082,7 +1238,7 @@ function renderLlmCalls(calls) {
 }
 
 // =====================================================
-// RENDU DISCOVERY (Progressive Disclosure)
+// RENDU DISCOVERY (Progressive Disclosure) – global
 // =====================================================
 function renderDiscoverySessions(ep) {
   const sessions = ep._discovery_sessions || [];
@@ -1117,10 +1273,8 @@ function renderDiscoverySessions(ep) {
           <div><span class="badge badge--${s.exit_policy === 'plan_completed' ? 'success' : 'failed'}">${esc(s.exit_policy || '—')}</span></div>
         </div>
 
-        <!-- Plan généré par l'Explorer (LLM call) -->
         ${calls.length ? `<div class="field-label">📐 Plan généré par l'Explorer</div>${renderLlmCalls(calls)}` : ''}
 
-        <!-- Étapes -->
         ${steps.length ? `<div class="field-label" style="margin-top:12px;">🔄 Étapes exécutées</div>` : ''}
         <div style="padding-left:8px;">
         ${steps.map((step, i) => {
@@ -1149,7 +1303,6 @@ function renderDiscoverySessions(ep) {
         }).join('')}
         </div>
 
-        <!-- RefinedContext final -->
         ${s.summary ? `<div style="margin-top:14px;padding:12px 16px;background:var(--accent-bg);border-radius:8px;border-left:4px solid var(--accent);">
           <div style="font-weight:700;font-size:14px;color:var(--text);">📝 RefinedContext (connaissance acquise)</div>
           <div style="white-space:pre-wrap;font-size:14px;color:var(--text-muted);margin-top:4px;">${esc(s.summary)}</div>
@@ -1195,6 +1348,35 @@ function renderRetrievalSection(retrievals) {
     </div>`;
   });
 
+  html += `</div>`;
+  return html;
+}
+
+// =====================================================
+// RENDU DES ÉVÉNEMENTS DISCOVERY DANS UN NŒUD
+// =====================================================
+function renderDiscoveryEvents(events) {
+  if (!events || events.length === 0) return '';
+  let html = `<div style="margin-top:12px; padding-left:8px; border-left: 3px solid var(--accent-2);">
+      <div style="font-size:13px; font-weight:700; color:var(--text-muted); margin-bottom:4px;">🔍 Discovery (Progressive Disclosure)</div>`;
+  events.forEach(ev => {
+    if (ev.event === 'discovery.session_start') {
+      html += `<div style="padding:4px 8px; font-size:13px; background:var(--accent-bg); border-radius:4px; margin:4px 0;">
+        <b>Session</b> : ${esc(ev.goal || '?')} → ${esc(ev.data_type||'')}/${esc(ev.target||'')}
+      </div>`;
+    } else if (ev.event === 'discovery.step') {
+      const res = ev.result || {};
+      html += `<div style="padding:4px 8px; font-size:12px; background:var(--surface-alt); border-radius:4px; margin:4px 0;">
+        <b>Étape</b> : ${esc(ev.description || '?')}
+        <span class="badge badge--${res.success !== false ? 'success' : 'failed'}">${res.success !== false ? 'OK' : 'KO'}</span>
+        ${res.data ? `<div style="font-size:11px;color:var(--text-faint);">${esc(typeof res.data === 'string' ? res.data : JSON.stringify(res.data))}</div>` : ''}
+      </div>`;
+    } else if (ev.event === 'discovery.session_end') {
+      html += `<div style="padding:4px 8px; font-size:12px; background:var(--accent-bg); border-radius:4px; margin:4px 0;">
+        <b>Fin</b> : ${esc(ev.exit_policy || '?')}
+      </div>`;
+    }
+  });
   html += `</div>`;
   return html;
 }
@@ -1278,8 +1460,16 @@ function renderSolverTree(ep, tree) {
 
     const attempts = (tree.attempts || []).map((a, i) => renderAttempt(a, i, ep)).join('');
     html += attempts;
-
     html += `</div>`;
+
+    const registry = (ep._registries && ep._registries[solverId]) || {};
+    if (Object.keys(registry).length > 0) {
+        html += `<div class="entity-block entity-block--solver">
+            <div class="entity-block__label">📋 Registre du solver (métadonnées)</div>
+            <div style="font-family:var(--mono);font-size:13px;white-space:pre-wrap;background:var(--surface-alt);padding:8px 12px;border-radius:6px;max-height:300px;overflow-y:auto;">${esc(JSON.stringify(registry, null, 2))}</div>
+        </div>`;
+    }
+
     return html;
 }
 
@@ -1343,12 +1533,73 @@ function renderNode(node, ep) {
     </div>`;
   }
 
-  let childHtml = '';
-  if (node.child_execution_tree) {
-      childHtml = `<div style="margin-top:12px; border-top: 1px dashed var(--border-strong); padding-top:12px;">
-          ${renderSolverTree(ep, node.child_execution_tree)}
+  let bodyContent = '';
+  bodyContent += `<div>${esc(node.description)}</div>`;
+  if (node.expected_result) {
+    bodyContent += `<div style="margin-top:8px"><b>attendu:</b> ${esc(node.expected_result)}</div>`;
+  }
+  if (node.actual_result) {
+    bodyContent += `<div><b>réel:</b> ${esc(node.actual_result)}</div>`;
+  }
+  if (node.error_reason) {
+    bodyContent += `<div style="color:var(--failure);margin-top:8px;font-weight:600">${esc(node.error_reason)}</div>`;
+  }
+  bodyContent += toleratedBadge;
+  if (nodeCalls.length) {
+    bodyContent += `<div class="field-label">Vérification de convergence (Executor)</div>${renderLlmCalls(nodeCalls)}`;
+  }
+  bodyContent += convergenceHtml;
+
+  // ToolsManager events
+  const toolsEvents = node._tools_manager_events || [];
+  if (toolsEvents.length > 0) {
+    bodyContent += `<div style="margin-top:12px; padding-left:8px; border-left: 3px solid var(--accent-2);">
+        <div style="font-size:13px; font-weight:700; color:var(--text-muted); margin-bottom:4px;">🔧 ToolsManager</div>`;
+    toolsEvents.forEach(ev => {
+      if (ev.event === 'tools_manager.decision') {
+        bodyContent += `<div style="padding:8px 12px;background:var(--surface-alt);border-radius:8px;margin-bottom:8px;">
+            <div><strong>Décision</strong> : ${ev.decision_success ? '✅ succès' : '❌ échec'}</div>
+            ${ev.tool_name ? `<div><strong>Outil</strong> : ${esc(ev.tool_name)}</div>` : ''}
+            ${ev.tool_args ? `<div><strong>Arguments</strong> : <pre>${esc(JSON.stringify(ev.tool_args, null, 2))}</pre></div>` : ''}
+            <div><strong>Raisonnement</strong> : ${esc(ev.reasoning)}</div>
+        </div>`;
+      } else if (ev.event === 'tools_manager.execution') {
+        bodyContent += `<div style="padding:8px 12px;background:var(--surface-alt);border-radius:8px;margin-bottom:8px;">
+            <div><strong>Exécution</strong> de ${esc(ev.tool_name)}</div>
+        </div>`;
+      } else if (ev.event === 'tools_manager.result') {
+        bodyContent += `<div style="padding:8px 12px;background:var(--surface-alt);border-radius:8px;margin-bottom:8px;">
+            <div><strong>Résultat</strong> : ${ev.result ? '✅ succès' : '❌ échec'}</div>
+            ${ev.data !== undefined ? `<div><strong>Données</strong> : <pre>${esc(JSON.stringify(ev.data, null, 2))}</pre></div>` : ''}
+            <div><strong>Message</strong> : ${esc(ev.message)}</div>
+        </div>`;
+      }
+    });
+    bodyContent += `</div>`;
+  }
+
+  // Appel LLM du ToolsManager
+  const llmCalls = node._tools_manager_llm_calls || [];
+  if (llmCalls.length > 0) {
+      bodyContent += `<div style="margin-top:12px; padding-left:8px; border-left: 3px solid var(--accent);">
+          <div style="font-size:13px; font-weight:700; color:var(--text-muted); margin-bottom:4px;">🧠 Appel LLM (ToolsManager)</div>
+          ${renderLlmCalls(llmCalls)}
       </div>`;
   }
+
+  // Discovery events rattachés à ce nœud
+  const discoveryEvents = node._discovery_events || [];
+  if (discoveryEvents.length > 0) {
+    bodyContent += renderDiscoveryEvents(discoveryEvents);
+  }
+
+  let childHtml = '';
+  if (node.child_execution_tree) {
+    childHtml = `<div style="margin-top:12px; border-top: 1px dashed var(--border-strong); padding-top:12px;">
+        ${renderSolverTree(ep, node.child_execution_tree)}
+    </div>`;
+  }
+  bodyContent += childHtml;
 
   return `<details class="step">
     <summary>
@@ -1360,14 +1611,7 @@ function renderNode(node, ep) {
       ${statusBadge(node.status)}
     </summary>
     <div class="step-body">
-      <div>${esc(node.description)}</div>
-      ${node.expected_result ? `<div style="margin-top:8px"><b>attendu:</b> ${esc(node.expected_result)}</div>` : ''}
-      ${node.actual_result ? `<div><b>réel:</b> ${esc(node.actual_result)}</div>` : ''}
-      ${node.error_reason ? `<div style="color:var(--failure);margin-top:8px;font-weight:600">${esc(node.error_reason)}</div>` : ''}
-      ${toleratedBadge}
-      ${nodeCalls.length ? `<div class="field-label">Vérification de convergence (Executor)</div>${renderLlmCalls(nodeCalls)}` : ''}
-      ${convergenceHtml}
-      ${childHtml}
+      ${bodyContent}
     </div>
   </details>`;
 }
@@ -1394,6 +1638,16 @@ function renderAttempt(attempt, idx, ep) {
     </details>`;
   }
 
+  // Discovery events rattachés à la tentative
+  const discoveryEvents = attempt._discovery_events || [];
+  let discoveryHtml = '';
+  if (discoveryEvents.length > 0) {
+    discoveryHtml = `<div class="entity-block entity-block--discovery">
+      <div class="entity-block__label">🔍 Discovery (tentative)</div>
+      ${renderDiscoveryEvents(discoveryEvents)}
+    </div>`;
+  }
+
   return `<details class="attempt" ${idx === 0 ? 'open' : ''}>
     <summary>
       <span class="chevron">▸</span>
@@ -1413,6 +1667,7 @@ function renderAttempt(attempt, idx, ep) {
         <div class="entity-block__label">⚙️ Executor — exécution étape par étape</div>
         ${nodesHtml}
       </div>
+      ${discoveryHtml}
     </div>
   </details>`;
 }
@@ -1459,7 +1714,7 @@ function renderMissionDetail(missionId) {
     html += '<div class="empty-state">Aucun arbre d\'exécution disponible.</div>';
   }
 
-  // --- SECTION DISCOVERY ---
+  // Section Discovery globale (sessions organisées par mission)
   html += renderDiscoverySessions(ep);
 
   // Presentator
@@ -1482,6 +1737,7 @@ function renderMissionDetail(missionId) {
     html += `<div class="field-label">Registre de variables résolu</div><div class="prompt-block">${esc(fmtJson(ep.resolved_data))}</div>`;
   }
   html += `</div>`;
+
   return html;
 }
 
@@ -1660,7 +1916,7 @@ selectNav('sessions');
 # =====================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Génère le rapport d'observabilité HTML autonome (v8.17).")
+    parser = argparse.ArgumentParser(description="Génère le rapport d'observabilité HTML autonome (v8.18).")
     parser.add_argument("--db", default="memory.db")
     parser.add_argument("--events", default="observability/events.jsonl")
     parser.add_argument("--out", default="observability_report.html")

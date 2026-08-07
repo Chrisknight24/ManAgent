@@ -2,7 +2,7 @@
 core/discovery/discovery_session.py
 ===================================
 Gestionnaire de la DiscoverySession.
-Version corrigée : imports locaux pour éviter les circularités.
+Version avec support du data_context (partage implicite).
 """
 
 from __future__ import annotations
@@ -66,10 +66,20 @@ class DiscoverySession:
         self._is_running = False
         self._prompt_loader = get_prompt_loader()
 
-    async def run(self) -> RefinedContext:
+        # --- NOUVEAU : stockage du contexte de données ---
+        self._data_context: Optional[Any] = None
+
+    async def run(self, data_context: Optional[Any] = None) -> RefinedContext:
         """Exécute la session et retourne un RefinedContext."""
         if self._is_running:
             raise RuntimeError(f"DiscoverySession {self.session_id} {_('déjà en cours.')}")
+
+        # --- Définir le contexte de données ---
+        if data_context is not None:
+            self._data_context = data_context
+        elif self._llm and hasattr(self._llm, 'get_data_context'):
+            self._data_context = self._llm.get_data_context()
+        # Sinon, on laisse None
 
         self._is_running = True
         Logger.info(f"[DiscoverySession:{self.session_id}] {_('Démarrage de la session.')}")
@@ -197,6 +207,7 @@ class DiscoverySession:
             )
 
         tool_args_raw = step.tool_args.copy() if step.tool_args else None
+        # On n'a pas besoin de passer data_context ici car l'explorer peut le récupérer via sa méthode
         result = await self.explorer.execute_tool(step.tool_name, step.tool_args)
 
         if "success" not in result:
@@ -257,7 +268,12 @@ class DiscoverySession:
         return "\n".join(lines)
 
     async def _emit_event(self, event_name: str, payload: dict):
+        exec_ctx = getattr(self.runtime_state, 'execution_context', {})
         payload["session_id"] = self.session_id
         payload["entity_id"] = self.entity_id
         payload["entity_type"] = getattr(self.runtime_state, "current_entity_type", "unknown")
+        payload["solver_id"] = exec_ctx.get("solver_id")
+        payload["attempt_number"] = exec_ctx.get("attempt_number")
+        payload["step_id"] = exec_ctx.get("step_id")
+        payload["mission_id"] = self.runtime_state.current_mission_id
         Logger.event(event_name, **payload)
