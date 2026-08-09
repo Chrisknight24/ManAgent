@@ -78,6 +78,7 @@ class Providers:
 class OrchestratorMode(StrEnum):
     DIRECT = "direct"
     MISSION = "mission"
+    REQUEST = "request"   # <-- AJOUT
 
 # =====================================================
 # PARAMÈTRES DE RETRIEVAL

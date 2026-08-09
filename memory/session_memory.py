@@ -87,6 +87,10 @@ class SessionContext:
         self.last_activity: datetime = datetime.now()
         self.recurrent_themes: List[Dict[str, Any]] = []   # <-- NOUVEAU
 
+        self.discovery_history: List[str] = []  # <-- NOUVEAU
+         # --- NOUVEAU : insights issus de la Progressive Disclosure ---
+        self.discovery_insights: List[Dict[str, Any]] = []
+
     def touch(self):
         """Met à jour le timestamp de la dernière activité."""
         self.last_activity = datetime.now()
@@ -102,6 +106,8 @@ class SessionContext:
             "mood": self.mood,
             "summary": self.summary,
             "last_activity": self.last_activity.isoformat(),
+            "discovery_history": self.discovery_history,
+            "discovery_insights": self.discovery_insights,
         }
 
 

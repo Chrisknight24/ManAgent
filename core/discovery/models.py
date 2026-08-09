@@ -67,19 +67,19 @@ class DiscoveryRequest(BaseModel):
     """
     discovery_needed: bool = Field(
         True,
-        description="True si une découverte est nécessaire."
+        description="True si tu souhaite obtenir des informations sur des donnees"
     )
     goal: str = Field(
         ...,
-        description="Objectif de la découverte en langage naturel (ex: 'Vérifier si l'image contient un lapin')"
+        description="Objectif de la découverte en langage naturel (ex: 'Valeur de la variable xxx du registre')"
     )
     data_type: str = Field(
         ...,
-        description="Type de données à explorer (ex: 'registry')"
+        description="Type de données à explorer (ex: 'misison')"
     )
     target: str = Field(
         ...,
-        description="Cible de la découverte (ex: 'img_data')"
+        description="Cible de la découverte (ex: 'index0')"
     )
     technical_goal: str = Field(
         ...,

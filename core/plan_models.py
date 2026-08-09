@@ -18,7 +18,7 @@ from core.execution_models import ExecutionTree
 from core.execution_models import ExecutionTree, FailureClass
 from core.base_schema import BaseDiscoverySchema
 from utils.logger import Logger  # <-- NOUVEAU pour les warnings
-
+from core.discovery.models import DiscoveryRequest
 # =====================================================
 # ÉNUMÉRATIONS
 # =====================================================
@@ -167,14 +167,42 @@ class MissionSignature(BaseModel):
     desired_state: Optional[str] = Field(None, description="État final souhaité (optionnel, ex: ouvert, fermé)")
 
 
-class OrchestratorDecision(BaseDiscoverySchema):
-    type: OrchestratorMode = Field(..., description=_("Mode de traitement : direct ou mission"))
-    output: str = Field(..., description=_("Réponse utilisateur directe OU description analytique de la mission."))
+class OrchestratorDecision(BaseModel):
+    """
+    Décision de l'Orchestrateur : choisir entre direct, mission ou request.
+    """
+    type: OrchestratorMode = Field(
+        ...,
+        description=_("Mode de traitement : direct, mission ou request")
+    )
+    output: str = Field(
+        ...,
+        description=_("Réponse utilisateur directe OU description analytique de la mission OU intention de la requête.")
+    )
     signatures: List[MissionSignature] = Field(
         default_factory=list,
-        description=_("Liste des missions simples extraites de la demande, si applicable.")
+        description=_("Liste des missions simples extraites de la demande, si applicable (obligatoire si type='mission').")
+    )
+    discovery_request: Optional[DiscoveryRequest] = Field(
+        ...,  # OBLIGATOIRE dans le JSON, mais peut être null
+        description=_(
+            "⚠️ OBLIGATOIRE : Ce champ est requis dans la réponse JSON (même pour le mettre à null). "
+            "Remplissez‑le UNIQUEMENT si vous avez choisi le type 'request'. "
+            "Dans ce cas, vous DEVEZ fournir les paramètres (goal, data_type, target, technical_goal). "
+            "Pour les types 'direct' ou 'mission', mettez‑le à null."
+        )
     )
 
+    @model_validator(mode='after')
+    def validate_discovery_consistency(self) -> 'OrchestratorDecision':
+        if self.type == OrchestratorMode.REQUEST:
+            if self.discovery_request is None:
+                raise ValueError(_("Le champ 'discovery_request' est obligatoire lorsque type='request'."))
+        else:
+            if self.discovery_request is not None:
+                raise ValueError(_("Le champ 'discovery_request' doit être null pour les types 'direct' et 'mission'."))
+        return self
+    
 
 class ConvergenceDecision(BaseDiscoverySchema):
     is_convergent: bool = Field(

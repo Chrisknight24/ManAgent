@@ -19,13 +19,13 @@ class BaseDiscoverySchema(BaseModel):
     """
 
     discovery_request: Optional[DiscoveryRequest] = Field(
-        None,
-        description=_(
-            "Remplissez ce champ UNIQUEMENT si les métadonnées fournies "
-            "ne contiennent PAS l'information demandée et que vous avez besoin "
-            "d'investiguer une donnée précise. "
-            "Indiquez le type de données (data_type), la cible (target) et "
-            "le goal technique (technical_goal) correspondant. "
-            "Si les métadonnées suffisent ou n'existent pas, laissez ce champ à None."
-        )
+    None,
+    description=_(
+        "Remplissez ce champ UNIQUEMENT si les métadonnées disponibles "
+        "ne suffisent pas à répondre et que vous avez besoin d'investiguer "
+        "une donnée précise (ex: valeur d'une variable, historique d'une mission). "
+        "Indiquez alors le type de données (data_type), la cible (target) "
+        "et le goal technique (technical_goal) correspondant. "
+        "Si les données disponibles suffisent, laissez ce champ à None."
     )
+)

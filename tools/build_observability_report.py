@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-build_observability_report.py (v8.18)
+build_observability_report.py (v8.21)
 =====================================
-- Ajout de la section Discovery (Progressive Disclosure) avec rattachement aux étapes
-- Affichage du plan généré par l'Explorer (LLM call)
-- Affichage des étapes, outils, questions/réponses
-- Rattachement des découvertes aux entités et missions
-- Corrections des doublons et des variables manquantes
+- Ajout de l'affichage des sessions Discovery (Progressive Disclosure) dans le fil de la session
+- Rattachement par session_id en plus de mission_id
+- Fonction renderDiscoverySessionCompact pour un affichage synthétique
 """
 
 import argparse
@@ -102,18 +100,6 @@ def load_lessons(db_path: str) -> List[Dict[str, Any]]:
         lessons.append({**row, "keywords": keywords, "source_episodes": source_episodes})
     return lessons
 
-def parse_tools_manager_events(events: List[Dict]) -> Dict[str, Any]:
-    by_mission = {}
-    for ev in events:
-        event_type = ev.get("event")
-        if not event_type or not event_type.startswith("tools_manager."):
-            continue
-        mission_id = ev.get("mission_id")
-        if not mission_id:
-            continue
-        by_mission.setdefault(mission_id, []).append(ev)
-    return by_mission
-
 def load_events(events_path: str) -> List[Dict[str, Any]]:
     if not os.path.exists(events_path):
         return []
@@ -137,7 +123,7 @@ PRESENTATOR_TAGS = {"generate_text", "Presentator_report", "Presentator_error", 
 FEASIBILITY_TAGS = {"FeasibilityDecision", "SignatureExtractor"}
 PLANNING_TAGS = {"Plan", "RerankedLessons", "MissionCompactor"}
 CONVERGENCE_TAGS = {"ConvergenceDecision"}
-EXPLORER_PLAN_TAGS = {"explorer_plan_generation"}
+EXPLORER_PLAN_TAGS = {"explorer_plan_generation", "explorer_plan_generation_mission"}
 
 # =====================================================
 # UTILITAIRES
@@ -182,18 +168,21 @@ def _store_call_on_attempt(attempt, call, tag):
 def _collect_attempts(tree, attempt_index, all_attempts):
     if not tree:
         return
-    solver_id = tree.get("solver_id")
-    for attempt in tree.get("attempts", []):
-        attempt_num = attempt.get("attempt_number")
-        if solver_id is not None and attempt_num is not None:
-            attempt_index[(solver_id, attempt_num)] = attempt
-        start = attempt.get("started_at")
-        end = attempt.get("ended_at")
-        all_attempts.append((attempt, start, end))
-        for node in attempt.get("nodes", []):
-            child_tree = node.get("child_execution_tree")
-            if child_tree:
-                _collect_attempts(child_tree, attempt_index, all_attempts)
+    stack = [tree]
+    while stack:
+        current = stack.pop()
+        solver_id = current.get("solver_id")
+        for attempt in current.get("attempts", []):
+            attempt_num = attempt.get("attempt_number")
+            if solver_id is not None and attempt_num is not None:
+                attempt_index[(solver_id, attempt_num)] = attempt
+            start = attempt.get("started_at")
+            end = attempt.get("ended_at")
+            all_attempts.append((attempt, start, end))
+            for node in attempt.get("nodes", []):
+                child_tree = node.get("child_execution_tree")
+                if child_tree:
+                    stack.append(child_tree)
 
 def build_solver_to_mission_map(episodes):
     solver_to_mission = {}
@@ -219,24 +208,13 @@ def build_solver_to_mission_map(episodes):
     return solver_to_mission
 
 # =====================================================
-# RATTACHEMENT DES ÉVÉNEMENTS DISCOVERY
+# RATTACHEMENT DES ÉVÉNEMENTS DISCOVERY (MODIFIÉ)
 # =====================================================
 
 def build_discovery_data(events: List[Dict], llm_calls: List[Dict]) -> Dict[str, Any]:
-    """
-    Extrait les événements Discovery et les organise par mission.
-    Chaque session contient :
-      - session_id, entity_id, entity_name, entity_role
-      - goal, data_type, target, technical_goal
-      - exit_policy, summary (RefinedContext)
-      - steps: liste des étapes
-      - explorer_plan_calls: appels LLM liés à la génération du plan
-      - cache_hit: bool
-    """
     discovery_events = [e for e in events if e.get("event", "").startswith("discovery.")]
     sessions_by_id = {}
 
-    # Index des llm_calls par session_id
     llm_calls_by_session = {}
     for call in llm_calls:
         tag = call.get("tag", "")
@@ -275,6 +253,7 @@ def build_discovery_data(events: List[Dict], llm_calls: List[Dict]) -> Dict[str,
             session["data_type"] = ev.get("data_type")
             session["target"] = ev.get("target")
             session["technical_goal"] = ev.get("technical_goal")
+            session["cache_hit"] = ev.get("cache_hit", False)   # <-- on stocke le flag
             session["start_time"] = ev.get("ts")
         elif ev.get("event") == "discovery.session_end":
             session["exit_policy"] = ev.get("exit_policy")
@@ -294,20 +273,70 @@ def build_discovery_data(events: List[Dict], llm_calls: List[Dict]) -> Dict[str,
         elif ev.get("event") == "discovery.cache_hit":
             session["cache_hit"] = True
 
-    # Organiser par mission
     by_mission = {}
+    by_session = {}
     for session_id, session in sessions_by_id.items():
+        by_session.setdefault(session_id, []).append(session)
         mission_id = session.get("mission_id")
         if mission_id:
             by_mission.setdefault(mission_id, []).append(session)
 
-    return {"by_mission": by_mission}
+    return {"by_mission": by_mission, "by_session": by_session}
 
 def attach_discovery_to_episodes(episodes, discovery_data):
     for ep in episodes:
         mission_id = ep["mission_id"]
-        if mission_id in discovery_data["by_mission"]:
+        if mission_id in discovery_data.get("by_mission", {}):
             ep["_discovery_sessions"] = discovery_data["by_mission"][mission_id]
+        else:
+            ep["_discovery_sessions"] = []
+
+def attach_discovery_events_to_nodes(episodes, events):
+    discovery_events = [e for e in events if e.get("event", "").startswith("discovery.")]
+    if not discovery_events:
+        return
+
+    by_key = {}
+    for ev in discovery_events:
+        mission_id = ev.get("mission_id")
+        solver_id = ev.get("solver_id")
+        attempt_number = ev.get("attempt_number")
+        step_id = ev.get("step_id")
+        if mission_id and solver_id and attempt_number is not None:
+            key = (mission_id, solver_id, attempt_number, step_id)
+            by_key.setdefault(key, []).append(ev)
+
+    for ep in episodes:
+        mission_id = ep.get("mission_id")
+        if not mission_id:
+            continue
+        tree = ep.get("execution_tree")
+        if not tree:
+            continue
+
+        def traverse(node):
+            if not node:
+                return
+            solver_id = node.get("solver_id")
+            for attempt in node.get("attempts", []):
+                attempt_num = attempt.get("attempt_number")
+                key_without_step = (mission_id, solver_id, attempt_num, None)
+                events_for_attempt = by_key.get(key_without_step, [])
+                if events_for_attempt:
+                    attempt.setdefault("_discovery_events", []).extend(events_for_attempt)
+
+                for step_node in attempt.get("nodes", []):
+                    step_id = step_node.get("step_id")
+                    key_with_step = (mission_id, solver_id, attempt_num, step_id)
+                    events_for_step = by_key.get(key_with_step, [])
+                    if events_for_step:
+                        step_node.setdefault("_discovery_events", []).extend(events_for_step)
+
+                for step_node in attempt.get("nodes", []):
+                    child_tree = step_node.get("child_execution_tree")
+                    if child_tree:
+                        traverse(child_tree)
+        traverse(tree)
 
 # =====================================================
 # RATTACHEMENT DES APPELS LLM AUX TENTATIVES
@@ -339,8 +368,6 @@ def attach_llm_calls_by_mission(episodes, llm_calls):
             attempt_num = call.get("attempt_number")
             tag = call.get("tag")
 
-            # --- Spécial : rattacher les appels tools_manager_decision ---
-            # (seuls ces appels sont rattachés par step_id)
             if tag == "tools_manager_decision":
                 step_id = call.get("step_id")
                 if step_id and solver_id is not None and attempt_num is not None:
@@ -351,10 +378,13 @@ def attach_llm_calls_by_mission(episodes, llm_calls):
                                 node.setdefault("_tools_manager_llm_calls", []).append(call)
                                 break
                 continue
-            # --------------------------------------------------------------
 
-            # --- Le reste est identique à la version qui fonctionnait ---
             if tag in FEASIBILITY_TAGS:
+                if solver_id is not None and attempt_num is not None:
+                    attempt = attempt_index.get((solver_id, attempt_num))
+                    if attempt:
+                        _store_call_on_attempt(attempt, call, tag)
+                        continue
                 if solver_id:
                     ep.setdefault("_solver_preparations", {}).setdefault(solver_id, []).append(call)
                 else:
@@ -408,23 +438,21 @@ def attach_llm_calls_by_mission(episodes, llm_calls):
                         continue
                 _store_call_in_episode(ep, call, tag)
                 continue
-            
 
-                        # --- Rattachement général pour les appels avec step_id ---
-            step_id = call.get("step_id")
-            if step_id and solver_id is not None and attempt_num is not None:
+            if solver_id is not None and attempt_num is not None:
                 attempt = attempt_index.get((solver_id, attempt_num))
                 if attempt:
-                    for node in attempt.get("nodes", []):
-                        if node.get("step_id") == step_id:
-                            node.setdefault("_node_calls", []).append(call)
-                            break
-                continue
-            # --------------------------------------------------------
+                    step_id = call.get("step_id")
+                    if step_id:
+                        for node in attempt.get("nodes", []):
+                            if node.get("step_id") == step_id:
+                                node.setdefault("_node_calls", []).append(call)
+                                break
+                    else:
+                        attempt.setdefault("_other_calls", []).append(call)
+                    continue
 
-            # Si aucun rattachement n'a eu lieu, on tombe dans _store_call_in_episode
             _store_call_in_episode(ep, call, tag)
-
 
     if orphan_calls:
         solver_to_mission = {}
@@ -455,57 +483,6 @@ def attach_llm_calls_by_mission(episodes, llm_calls):
                 ep = ep_index.get(mission_id)
                 if ep:
                     ep.setdefault("_other_calls", []).append(call)
-# =====================================================
-# RATTACHEMENT DES ÉVÉNEMENTS DISCOVERY AUX NŒUDS
-# =====================================================
-
-def attach_discovery_events_to_nodes(episodes, events):
-    """Rattache les événements Discovery aux nœuds correspondants via solver_id, attempt_number, step_id."""
-    discovery_events = [e for e in events if e.get("event", "").startswith("discovery.")]
-    if not discovery_events:
-        return
-
-    by_key = {}
-    for ev in discovery_events:
-        mission_id = ev.get("mission_id")
-        solver_id = ev.get("solver_id")
-        attempt_number = ev.get("attempt_number")
-        step_id = ev.get("step_id")
-        if mission_id and solver_id and attempt_number is not None:
-            key = (mission_id, solver_id, attempt_number, step_id)
-            by_key.setdefault(key, []).append(ev)
-
-    for ep in episodes:
-        mission_id = ep.get("mission_id")
-        if not mission_id:
-            continue
-        tree = ep.get("execution_tree")
-        if not tree:
-            continue
-
-        def traverse(node):
-            if not node:
-                return
-            solver_id = node.get("solver_id")
-            for attempt in node.get("attempts", []):
-                attempt_num = attempt.get("attempt_number")
-                key_without_step = (mission_id, solver_id, attempt_num, None)
-                events_for_attempt = by_key.get(key_without_step, [])
-                if events_for_attempt:
-                    attempt.setdefault("_discovery_events", []).extend(events_for_attempt)
-
-                for step_node in attempt.get("nodes", []):
-                    step_id = step_node.get("step_id")
-                    key_with_step = (mission_id, solver_id, attempt_num, step_id)
-                    events_for_step = by_key.get(key_with_step, [])
-                    if events_for_step:
-                        step_node.setdefault("_discovery_events", []).extend(events_for_step)
-
-                for step_node in attempt.get("nodes", []):
-                    child_tree = step_node.get("child_execution_tree")
-                    if child_tree:
-                        traverse(child_tree)
-        traverse(tree)
 
 # =====================================================
 # RATTACHEMENT DES RETRIEVAL AUX SOLVERS
@@ -578,12 +555,27 @@ def attach_routing_calls_to_turns(session_turns, llm_calls):
         call_ts = _parse_ts(call.get("ts"))
         if call_ts is None:
             continue
+
         best = None
+        best_diff = float('inf')
         for turn in turns_by_session[sid]:
             turn_ts = _parse_ts(turn.get("ts"))
-            if turn_ts is not None and turn_ts >= call_ts:
-                best = turn
-                break
+            if turn_ts is not None:
+                diff = turn_ts - call_ts
+                if diff >= 0 and diff < best_diff:
+                    best_diff = diff
+                    best = turn
+
+        if best is None:
+            best_diff = float('inf')
+            for turn in turns_by_session[sid]:
+                turn_ts = _parse_ts(turn.get("ts"))
+                if turn_ts is not None:
+                    diff = abs(turn_ts - call_ts)
+                    if diff < best_diff:
+                        best_diff = diff
+                        best = turn
+
         if best:
             best["_routing_call"] = call
 
@@ -628,24 +620,27 @@ def build_data(db_path: str, events_path: str) -> Dict[str, Any]:
     retrieval_events = [e for e in events if e.get("event") == "retriever_results"]
     tools_events = [e for e in events if e.get("event", "").startswith("tools_manager.")]
 
-    # Rattachement des appels LLM
     attach_llm_calls_by_mission(episodes, llm_calls)
     attach_retrieval_to_episodes(episodes, retrieval_events)
     attach_tools_manager_events_to_attempts(episodes, tools_events)
 
-    # Registres des Solvers
     solver_registries = build_solver_registries(events)
     for ep in episodes:
         ep["_registries"] = {}
         for solver_id, registry in solver_registries.items():
             ep["_registries"][solver_id] = registry
 
-    # Discovery Sessions (affichage global)
     discovery_data = build_discovery_data(events, llm_calls)
     attach_discovery_to_episodes(episodes, discovery_data)
-
-    # Rattachement des événements Discovery aux nœuds (pour affichage local)
     attach_discovery_events_to_nodes(episodes, events)
+
+    # Ajouter les sessions Discovery aux tours de session
+    for turn in session_turns:
+        session_id = turn.get("session_id")
+        if session_id and session_id in discovery_data.get("by_session", {}):
+            turn["_discovery_sessions"] = discovery_data["by_session"][session_id]
+        else:
+            turn["_discovery_sessions"] = []
 
     for turn in session_turns:
         mission_id = turn.get("mission_id")
@@ -664,7 +659,13 @@ def build_data(db_path: str, events_path: str) -> Dict[str, Any]:
                             parsed_sigs.append(parse_signature_string(s))
                     ep["signatures"] = parsed_sigs
 
-    tools_manager_events = parse_tools_manager_events(events)
+    tools_manager_events = {}
+    for ev in events:
+        event_type = ev.get("event")
+        if event_type and event_type.startswith("tools_manager."):
+            mission_id = ev.get("mission_id")
+            if mission_id:
+                tools_manager_events.setdefault(mission_id, []).append(ev)
     for ep in episodes:
         mission_id = ep["mission_id"]
         if mission_id in tools_manager_events:
@@ -686,23 +687,7 @@ def build_data(db_path: str, events_path: str) -> Dict[str, Any]:
     }
 
 # =====================================================
-# RENDU HTML
-# =====================================================
-
-def render_html(data: Dict[str, Any]) -> str:
-    data = {**data, "generated_at": datetime.now().isoformat(timespec="seconds")}
-    data["constants"] = {
-        "RETRIEVAL_THRESHOLD": RETRIEVAL_THRESHOLD,
-        "RETRIEVAL_TOP_K": RETRIEVAL_TOP_K
-    }
-    json_blob = json.dumps(data, ensure_ascii=False, default=str)
-    if not json_blob.endswith("}"):
-        raise RuntimeError("JSON tronqué !")
-    json_blob = json_blob.replace("</script", "<\\/script")
-    return HTML_TEMPLATE.replace("__DATA_JSON__", json_blob)
-
-# =====================================================
-# GABARIT HTML COMPLET (v8.18)
+# GABARIT HTML (v8.21)
 # =====================================================
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -1119,6 +1104,47 @@ details[open] > summary .chevron { transform: rotate(90deg); }
   border: 1.5px solid transparent;
 }
 .source-ep-link:hover { border-color: var(--accent); box-shadow: var(--shadow-sm); }
+
+.discovery-compact {
+  background: var(--surface-alt);
+  border-radius: 8px;
+  padding: 12px;
+  margin-top: 8px;
+  border-left: 4px solid var(--accent-2);
+}
+.discovery-compact__header {
+  font-weight: 700;
+  font-size: 14px;
+}
+.discovery-compact__meta {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+.discovery-compact__summary {
+  font-size: 13px;
+  margin-top: 6px;
+  white-space: pre-wrap;
+}
+.discovery-compact__steps {
+  font-size: 12px;
+  color: var(--text-faint);
+  margin-top: 4px;
+}
+
+.discovery-body .prompt-block {
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  max-width: 100%;
+}
+.discovery-compact {
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+.step-body {
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
 </style>
 </head>
 <body>
@@ -1210,6 +1236,35 @@ function findEpisode(missionId) {
 }
 
 // =====================================================
+// RENDU DES SESSIONS DISCOVERY (compact)
+// =====================================================
+function renderDiscoverySessionCompact(session) {
+    if (!session) return '';
+    const technicalGoal = session.technical_goal || 'non spécifié';
+    const dataType = session.data_type || '?';
+    const target = session.target || '?';
+    const goal = session.goal || 'Objectif non défini';
+    let html = `<div class="discovery-compact">
+        <div class="discovery-compact__header">🔍 Découverte</div>
+        <div class="discovery-compact__meta">
+            ${goal ? 'Objectif : '+esc(goal) : ''}
+            ${' · Type : '+esc(dataType)}
+            ${' · Cible : '+esc(target)}
+            ${' · Goal : '+esc(technicalGoal)}
+            ${session.cache_hit ? '<span class="badge badge--cache">Cache</span>' : ''}
+            ${session.exit_policy ? statusBadge(session.exit_policy === 'plan_completed' ? 'success' : 'failed') : ''}
+        </div>
+        ${session.summary ? `<div class="discovery-compact__summary">${esc(session.summary)}</div>` : ''}
+        ${session.steps && session.steps.length ? `<div class="discovery-compact__steps">${session.steps.length} étape(s) exécutée(s)</div>` : ''}
+    </div>`;
+    return html;
+}
+function renderDiscoverySessionsCompact(sessions) {
+    if (!sessions || sessions.length === 0) return '';
+    return sessions.map(s => renderDiscoverySessionCompact(s)).join('');
+}
+
+// =====================================================
 // APPELS LLM (rendu)
 // =====================================================
 function renderLlmCall(c) {
@@ -1251,12 +1306,18 @@ function renderDiscoverySessions(ep) {
     const steps = s.steps || [];
     const calls = s.explorer_plan_calls || [];
 
+    // Valeurs par défaut pour éviter '—'
+    const technicalGoal = s.technical_goal || 'non spécifié';
+    const dataType = s.data_type || '?';
+    const target = s.target || '?';
+    const goal = s.goal || 'Objectif non défini';
+
     html += `<details class="discovery-session" ${idx === 0 ? 'open' : ''}>
       <summary>
         <span class="chevron">▸</span>
         <span style="font-weight:700;">🧠 ${esc(s.entity_name || '?')} (${esc(s.entity_role || '?')})</span>
-        <span class="badge badge--entity">${esc(s.goal || '?')}</span>
-        <span class="badge badge--info" style="background:var(--accent-bg);color:var(--accent);">${esc(s.data_type || '?')} / ${esc(s.target || '?')}</span>
+        <span class="badge badge--entity">${esc(goal)}</span>
+        <span class="badge badge--info" style="background:var(--accent-bg);color:var(--accent);">${esc(dataType)} / ${esc(target)}</span>
         ${s.cache_hit ? '<span class="badge badge--cache">⚡ Cache</span>' : ''}
         ${s.exit_policy ? `<span class="badge badge--${s.exit_policy === 'plan_completed' ? 'success' : 'failed'}">${esc(s.exit_policy)}</span>` : ''}
         <span style="font-size:13px;color:var(--text-faint);font-family:var(--mono);margin-left:auto;">${steps.length} étapes</span>
@@ -1264,11 +1325,11 @@ function renderDiscoverySessions(ep) {
       <div class="discovery-body">
         <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 16px;font-size:14px;margin-bottom:12px;">
           <div style="font-weight:600;color:var(--text-faint);">Goal technique</div>
-          <div style="font-family:var(--mono);">${esc(s.technical_goal || '—')}</div>
+          <div style="font-family:var(--mono);word-break:break-all;">${esc(technicalGoal)}</div>
           <div style="font-weight:600;color:var(--text-faint);">Data type</div>
-          <div>${esc(s.data_type || '—')}</div>
+          <div>${esc(dataType)}</div>
           <div style="font-weight:600;color:var(--text-faint);">Target</div>
-          <div style="font-family:var(--mono);">${esc(s.target || '—')}</div>
+          <div style="font-family:var(--mono);word-break:break-all;">${esc(target)}</div>
           <div style="font-weight:600;color:var(--text-faint);">Exit policy</div>
           <div><span class="badge badge--${s.exit_policy === 'plan_completed' ? 'success' : 'failed'}">${esc(s.exit_policy || '—')}</span></div>
         </div>
@@ -1280,13 +1341,15 @@ function renderDiscoverySessions(ep) {
         ${steps.map((step, i) => {
           const result = step.result || {};
           const success = result.success !== false;
+          const stepDesc = step.description || 'Étape sans description';
+          const toolName = step.tool_name || 'outil inconnu';
           let detailHtml = '';
           if (step.step_type === 'tool') {
-            detailHtml = `<span class="step-tool">🔧 ${esc(step.tool_name || '?')}</span>
+            detailHtml = `<span class="step-tool">🔧 ${esc(toolName)}</span>
                           <div style="font-size:13px;color:var(--text-muted);margin-top:4px;">
                             <span style="font-weight:600;">Résultat :</span>
                             ${success ? '<span style="color:var(--success);">✅ succès</span>' : '<span style="color:var(--failure);">❌ échec</span>'}
-                            ${result.data ? `<div style="font-family:var(--mono);font-size:12px;background:var(--surface-alt);padding:4px 8px;border-radius:4px;margin-top:4px;">${esc(typeof result.data === 'string' ? result.data : JSON.stringify(result.data))}</div>` : ''}
+                            ${result.data ? `<div style="font-family:var(--mono);font-size:12px;background:var(--surface-alt);padding:4px 8px;border-radius:4px;margin-top:4px;word-break:break-word;">${esc(typeof result.data === 'string' ? result.data : JSON.stringify(result.data))}</div>` : ''}
                           </div>`;
           } else if (step.step_type === 'semantic') {
             detailHtml = `<div style="font-size:13px;color:var(--text-muted);"><span style="font-weight:600;">Question :</span> ${esc(step.question || '?')}</div>
@@ -1294,8 +1357,8 @@ function renderDiscoverySessions(ep) {
           }
           return `<div style="display:flex;gap:10px;padding:6px 0;border-bottom:1px solid var(--surface-alt);align-items:flex-start;">
             <span style="font-family:var(--mono);font-size:12px;color:var(--text-faint);min-width:60px;">#${i+1}</span>
-            <div style="flex:1;">
-              <div style="font-weight:600;">${esc(step.description || '?')}</div>
+            <div style="flex:1;word-break:break-word;">
+              <div style="font-weight:600;">${esc(stepDesc)}</div>
               ${detailHtml}
             </div>
             <span class="badge badge--${success ? 'success' : 'failed'}">${success ? 'OK' : 'KO'}</span>
@@ -1305,7 +1368,7 @@ function renderDiscoverySessions(ep) {
 
         ${s.summary ? `<div style="margin-top:14px;padding:12px 16px;background:var(--accent-bg);border-radius:8px;border-left:4px solid var(--accent);">
           <div style="font-weight:700;font-size:14px;color:var(--text);">📝 RefinedContext (connaissance acquise)</div>
-          <div style="white-space:pre-wrap;font-size:14px;color:var(--text-muted);margin-top:4px;">${esc(s.summary)}</div>
+          <div style="white-space:pre-wrap;font-size:14px;color:var(--text-muted);margin-top:4px;word-break:break-word;">${esc(s.summary)}</div>
         </div>` : ''}
       </div>
     </details>`;
@@ -1314,7 +1377,6 @@ function renderDiscoverySessions(ep) {
   html += `</div>`;
   return html;
 }
-
 // =====================================================
 // RENDU RETRIEVAL
 // =====================================================
@@ -1763,6 +1825,21 @@ function renderSessionThread(sessionId) {
         <div class="thread-turn__badge-row"><span class="responder-tag">🧭 ORCHESTRATOR · réponse directe</span></div>
         ${esc(t.response || '')}
       </div>`;
+
+      if (t._routing_call) {
+        html += `<div style="max-width:85%;margin-top:6px;margin-left:0;border-left:2px solid var(--accent);padding-left:12px;">`;
+        html += `<div style="font-size:12px;color:var(--text-faint);font-weight:600;margin-bottom:2px;">🧭 Orchestrator — décision de routage (direct)</div>`;
+        html += renderLlmCall(t._routing_call);
+        html += `</div>`;
+      }
+
+      // Affichage des sessions Discovery du tour (direct)
+      if (t._discovery_sessions && t._discovery_sessions.length > 0) {
+        html += `<div style="max-width:85%;margin-top:6px;margin-left:0;padding-left:12px;">`;
+        html += renderDiscoverySessionsCompact(t._discovery_sessions);
+        html += `</div>`;
+      }
+
     } else {
       const ep = findEpisode(t.mission_id);
       html += `<div class="mission-card clickable" onclick="openMission('${esc(t.mission_id)}')">
@@ -1779,6 +1856,13 @@ function renderSessionThread(sessionId) {
         html += `<div style="max-width:85%;margin-top:6px;margin-left:0;border-left:2px solid var(--accent);padding-left:12px;">`;
         html += `<div style="font-size:12px;color:var(--text-faint);font-weight:600;margin-bottom:2px;">🧭 Orchestrator — décision de routage</div>`;
         html += renderLlmCall(t._routing_call);
+        html += `</div>`;
+      }
+
+      // Affichage des sessions Discovery du tour (mission)
+      if (t._discovery_sessions && t._discovery_sessions.length > 0) {
+        html += `<div style="max-width:85%;margin-top:6px;margin-left:0;padding-left:12px;">`;
+        html += renderDiscoverySessionsCompact(t._discovery_sessions);
         html += `</div>`;
       }
     }
@@ -1910,13 +1994,24 @@ selectNav('sessions');
 </body>
 </html>
 """
+def render_html(data: Dict[str, Any]) -> str:
+    data = {**data, "generated_at": datetime.now().isoformat(timespec="seconds")}
+    data["constants"] = {
+        "RETRIEVAL_THRESHOLD": RETRIEVAL_THRESHOLD,
+        "RETRIEVAL_TOP_K": RETRIEVAL_TOP_K
+    }
+    json_blob = json.dumps(data, ensure_ascii=False, default=str)
+    if not json_blob.endswith("}"):
+        raise RuntimeError("JSON tronqué !")
+    json_blob = json_blob.replace("</script", "<\\/script")
+    return HTML_TEMPLATE.replace("__DATA_JSON__", json_blob)
 
 # =====================================================
 # MAIN
 # =====================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Génère le rapport d'observabilité HTML autonome (v8.18).")
+    parser = argparse.ArgumentParser(description="Génère le rapport d'observabilité HTML autonome (v8.21).")
     parser.add_argument("--db", default="memory.db")
     parser.add_argument("--events", default="observability/events.jsonl")
     parser.add_argument("--out", default="observability_report.html")

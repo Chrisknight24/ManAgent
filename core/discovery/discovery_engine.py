@@ -97,7 +97,7 @@ class DiscoveryEngine:
         plan: DiscoveryPlan,
         llm: Optional[Llm] = None,
         data_provider: Optional['DataProvider'] = None,
-        data_context: Optional[Any] = None  # <-- NOUVEAU PARAMÈTRE
+        data_context: Optional[Any] = None
     ) -> RefinedContext:
         if not plan.signature:
             explorer = self.get_explorer(plan.data_type)
@@ -109,6 +109,10 @@ class DiscoveryEngine:
         if cached:
             Logger.info(f"[DiscoveryEngine] {_('Cache hit pour')} {plan.signature}")
             Logger.event(Events.DISCOVERY_CACHE_HIT, signature=plan.signature, entity_id=entity_id)
+            
+            # --- NOUVEAU : émettre les événements détaillés pour l'observabilité ---
+            await self._emit_discovery_events_from_cache(entity_id, plan, cached)
+            
             return cached
 
         explorer = self.get_explorer(plan.data_type)
@@ -138,6 +142,63 @@ class DiscoveryEngine:
 
         return refined
 
+    async def _emit_discovery_events_from_cache(self, entity_id: str, plan: DiscoveryPlan, refined: RefinedContext) -> None:
+        """
+        Émet les événements discovery.session_start/end/step à partir d'un RefinedContext en cache.
+        Utilise Logger.event pour l'observabilité (fichier JSONL).
+        """
+        session_id = plan.signature
+
+        # Récupérer le contexte d'exécution pour enrichir les événements
+        exec_ctx = getattr(self.runtime_state, 'execution_context', {})
+        solver_id = exec_ctx.get("solver_id")
+        attempt_number = exec_ctx.get("attempt_number")
+        step_id = exec_ctx.get("step_id")
+        mission_id = getattr(self.runtime_state, 'current_mission_id', None)
+
+        # Émettre session_start
+        Logger.event(Events.DISCOVERY_SESSION_START, **{
+            "session_id": session_id,
+            "entity_id": entity_id,
+            "goal": plan.goal,
+            "data_type": plan.data_type,
+            "target": plan.target,
+            "technical_goal": plan.technical_goal,
+            "max_iterations": 10,
+            "cache_hit": True,
+            "solver_id": solver_id,
+            "attempt_number": attempt_number,
+            "step_id": step_id,
+            "mission_id": mission_id
+        })
+
+        # Émettre chaque étape (si présentes)
+        for entry in refined.entries:
+            step_type = "tool" if entry.tool_name else "semantic"
+            result = entry.tool_result or {"success": True, "data": entry.answer}
+            Logger.event(Events.DISCOVERY_STEP, **{
+                "session_id": session_id,
+                "step_id": entry.step_id,
+                "step_type": step_type,
+                "description": entry.question,
+                "tool_name": entry.tool_name,
+                "result": result,
+                "cache_hit": True
+            })
+
+        # Émettre session_end
+        Logger.event(Events.DISCOVERY_SESSION_END, **{
+            "session_id": session_id,
+            "exit_policy": refined.exit_policy.value,
+            "summary": refined.summary,
+            "entries_count": len(refined.entries),
+            "cache_hit": True,
+            "solver_id": solver_id,
+            "attempt_number": attempt_number,
+            "step_id": step_id,
+            "mission_id": mission_id
+        })
+            
     async def execute_discovery_request(
         self,
         entity_id: str,

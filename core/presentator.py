@@ -115,9 +115,15 @@ class Presentator(Entity):
         registry_provider = PresentatorRegistryProvider(registry)
         self.register_data_provider("registry", registry_provider)
         self.llm.enable_discovery(self.runtime_state.discovery_engine, self)
+        
+        # --- NOUVEAU : définir le data_context pour que les Explorers accèdent directement au registre ---
+        if registry:
+            self.llm.set_data_context(registry)
+            Logger.debug("[Presentator] data_context défini avec le registre source.")
+        
         self._discovery_activated = True
         Logger.info("[Presentator] Progressive Disclosure activée avec DataProvider dynamique.")
-
+        
     # ============================================================
     # MÉTHODE STRUCTURÉE – AVEC VUE NORMALISÉE ET RUM
     # ============================================================

@@ -26,11 +26,20 @@ class SessionStore:
                         mood TEXT,
                         last_mission_status TEXT,
                         last_activity DATETIME,
+                        discovery_history TEXT,       -- JSON : ["sig1", "sig2"]   <-- NOUVEAU
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                     )
                 ''')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_sessions_activity ON sessions(last_activity)')
+                
+                # Migration : ajouter la colonne discovery_history si elle n'existe pas
+                try:
+                    cursor.execute("ALTER TABLE sessions ADD COLUMN discovery_history TEXT DEFAULT '[]'")
+                    Logger.info("[SessionStore] Migration: colonne 'discovery_history' ajoutée.")
+                except sqlite3.OperationalError:
+                    pass  # colonne déjà présente
+                
                 conn.commit()
                 Logger.info("[SessionStore] Table 'sessions' prête.")
         except Exception as e:
@@ -39,7 +48,7 @@ class SessionStore:
     def upsert_session(self, session_id: str, context_dict: Dict[str, Any]) -> None:
         """
         Sauvegarde ou met à jour une session.
-        context_dict doit contenir : goal_stack, unresolved_issues, mission_history, mood, last_mission_status
+        context_dict peut contenir : goal_stack, unresolved_issues, mission_history, mood, last_mission_status, discovery_history
         """
         try:
             with self._get_connection() as conn:
@@ -53,8 +62,9 @@ class SessionStore:
                         mood,
                         last_mission_status,
                         last_activity,
+                        discovery_history,
                         updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ''', (
                     session_id,
                     json.dumps(context_dict.get("goal_stack", []), ensure_ascii=False),
@@ -62,7 +72,8 @@ class SessionStore:
                     json.dumps(context_dict.get("mission_history", []), ensure_ascii=False),
                     context_dict.get("mood"),
                     context_dict.get("last_mission_status"),
-                    datetime.now().isoformat()
+                    datetime.now().isoformat(),
+                    json.dumps(context_dict.get("discovery_history", []), ensure_ascii=False)
                 ))
                 conn.commit()
         except Exception as e:
@@ -80,6 +91,7 @@ class SessionStore:
                     d["goal_stack"] = json.loads(d.get("goal_stack") or "[]")
                     d["unresolved_issues"] = json.loads(d.get("unresolved_issues") or "[]")
                     d["mission_history"] = json.loads(d.get("mission_history") or "[]")
+                    d["discovery_history"] = json.loads(d.get("discovery_history") or "[]")
                     return d
                 return None
         except Exception as e:
@@ -97,16 +109,10 @@ class SessionStore:
             Logger.error(f"[SessionStore] Erreur delete_session {session_id} : {e}")
     
     def get_recurrent_themes(self, session_id: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """
-        Retourne les scopes de leçons les plus fréquents pour une session donnée.
-        Se base sur source_episodes_json (qui contient les mission_id).
-        """
         try:
             with self._get_connection() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
-                # On cherche les leçons dont source_episodes_json contient une mission de cette session
-                # (la colonne source_episodes_json est un JSON list)
                 cursor.execute('''
                     SELECT scope, COUNT(*) as occurrences
                     FROM lessons

@@ -52,6 +52,9 @@ from memory.fingerprint_store import FingerprintStore
 
 from tools.tools_manager import ToolsManager
 
+from core.discovery.providers.mission_history_provider import MissionHistoryProvider
+from core.discovery.explorers.mission_history_explorer import MissionHistoryExplorer
+
 class Orchestrator(Supervisor, Entity):
     """
     Orchestrateur central – Point d'entrée unique du runtime.
@@ -152,11 +155,56 @@ class Orchestrator(Supervisor, Entity):
 
         # 1. Charger / créer le contexte de session
         session_memory = await self._load_session_context(session_id)
-        self.runtime_state.session_memory = session_memory   # <-- partout
+        self.runtime_state.session_memory = session_memory
 
+        # Enregistrer le DataProvider pour l'historique des missions de cette session
+        if self.runtime_state.discovery_engine:
+            mission_history_provider = MissionHistoryProvider(session_id, self.mission_store)
+            self.register_data_provider("missions", mission_history_provider)
+            Logger.debug(f"[Orchestrator] MissionHistoryProvider enregistré pour la session {session_id}")
+
+        # --- GESTION DU LLM DE L'ORCHESTRATEUR ---
+        if self.llm is None:
+            self.llm = Llm(
+                provider_manager=self.provider_manager,
+                provider_id=forced_provider,
+                model_id=forced_model,
+                runtime_state=self.runtime_state
+            )
+            if self.runtime_state.discovery_engine:
+                self.llm.enable_discovery(self.runtime_state.discovery_engine, self)
+                Logger.info("[Orchestrator] Progressive Disclosure activée pour l'Orchestrateur (nouveau LLM).")
+        else:
+            # Mettre à jour le provider/model si nécessaire
+            if self.llm.provider_id != forced_provider or self.llm.model_id != forced_model:
+                self.llm.provider_id = forced_provider
+                self.llm.model_id = forced_model
+                Logger.info(f"[Orchestrator] LLM mis à jour : provider={forced_provider}, model={forced_model}")
+            # Réactiver la PD pour rafraîchir l'entité et les providers
+            if self.runtime_state.discovery_engine:
+                try:
+                    self.llm.enable_discovery(self.runtime_state.discovery_engine, self)
+                    Logger.debug("[Orchestrator] Progressive Disclosure réactivée pour l'Orchestrateur (LLM existant).")
+                except Exception as e:
+                    Logger.error(f"[Orchestrator] Échec de la réactivation de la PD : {e}")
+
+        # --- MISE À JOUR DE TOUS LES EXPLORATEURS AVEC LE LLM COURANT ---
+        if self.runtime_state.discovery_engine:
+            # Récupérer tous les explorateurs enregistrés
+            for data_type, explorer in self.runtime_state.discovery_engine._explorers.items():
+                if explorer.llm is not self.llm:  # Évite les assignations inutiles
+                    explorer.llm = self.llm
+                    Logger.debug(f"[Orchestrator] LLM assigné à l'Explorer '{data_type}'.")
+
+
+        # Restaurer l'historique des signatures depuis le contexte de session
+        history = session_memory.context.discovery_history or []
+        if self.llm:
+            self.llm.set_discovery_history(history)
+            Logger.debug(f"[Orchestrator] Historique des signatures PD restauré : {len(history)} entrée(s).")
         # 2. Réarmer le système
         self.runtime_state.cancel_requested = False
-        self.runtime_state.reset_execution_markers()   # <-- AJOUT
+        self.runtime_state.reset_execution_markers()
 
         if not forced_provider or not forced_model:
             raise ValueError(_("Missing forced_provider or forced_model."))
@@ -179,13 +227,11 @@ class Orchestrator(Supervisor, Entity):
 
             # 7. Construire le prompt d'orchestration
             loader = get_prompt_loader()
-            
-            # Avant l'appel à loader.load("orchestrator.md", ...)
             session_context_vars = {
                 "session_goal_stack": session_memory.context.goal_stack,
                 "session_unresolved_issues": session_memory.context.unresolved_issues,
                 "session_last_mission_status": session_memory.context.last_mission_status,
-                "session_mood": session_memory.context.mood,  # pour plus tard
+                "session_mood": session_memory.context.mood,
             }
             orchestrator_prompt = loader.load(
                 "orchestrator.md",
@@ -193,11 +239,10 @@ class Orchestrator(Supervisor, Entity):
                 user_message=user_message,
                 history=context_str,
                 advice=advice_orchestrator,
-                **session_context_vars  # <-- injection
+                **session_context_vars
             )
 
-            # 8. Appeler le LLM pour la décision de routage
-            # Avant d'appeler _route_orchestrator, on pousse session_id dans le scope
+            # 8. Appeler le LLM pour la décision de routage (via le LLM de l'Orchestrateur)
             with self.runtime_state.execution_context.scope(session_id=session_id):
                 decision = await self._route_orchestrator(
                     orchestrator_prompt,
@@ -205,21 +250,37 @@ class Orchestrator(Supervisor, Entity):
                     forced_provider,
                     forced_model
                 )
-            # Stocker les signatures dans le contexte d'exécution pour les utiliser plus tard
-            self.current_execution_context["signatures"] = decision.signatures
 
-            # Récupérer les signatures (peut être vide)
+            # Récupérer le dernier RefinedContext si une PD a eu lieu
+            if hasattr(self.llm, 'get_last_refined_context'):
+                refined = self.llm.get_last_refined_context()
+                if refined:
+                    session_memory = self.runtime_state.session_memory
+                    if session_memory:
+                        session_memory.context.discovery_insights = session_memory.context.discovery_insights or []
+                        for entry in refined.entries:
+                            session_memory.context.discovery_insights.append({
+                                "question": entry.question,
+                                "answer": entry.answer,
+                                "tool_name": entry.tool_name,
+                                "timestamp": entry.timestamp.isoformat()
+                            })
+
+                        # Synchronisation de l'historique des signatures
+                        if hasattr(self.llm, '_discovery_history'):
+                            session_memory.context.discovery_history = self.llm._discovery_history.copy()
+                            Logger.debug(f"[Orchestrator] Historique des signatures PD synchronisé : {len(session_memory.context.discovery_history)} entrée(s).")
+                        session_memory.context.touch()
+                        Logger.debug(f"[Orchestrator] SessionContext enrichi avec {len(refined.entries)} insight(s) de PD.")
+
+            # Stocker les signatures dans le contexte d'exécution
+            self.current_execution_context["signatures"] = decision.signatures
             signatures = decision.signatures or [] 
             if signatures:
                 Logger.info(f"[Orchestrator] Signatures extraites : {[f'{s.action} {s.object}' for s in signatures]}")
             else:
                 Logger.debug("[Orchestrator] Aucune signature extraite.")
-
-            self.runtime_state.current_signatures = signatures  # <-- Ajout
-
-            # Ensuite, dans le cas MISSION, on peut passer ces signatures au Solver
-            # (par exemple en les ajoutant à un contexte ou en les stockant dans l'exécution)
-            # Pour le moment, on les logge simplement.
+            self.runtime_state.current_signatures = signatures
 
             # 9. Vérifier l'annulation
             if self.runtime_state.cancel_requested:
@@ -245,7 +306,6 @@ class Orchestrator(Supervisor, Entity):
             return ErrorPacket(type="error", message=str(e))
         finally:
             await self.propagate_event(Events.THINKING_FINISHED, {})
-
     # =====================================================
     # SOUS‑MÉTHODES DE CHAT SEND
     # =====================================================
@@ -267,6 +327,7 @@ class Orchestrator(Supervisor, Entity):
             session_memory.context.unresolved_issues = session_data.get("unresolved_issues", [])
             session_memory.context.mood = session_data.get("mood")
             session_memory.context.last_mission_status = session_data.get("last_mission_status")
+            session_memory.context.discovery_history = session_data.get("discovery_history", [])
             Logger.info(f"[Orchestrator] Contexte restauré pour session {session_id} ({len(session_memory.context.goal_stack)} objectifs, {len(session_memory.context.mission_history)} missions)")
         else:
             Logger.debug(f"[Orchestrator] Nouvelle session : {session_id}")
@@ -323,44 +384,34 @@ class Orchestrator(Supervisor, Entity):
         # return advice
         return ""  # <-- désactivé
 
-    async def _route_orchestrator(
-        self,
-        prompt: str,
-        context_list: list,
-        forced_provider: str,
-        forced_model: str
-    ) -> OrchestratorDecision:
-        """
-        Appelle le ProviderManager pour obtenir une décision structurée (direct/mission).
-        Instrumente l'appel pour l'observabilité.
-        """
+    async def _route_orchestrator(self, prompt: str, context_list: list, forced_provider: str, forced_model: str) -> OrchestratorDecision:
+        if self.llm is None:
+            raise RuntimeError("L'Orchestrateur n'a pas de LLM. Vérifiez _handle_chat_send.")
+        
         routing_started = time.monotonic()
         try:
-            decision = await self.provider_manager.generate_structured_output(
+            decision = await self.llm.generate_structured(
                 prompt=prompt,
-                provider_id=forced_provider,
-                model_id=forced_model,
-                response_schema=OrchestratorDecision,
-                context=context_list
+                schema=OrchestratorDecision,
+                tag="OrchestratorDecision",
+                mission_id=self.runtime_state.current_mission_id
             )
-            Logger.event(
-                "llm_call", tag="OrchestratorDecision", kind="structured",
-                schema="OrchestratorDecision", provider_id=forced_provider, model_id=forced_model,
-                prompt=prompt, context=context_list,
-                response=decision.model_dump(mode='json'),
-                duration_ms=int((time.monotonic() - routing_started) * 1000), success=True
-            )
+            # Récupérer le RefinedContext si une PD a eu lieu
+            if hasattr(self.llm, 'get_last_refined_context'):
+                refined = self.llm.get_last_refined_context()
+                if refined:
+                    Logger.debug(f"[Orchestrator] PD effectuée : {len(refined.entries)} entrées.")
+            
+            # SUPPRESSION du doublon : l'événement est déjà émis par _call_llm_with_schema
+            # On peut garder un log de debug si besoin, mais pas un événement llm_call.
+            Logger.debug(f"[Orchestrator] Décision prise en {int((time.monotonic() - routing_started)*1000)} ms.")
             return decision
         except Exception as e:
-            Logger.event(
-                "llm_call", tag="OrchestratorDecision", kind="structured",
-                schema="OrchestratorDecision", provider_id=forced_provider, model_id=forced_model,
-                prompt=prompt, context=context_list,
-                error=str(e), error_type=type(e).__name__,
-                duration_ms=int((time.monotonic() - routing_started) * 1000), success=False
-            )
+            # L'événement d'erreur est déjà émis par _call_llm_with_schema
+            # On peut juste relancer l'exception après log
+            Logger.error(f"[Orchestrator] Échec de la génération de la décision : {e}")
             raise
-
+        
     async def _evaluate_learning_trigger(self, mission_context: Dict[str, Any]) -> None:
         """Évalue si l'apprentissage doit être déclenché."""
         
@@ -757,7 +808,8 @@ class Orchestrator(Supervisor, Entity):
             "unresolved_issues": session_memory.context.unresolved_issues,
             "mission_history": session_memory.context.mission_history,
             "mood": session_memory.context.mood,
-            "last_mission_status": session_memory.context.last_mission_status
+            "last_mission_status": session_memory.context.last_mission_status,
+            "discovery_history": session_memory.context.discovery_history,  # <-- AJOUT
         }
         await self._save_session_context(session_id, context_dict)
 
@@ -1076,6 +1128,19 @@ class Orchestrator(Supervisor, Entity):
             registry_explorer = RegistryExplorer(self.runtime_state)
             self.runtime_state.discovery_engine.register_explorer(registry_explorer)
             Logger.info("[Orchestrator] DiscoveryEngine initialisé avec RegistryExplorer.")
-            
+        else:
+            Logger.debug("[Orchestrator] DiscoveryEngine déjà existant, réutilisation.")
+
+        # --- TOUJOURS enregistrer le MissionHistoryExplorer ---
+        if self.runtime_state.discovery_engine:
+            from core.discovery.explorers.mission_history_explorer import MissionHistoryExplorer
+            missions_explorer = MissionHistoryExplorer(
+                runtime_state=self.runtime_state,
+                entity=self
+            )
+            self.runtime_state.discovery_engine.register_explorer(missions_explorer)
+            Logger.info("[Orchestrator] MissionHistoryExplorer enregistré.")
+        else:
+            Logger.warning("[Orchestrator] DiscoveryEngine non disponible, impossible d'enregistrer MissionHistoryExplorer.")        
         await self.propagate_event(Events.RUNTIME_CONFIGURED, {"available_models": validated_models})
         return ResponsePacket(type="response", status="success", payload={"models_count": len(validated_models)})
