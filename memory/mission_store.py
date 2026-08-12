@@ -159,12 +159,32 @@ class MissionStore:
                 cursor.execute('SELECT * FROM episodes WHERE mission_id = ?', (mission_id,))
                 row = cursor.fetchone()
                 if row:
-                    return dict(row)
+                    d = dict(row)
+                    # Parser execution_tree
+                    try:
+                        raw_tree = d.pop("execution_tree_json", "{}") or "{}"
+                        d["execution_tree"] = json.loads(raw_tree) if raw_tree and raw_tree != "{}" else None
+                    except Exception as e:
+                        Logger.warning(f"[MissionStore] Échec du parsing execution_tree pour {mission_id} : {e}")
+                        d["execution_tree"] = None
+                    # Parser resolved_data : toujours un dict (même vide)
+                    try:
+                        raw_data = d.pop("resolved_data_json", "{}") or "{}"
+                        d["resolved_data"] = json.loads(raw_data) if raw_data and raw_data != "{}" else {}
+                    except Exception as e:
+                        Logger.warning(f"[MissionStore] Échec du parsing resolved_data pour {mission_id} : {e}")
+                        d["resolved_data"] = {}
+                    # Parser presentator_result si présent
+                    try:
+                        raw_pres = d.pop("presentator_result_json", "{}") or "{}"
+                        d["presentator_result"] = json.loads(raw_pres) if raw_pres and raw_pres != "{}" else None
+                    except Exception:
+                        d["presentator_result"] = None
+                    return d
                 return None
         except Exception as e:
             Logger.error(f"[MissionStore] Erreur de lecture épisode {mission_id} : {e}")
-            return None
-
+            return None            
     def get_episodes_by_session(self, session_id: str) -> List[Dict[str, Any]]:
         try:
             with self._get_connection() as conn:

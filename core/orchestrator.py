@@ -157,6 +157,18 @@ class Orchestrator(Supervisor, Entity):
         session_memory = await self._load_session_context(session_id)
         self.runtime_state.session_memory = session_memory
 
+        # Après avoir chargé session_memory
+        session_mission_list = []
+        for mid in session_memory.context.mission_history:
+            ep = self.mission_store.get_episode(mid)
+            if ep:
+                session_mission_list.append({
+                    "mission_id": mid,
+                    "goal": ep.get("goal", ""),
+                    "status": ep.get("status", ""),
+                    "finished_at": ep.get("finished_at", "N/A")
+                })
+
         # Enregistrer le DataProvider pour l'historique des missions de cette session
         if self.runtime_state.discovery_engine:
             mission_history_provider = MissionHistoryProvider(session_id, self.mission_store)
@@ -233,6 +245,19 @@ class Orchestrator(Supervisor, Entity):
                 "session_last_mission_status": session_memory.context.last_mission_status,
                 "session_mood": session_memory.context.mood,
             }
+            session_context_vars["session_mission_list"] = session_mission_list
+
+            # --- INVESTIGATION ACTIVE (multi-cibles) ---
+            active_targets = session_memory.context.active_investigation_targets
+            if active_targets:
+                combined_insights = []
+                for target in active_targets:
+                    combined_insights.extend(session_memory.context.insights_by_mission.get(target, []))
+                session_context_vars["active_investigation_insights"] = combined_insights
+                session_context_vars["active_investigation_targets"] = active_targets
+            else:
+                session_context_vars["active_investigation_insights"] = []
+                session_context_vars["active_investigation_targets"] = []
             orchestrator_prompt = loader.load(
                 "orchestrator.md",
                 lang=self.runtime_state.language,
@@ -251,28 +276,33 @@ class Orchestrator(Supervisor, Entity):
                     forced_model
                 )
 
-            # Récupérer le dernier RefinedContext si une PD a eu lieu
+            # Récupérer le dernier RefinedContext si une PD a eu lieu (ou cache hit)
             if hasattr(self.llm, 'get_last_refined_context'):
                 refined = self.llm.get_last_refined_context()
                 if refined:
                     session_memory = self.runtime_state.session_memory
                     if session_memory:
-                        session_memory.context.discovery_insights = session_memory.context.discovery_insights or []
-                        for entry in refined.entries:
-                            session_memory.context.discovery_insights.append({
-                                "question": entry.question,
-                                "answer": entry.answer,
-                                "tool_name": entry.tool_name,
-                                "timestamp": entry.timestamp.isoformat()
-                            })
-
-                        # Synchronisation de l'historique des signatures
-                        if hasattr(self.llm, '_discovery_history'):
-                            session_memory.context.discovery_history = self.llm._discovery_history.copy()
-                            Logger.debug(f"[Orchestrator] Historique des signatures PD synchronisé : {len(session_memory.context.discovery_history)} entrée(s).")
-                        session_memory.context.touch()
-                        Logger.debug(f"[Orchestrator] SessionContext enrichi avec {len(refined.entries)} insight(s) de PD.")
-
+                        # Extraire les cibles
+                        targets = refined.targets or []
+                        if targets:
+                            # Stocker les insights pour chaque cible
+                            for target in targets:
+                                session_memory.context.insights_by_mission.setdefault(target, [])
+                                for entry in refined.entries:
+                                    insight = {
+                                        "question": entry.question,
+                                        "answer": entry.answer,
+                                        "tool_name": entry.tool_name,
+                                        "timestamp": entry.timestamp.isoformat()
+                                    }
+                                    session_memory.context.insights_by_mission[target].append(insight)
+                                    session_memory.context.discovery_insights.append(insight)
+                            # Définir les cibles actives (pour affichage)
+                            session_memory.context.active_investigation_targets = targets
+                            session_memory.context.touch()
+                            Logger.debug(f"[Orchestrator] Investigation active définie sur {len(targets)} cible(s).")
+                        else:
+                            Logger.warning("[Orchestrator] RefinedContext sans cibles, impossible de définir l'investigation active.")        
             # Stocker les signatures dans le contexte d'exécution
             self.current_execution_context["signatures"] = decision.signatures
             signatures = decision.signatures or [] 
@@ -311,10 +341,6 @@ class Orchestrator(Supervisor, Entity):
     # =====================================================
 
     async def _load_session_context(self, session_id: str) -> SessionMemory:
-        """
-        Charge le contexte de session depuis la base (si existant) et le restaure
-        dans la mémoire RAM. Retourne l'objet SessionMemory correspondant.
-        """
         session_data = self.session_store.get_session(session_id)
         if session_id not in self.session_memories:
             self.session_memories[session_id] = SessionMemory(session_id)
@@ -328,6 +354,11 @@ class Orchestrator(Supervisor, Entity):
             session_memory.context.mood = session_data.get("mood")
             session_memory.context.last_mission_status = session_data.get("last_mission_status")
             session_memory.context.discovery_history = session_data.get("discovery_history", [])
+            session_memory.context.active_investigation_targets = session_data.get("active_investigation_targets", [])
+            # Restauration des insights (si stockés par mission)
+            insights_by_mission = session_data.get("insights_by_mission", {})
+            if insights_by_mission:
+                session_memory.context.insights_by_mission = insights_by_mission
             Logger.info(f"[Orchestrator] Contexte restauré pour session {session_id} ({len(session_memory.context.goal_stack)} objectifs, {len(session_memory.context.mission_history)} missions)")
         else:
             Logger.debug(f"[Orchestrator] Nouvelle session : {session_id}")
@@ -482,6 +513,23 @@ class Orchestrator(Supervisor, Entity):
             responder="Orchestrator", user_message=user_message, response=final_response
         )
 
+        # Sauvegarder le contexte de session (discovery_history, insights, etc.)
+        session_memory = self.session_memories.get(session_id)
+        if session_memory:
+            context_dict = {
+                "goal_stack": session_memory.context.goal_stack,
+                "unresolved_issues": session_memory.context.unresolved_issues,
+                "mission_history": session_memory.context.mission_history,
+                "mood": session_memory.context.mood,
+                "last_mission_status": session_memory.context.last_mission_status,
+                "discovery_history": session_memory.context.discovery_history,
+                "insights_by_mission": session_memory.context.insights_by_mission,
+                "active_investigation_targets": session_memory.context.active_investigation_targets,
+            }
+            await self._save_session_context(session_id, context_dict)
+        else:
+            Logger.warning(f"[Orchestrator] SessionMemory introuvable pour {session_id}, contexte non sauvegardé.")
+
         await self.propagate_event(Events.RESPONSE_COMPLETED, {"content": final_response})
         return ResponsePacket(type="response", status="success", payload={"message": final_response})
 
@@ -514,6 +562,9 @@ class Orchestrator(Supervisor, Entity):
         self.current_execution_context["refined_goal"] = refined_goal
         self.active_sessions[session_id]["refined_goal"] = refined_goal
 
+        # Au début de _handle_mission_decision
+        session_memory.context.active_investigation_targets = []
+        Logger.debug("[Orchestrator] Investigation active invalidée (nouvelle mission).")
         # 2. Mettre à jour la mémoire de session
         session_memory.context.global_goal = refined_goal
         session_memory.context.goal_stack.append({
@@ -585,7 +636,7 @@ class Orchestrator(Supervisor, Entity):
                         mission_cache.finished_at = datetime.now()
                         if self.root_solver:
                             mission_cache.execution_tree = self.root_solver.execution_tree
-                            mission_cache.resolved_data = copy.deepcopy(self.root_solver.variable_registry)
+                            mission_cache.resolved_data = copy.deepcopy(getattr(self.runtime_state, 'mission_rum', {}))
                         else:
                             mission_cache.execution_tree = {"error": "Solver not instantiated"}
                             mission_cache.resolved_data = {}
@@ -624,7 +675,7 @@ class Orchestrator(Supervisor, Entity):
                 mission_cache.finished_at = datetime.now()
                 if self.root_solver:
                     mission_cache.execution_tree = self.root_solver.execution_tree
-                    mission_cache.resolved_data = copy.deepcopy(self.root_solver.variable_registry)
+                    mission_cache.resolved_data = copy.deepcopy(getattr(self.runtime_state, 'mission_rum', {}))
                 else:
                     mission_cache.execution_tree = {"error": "Solver not instantiated"}
                     mission_cache.resolved_data = {}
@@ -651,7 +702,7 @@ class Orchestrator(Supervisor, Entity):
                 mission_cache.finished_at = datetime.now()
                 if self.root_solver:
                     mission_cache.execution_tree = self.root_solver.execution_tree
-                    mission_cache.resolved_data = copy.deepcopy(self.root_solver.variable_registry)
+                    mission_cache.resolved_data = copy.deepcopy(getattr(self.runtime_state, 'mission_rum', {}))
                 mission_cache.summary = f"Mission '{refined_goal}' interrompue par une erreur système : {str(e)}"
                 await asyncio.to_thread(
                     self.mission_store.save_episode,
@@ -681,7 +732,7 @@ class Orchestrator(Supervisor, Entity):
         if mission_cache:
             mission_cache.execution_tree = result.execution_tree
             if self.root_solver:
-                mission_cache.resolved_data = copy.deepcopy(self.root_solver.variable_registry)
+                mission_cache.resolved_data = copy.deepcopy(getattr(self.runtime_state, 'mission_rum', {}))
             mission_cache.finished_at = datetime.now()
             if result.status == ExecutionStatus.SUCCESS:
                 mission_cache.status = "success"
@@ -778,6 +829,7 @@ class Orchestrator(Supervisor, Entity):
                     session_id,
                     self.runtime_state.environment
                 )
+
                 await self._invalidate_cache_for_mission(mission_cache.mission_id, self.root_solver.signatures if self.root_solver else [])
                 Logger.info(f"[Orchestrator] ✅ Épisode sauvegardé avec résumé : {mission_cache.mission_id}")
             except Exception as e:
@@ -809,7 +861,9 @@ class Orchestrator(Supervisor, Entity):
             "mission_history": session_memory.context.mission_history,
             "mood": session_memory.context.mood,
             "last_mission_status": session_memory.context.last_mission_status,
-            "discovery_history": session_memory.context.discovery_history,  # <-- AJOUT
+            "discovery_history": session_memory.context.discovery_history,
+            "insights_by_mission": session_memory.context.insights_by_mission,
+            "active_investigation_targets": session_memory.context.active_investigation_targets,
         }
         await self._save_session_context(session_id, context_dict)
 

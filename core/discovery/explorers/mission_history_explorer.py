@@ -3,6 +3,7 @@ core/discovery/explorers/mission_history_explorer.py
 ====================================================
 Explorer pour l'historique des missions d'une session.
 Utilise le prompt générique explorer_plan_generation.md.
+Support multi‑cibles et condensation des données volumineuses.
 """
 
 import json
@@ -43,6 +44,8 @@ class MissionHistoryExplorer(BaseExplorer):
         self.entity = entity
         self.llm = llm
         self._prompt_loader = get_prompt_loader()
+        # Longueur maximale pour les données textuelles avant troncature
+        self.max_data_length = getattr(runtime_state, "max_data_length", 1000)
 
     def get_data_type(self) -> str:
         return "missions"
@@ -52,7 +55,9 @@ class MissionHistoryExplorer(BaseExplorer):
             "list_missions",
             "get_mission_summary",
             "get_mission_details",
-            "search_missions_by_keyword"
+            "search_missions_by_keyword",
+            "analyze_registry",
+            "analyze_execution_tree",
         ]
 
     def get_tools_description(self) -> List[Dict[str, Any]]:
@@ -104,6 +109,36 @@ class MissionHistoryExplorer(BaseExplorer):
                     "properties": {"keyword": {"type": "string"}},
                     "required": ["keyword"]
                 }
+            },
+            {
+                "name": "analyze_registry",
+                "description": _(
+                    "Analyse le registre de variables résolues d'une mission pour répondre à une question précise. "
+                    "Paramètres requis : 'target' (mission_id) et 'question' (la question en langage naturel)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string", "description": "mission_id"},
+                        "question": {"type": "string", "description": "Question en langage naturel sur le registre"}
+                    },
+                    "required": ["target", "question"]
+                }
+            },
+            {
+                "name": "analyze_execution_tree",
+                "description": _(
+                    "Analyse l'arbre d'exécution d'une mission pour répondre à une question précise. "
+                    "Paramètres requis : 'target' (mission_id) et 'question' (la question en langage naturel)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string", "description": "mission_id"},
+                        "question": {"type": "string", "description": "Question en langage naturel sur l'arbre d'exécution"}
+                    },
+                    "required": ["target", "question"]
+                }
             }
         ]
 
@@ -128,6 +163,10 @@ class MissionHistoryExplorer(BaseExplorer):
                 return await self._get_mission_details(provider, args.get("target"))
             elif tool_name == "search_missions_by_keyword":
                 return await self._search_missions(provider, args.get("keyword"))
+            elif tool_name == "analyze_registry":
+                return await self._analyze_registry(provider, args.get("target"), args.get("question"))
+            elif tool_name == "analyze_execution_tree":
+                return await self._analyze_execution_tree(provider, args.get("target"), args.get("question"))
             else:
                 return {"success": False, "data": None, "message": _("Outil inconnu.")}
         except Exception as e:
@@ -141,28 +180,43 @@ class MissionHistoryExplorer(BaseExplorer):
     async def generate_plan(
         self,
         goal: str,
-        technical_goal: str,
-        target: str,
+        technical_goal: Optional[str] = None,
+        target: Optional[str] = None,
         llm: Optional[Llm] = None,
         data_provider: Optional['DataProvider'] = None,
-        data_context: Optional[Any] = None
+        data_context: Optional[Any] = None,
+        targets: Optional[List[str]] = None,
+        technical_goals: Optional[List[str]] = None,
     ) -> DiscoveryPlan:
         """
         Génère un DiscoveryPlan en utilisant le prompt générique explorer_plan_generation.md.
+        Supporte le multi‑cibles via les listes `targets` et `technical_goals`.
         """
         effective_llm = llm or self.llm
         if not effective_llm:
             raise RuntimeError(_("MissionHistoryExplorer n'a pas de LLM pour générer un plan."))
 
-        available_goals = self.get_available_goals()
-        if technical_goal not in available_goals:
-            raise ValueError(
-                _("Le goal technique '{technical_goal}' n'est pas supporté par MissionHistoryExplorer. "
-                  "Goals disponibles : {goals}")
-                .format(technical_goal=technical_goal, goals=", ".join(available_goals))
-            )
+        # Normalisation
+        if targets is None and target is not None:
+            targets = [target]
+        if technical_goals is None and technical_goal is not None:
+            technical_goals = [technical_goal]
 
-        # Construction de la description des outils (format texte)
+        if not targets or not technical_goals:
+            raise ValueError(_("Au moins une cible et un goal technique doivent être spécifiés."))
+        if len(targets) != len(technical_goals):
+            raise ValueError(_("Les listes 'targets' et 'technical_goals' doivent avoir la même longueur."))
+
+        # Vérifier que tous les goals sont valides
+        available_goals = self.get_available_goals()
+        for tg in technical_goals:
+            if tg not in available_goals:
+                raise ValueError(
+                    _("Le goal technique '{tg}' n'est pas supporté par MissionHistoryExplorer. Goals disponibles : {goals}")
+                    .format(tg=tg, goals=", ".join(available_goals))
+                )
+
+        # Construction de la description des outils
         tools_desc = self.get_tools_description()
         tools_text = "\n".join([
             f"- **{t['name']}** : {t['description']} (paramètres : {t.get('parameters', {})})"
@@ -171,11 +225,11 @@ class MissionHistoryExplorer(BaseExplorer):
 
         # Utilisation du prompt générique
         prompt = self._prompt_loader.load(
-            "explorer_plan_generation.md",  # <-- Le même pour tous les explorateurs
+            "explorer_plan_generation.md",
             lang=getattr(self.runtime_state, "language", "en"),
             goal=goal,
-            technical_goal=technical_goal,
-            target=target,
+            targets=targets,
+            technical_goals=technical_goals,
             data_type=self._data_type,
             tools_description=tools_text
         )
@@ -183,8 +237,8 @@ class MissionHistoryExplorer(BaseExplorer):
         Logger.event(
             Events.DISCOVERY_PLAN_GENERATION_START,
             data_type=self._data_type,
-            technical_goal=technical_goal,
-            target=target,
+            targets=targets,
+            technical_goals=technical_goals,
             goal=goal,
             mission_id=self.runtime_state.current_mission_id
         )
@@ -200,8 +254,8 @@ class MissionHistoryExplorer(BaseExplorer):
             Logger.event(
                 Events.DISCOVERY_PLAN_GENERATION_ERROR,
                 data_type=self._data_type,
-                technical_goal=technical_goal,
-                target=target,
+                targets=targets,
+                technical_goals=technical_goals,
                 error=str(e),
                 mission_id=self.runtime_state.current_mission_id
             )
@@ -253,13 +307,19 @@ class MissionHistoryExplorer(BaseExplorer):
             else:
                 raise ValueError(_("Type d'étape inconnu : {type}").format(type=step.type))
 
-        signature = self.create_signature(technical_goal, target)
+        # Signature canonique pour le cache
+        if len(targets) == 1:
+            signature = f"{self._data_type}://{targets[0]}/{technical_goals[0]}"
+        else:
+            targets_str = "_".join(targets)
+            goals_str = "_".join(technical_goals)
+            signature = f"{self._data_type}://multi/{targets_str}/{goals_str}"
 
         Logger.event(
             Events.DISCOVERY_PLAN_GENERATION_END,
             data_type=self._data_type,
-            technical_goal=technical_goal,
-            target=target,
+            targets=targets,
+            technical_goals=technical_goals,
             step_count=len(discovery_steps),
             mission_id=self.runtime_state.current_mission_id
         )
@@ -268,8 +328,8 @@ class MissionHistoryExplorer(BaseExplorer):
             goal=goal,
             steps=discovery_steps,
             data_type=self._data_type,
-            target=target,
-            technical_goal=technical_goal,
+            targets=targets,
+            technical_goals=technical_goals,
             signature=signature
         )
 
@@ -278,13 +338,23 @@ class MissionHistoryExplorer(BaseExplorer):
     # =====================================================
 
     def validate_target(self, target: str, provider: Optional['DataProvider'] = None) -> bool:
-        if provider:
-            return target in provider.get_targets()
-        # Si on n'a pas de provider, on accepte toutes les cibles (sera validé plus tard)
+        """
+        Valide que la cible est accessible.
+        Dans le cas des missions, on accepte toute cible (la validation réelle est faite à l'exécution).
+        """
         return True
 
-    def create_signature(self, technical_goal: str, target: str) -> str:
-        return f"{self._data_type}://{target}/{technical_goal}"
+    def create_signature(self, targets: List[str], technical_goals: List[str]) -> str:
+        """
+        Crée une signature normalisée pour le cache à partir des listes de cibles et de goals.
+        """
+        if not targets or not technical_goals:
+            return f"{self._data_type}://unknown"
+        if len(targets) == 1:
+            return f"{self._data_type}://{targets[0]}/{technical_goals[0]}"
+        targets_str = "_".join(targets)
+        goals_str = "_".join(technical_goals)
+        return f"{self._data_type}://multi/{targets_str}/{goals_str}"
 
     # =====================================================
     # MÉTHODES PRIVÉES D'EXÉCUTION DES OUTILS
@@ -347,3 +417,125 @@ class MissionHistoryExplorer(BaseExplorer):
                     "summary": meta.get("summary", ""),
                 })
         return {"success": True, "data": {"missions": results, "count": len(results)}}
+
+    # =====================================================
+    # ANALYSE DU REGISTRE AVEC CONDENSATION
+    # =====================================================
+
+    async def _analyze_registry(self, provider, target: str, question: str) -> Dict[str, Any]:
+        if not target or not question:
+            return {"success": False, "data": None, "message": _("Les paramètres 'target' et 'question' sont requis.")}
+        episode = provider.get_data(target)
+        if not episode:
+            return {"success": False, "data": None, "message": f"Mission '{target}' non trouvée."}
+
+        registry = episode.get("resolved_data")
+        if registry is None:
+            return {"success": False, "data": None, "message": _("Aucun registre résolu disponible pour cette mission.")}
+        if not registry:
+            return {"success": True, "data": _("Le registre de cette mission est vide (aucune variable cruciale enregistrée).")}
+
+        # Condensation des données volumineuses
+        condensed_registry = {}
+        for k, v in registry.items():
+            condensed_registry[k] = self._condense_value(v, self.max_data_length)
+
+        registry_str = json.dumps(condensed_registry, indent=2, ensure_ascii=False)
+
+        llm_to_use = self.llm or self.runtime_state.discovery_llm
+        if not llm_to_use:
+            return {"success": False, "data": None, "message": _("Aucun LLM disponible pour l'analyse.")}
+
+        prompt = self._prompt_loader.load(
+            "analyze_registry.md",
+            lang=getattr(self.runtime_state, "language", "en"),
+            registry_data=registry_str,
+            question=question
+        )
+
+        try:
+            response = await llm_to_use.generate_text(prompt, tag="analyze_registry")
+            return {"success": True, "data": response}
+        except Exception as e:
+            Logger.error(f"[MissionHistoryExplorer] Erreur lors de l'analyse du registre : {e}")
+            return {"success": False, "data": None, "message": f"Erreur lors de l'analyse : {str(e)}"}
+
+    # =====================================================
+    # ANALYSE DE L'ARBRE D'EXÉCUTION AVEC CONDENSATION
+    # =====================================================
+
+    async def _analyze_execution_tree(self, provider, target: str, question: str) -> Dict[str, Any]:
+        if not target or not question:
+            return {"success": False, "data": None, "message": _("Les paramètres 'target' et 'question' sont requis.")}
+        episode = provider.get_data(target)
+        if not episode:
+            return {"success": False, "data": None, "message": f"Mission '{target}' non trouvée."}
+
+        tree = episode.get("execution_tree")
+        if tree is None:
+            return {"success": False, "data": None, "message": _("Aucun arbre d'exécution disponible pour cette mission.")}
+        if not tree:
+            return {"success": True, "data": _("L'arbre d'exécution de cette mission est vide.")}
+
+        # Condensation de l'arbre (limiter la taille du JSON)
+        tree_str = json.dumps(tree, indent=2, ensure_ascii=False)
+        if len(tree_str) > self.max_data_length * 5:  # on autorise un peu plus pour l'arbre
+            tree_str = tree_str[:self.max_data_length * 5] + "\n... (contenu tronqué)"
+
+        llm_to_use = self.llm or self.runtime_state.discovery_llm
+        if not llm_to_use:
+            return {"success": False, "data": None, "message": _("Aucun LLM disponible pour l'analyse.")}
+
+        prompt = self._prompt_loader.load(
+            "analyze_execution_tree.md",
+            lang=getattr(self.runtime_state, "language", "en"),
+            execution_tree_data=tree_str,
+            question=question
+        )
+
+        try:
+            response = await llm_to_use.generate_text(prompt, tag="analyze_execution_tree")
+            return {"success": True, "data": response}
+        except Exception as e:
+            Logger.error(f"[MissionHistoryExplorer] Erreur lors de l'analyse de l'arbre : {e}")
+            return {"success": False, "data": None, "message": f"Erreur lors de l'analyse : {str(e)}"}
+
+    # =====================================================
+    # UTILITAIRE : CONDENSATION DES DONNÉES
+    # =====================================================
+
+    def _condense_value(self, value: Any, max_length: int = 1000) -> Any:
+        """
+        Condense une valeur pour l'affichage dans un prompt.
+        - Si c'est une chaîne longue, on la tronque.
+        - Si c'est une liste/dict, on la tronque en préservant la structure.
+        - Les types simples (bool, int, float) sont conservés tels quels.
+        """
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value
+        if isinstance(value, str):
+            if len(value) > max_length:
+                return f"{value[:max_length]}... (longueur: {len(value)} caractères)"
+            return value
+        if isinstance(value, list):
+            # On condense chaque élément de la liste
+            condensed = [self._condense_value(item, max_length) for item in value]
+            # Si la représentation JSON est trop longue, on tronque
+            if len(json.dumps(condensed, ensure_ascii=False)) > max_length:
+                return condensed[:5]  # on limite à 5 éléments
+            return condensed
+        if isinstance(value, dict):
+            condensed = {}
+            for k, v in value.items():
+                condensed[k] = self._condense_value(v, max_length)
+            if len(json.dumps(condensed, ensure_ascii=False)) > max_length * 2:
+                # On réduit le nombre de clés
+                keys = list(condensed.keys())[:10]
+                return {k: condensed[k] for k in keys}
+            return condensed
+        # Autres types (bytes, etc.) : on les convertit en chaîne
+        return str(value)

@@ -52,6 +52,7 @@ class MissionCache:
         }
 
 
+
 class SessionContext:
     """
     Contexte global de la session (l'âme de la session).
@@ -60,39 +61,26 @@ class SessionContext:
 
     def __init__(self, session_id: str):
         self.session_id = session_id
-
-        # --- NOUVEAU : empilement des objectifs raffinés ---
-        # Chaque élément : {"text": "...", "timestamp": "...", "status": "..."}
         self.goal_stack: List[Dict[str, Any]] = []
-
-        # Objectif global de l'utilisateur (peut évoluer) – gardé pour compatibilité
         self.global_goal: Optional[str] = None
-
-        # Historique des missions (liste des mission_id)
         self.mission_history: List[str] = []
-
-        # Dernier statut connu
         self.last_mission_status: Optional[str] = None
-
-        # Problèmes récurrents (ex: "échec de keyboard")
         self.unresolved_issues: List[str] = []
-
-        # --- NOUVEAU : mood de la session (inféré, utilisé uniquement par le Presentator) ---
         self.mood: Optional[str] = None
-
-        # Résumé global de la session (vide pour l'instant)
         self.summary: str = ""
-
-        # Dernière activité
         self.last_activity: datetime = datetime.now()
-        self.recurrent_themes: List[Dict[str, Any]] = []   # <-- NOUVEAU
+        self.recurrent_themes: List[Dict[str, Any]] = []
 
-        self.discovery_history: List[str] = []  # <-- NOUVEAU
-         # --- NOUVEAU : insights issus de la Progressive Disclosure ---
-        self.discovery_insights: List[Dict[str, Any]] = []
+        # --- DISCOVERY FRAMEWORK ---
+        self.discovery_history: List[str] = []
+        self.discovery_insights: List[Dict[str, Any]] = []  # plat (compatibilité)
+        self.insights_by_mission: Dict[str, List[Dict[str, Any]]] = {}
+
+        # --- NOUVEAU : gestion multi‑cibles ---
+        self.active_investigation_targets: List[str] = []  # toutes les cibles de la dernière PD
+        # Note : on supprime active_investigation_mission_id
 
     def touch(self):
-        """Met à jour le timestamp de la dernière activité."""
         self.last_activity = datetime.now()
 
     def to_dict(self) -> Dict[str, Any]:
@@ -108,8 +96,9 @@ class SessionContext:
             "last_activity": self.last_activity.isoformat(),
             "discovery_history": self.discovery_history,
             "discovery_insights": self.discovery_insights,
+            "insights_by_mission": self.insights_by_mission,
+            "active_investigation_targets": self.active_investigation_targets,
         }
-
 
 class SessionMemory:
     """

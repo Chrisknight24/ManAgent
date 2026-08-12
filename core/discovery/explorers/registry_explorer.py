@@ -3,7 +3,7 @@ core/discovery/explorers/registry_explorer.py
 =============================================
 Explorer pour le registre des variables.
 Génère un plan d'investigation en utilisant un LLM dédié.
-Version avec data_provider et data_context (partage implicite).
+Support multi‑cibles (listes de cibles et de goals techniques).
 """
 
 import json
@@ -95,24 +95,46 @@ class RegistryExplorer(BaseExplorer):
     async def generate_plan(
         self,
         goal: str,
-        technical_goal: str,
-        target: str,
+        technical_goal: Optional[str] = None,
+        target: Optional[str] = None,
         llm: Optional[Llm] = None,
         data_provider: Optional['DataProvider'] = None,
-        data_context: Optional[Any] = None
+        data_context: Optional[Any] = None,
+        # --- NOUVEAUX PARAMÈTRES MULTI‑CIBLES ---
+        targets: Optional[List[str]] = None,
+        technical_goals: Optional[List[str]] = None,
     ) -> DiscoveryPlan:
+        """
+        Génère un DiscoveryPlan pour explorer le registre.
+        Supporte une ou plusieurs cibles via les listes `targets` et `technical_goals`.
+        Les paramètres `target` et `technical_goal` sont conservés pour compatibilité,
+        mais leur utilisation est dépréciée.
+        """
         effective_llm = llm or self.llm
         if not effective_llm:
             raise RuntimeError(_("RegistryExplorer n'a pas de LLM pour générer un plan."))
 
-        available_goals = self.get_available_goals()
-        if technical_goal not in available_goals:
-            raise ValueError(
-                _("Le goal technique '{technical_goal}' n'est pas supporté par RegistryExplorer. Goals disponibles : {goals}")
-                .format(technical_goal=technical_goal, goals=", ".join(available_goals))
-            )
+        # Normalisation : utiliser les listes si fournies, sinon les champs uniques
+        if targets is None and target is not None:
+            targets = [target]
+        if technical_goals is None and technical_goal is not None:
+            technical_goals = [technical_goal]
 
-        # --- RÉCUPÉRATION DU REGISTRE (priorité au data_context) ---
+        if not targets or not technical_goals:
+            raise ValueError(_("Au moins une cible et un goal technique doivent être spécifiés."))
+        if len(targets) != len(technical_goals):
+            raise ValueError(_("Les listes 'targets' et 'technical_goals' doivent avoir la même longueur."))
+
+        # Vérifier que tous les goals sont disponibles
+        available_goals = self.get_available_goals()
+        for tg in technical_goals:
+            if tg not in available_goals:
+                raise ValueError(
+                    _("Le goal technique '{tg}' n'est pas supporté par RegistryExplorer. Goals disponibles : {goals}")
+                    .format(tg=tg, goals=", ".join(available_goals))
+                )
+
+        # Récupération du registre (priorité au data_context)
         registry = None
         if data_context is not None and isinstance(data_context, dict):
             registry = data_context
@@ -123,14 +145,16 @@ class RegistryExplorer(BaseExplorer):
         if registry is None:
             registry = self._get_registry()
 
-        # --- VALIDATION ---
-        if data_provider:
-            if target not in data_provider.get_targets():
-                raise ValueError(_("La cible '{target}' n'existe pas dans les données fournies.").format(target=target))
-        else:
-            if target not in registry:
-                raise ValueError(_("Cible '{target}' invalide pour registry").format(target=target))
+        # Validation des cibles (vérifier qu'elles existent dans le registre)
+        for t in targets:
+            if data_provider:
+                if t not in data_provider.get_targets():
+                    raise ValueError(_("La cible '{target}' n'existe pas dans les données fournies.").format(target=t))
+            else:
+                if t not in registry:
+                    raise ValueError(_("Cible '{target}' invalide pour registry.").format(target=t))
 
+        # Construction du prompt avec les listes
         tools_desc = self.get_tools_description()
         tools_text = "\n".join([
             f"- **{t['name']}** : {t['description']} (paramètres : {t.get('parameters', {})})"
@@ -141,8 +165,8 @@ class RegistryExplorer(BaseExplorer):
             "explorer_plan_generation.md",
             lang=getattr(self.runtime_state, "language", "en"),
             goal=goal,
-            technical_goal=technical_goal,
-            target=target,
+            targets=targets,
+            technical_goals=technical_goals,
             data_type=self._data_type,
             tools_description=tools_text
         )
@@ -150,8 +174,8 @@ class RegistryExplorer(BaseExplorer):
         Logger.event(
             Events.DISCOVERY_PLAN_GENERATION_START,
             data_type=self._data_type,
-            technical_goal=technical_goal,
-            target=target,
+            targets=targets,
+            technical_goals=technical_goals,
             goal=goal,
             mission_id=self.runtime_state.current_mission_id
         )
@@ -167,8 +191,8 @@ class RegistryExplorer(BaseExplorer):
             Logger.event(
                 Events.DISCOVERY_PLAN_GENERATION_ERROR,
                 data_type=self._data_type,
-                technical_goal=technical_goal,
-                target=target,
+                targets=targets,
+                technical_goals=technical_goals,
                 error=str(e),
                 mission_id=self.runtime_state.current_mission_id
             )
@@ -177,6 +201,7 @@ class RegistryExplorer(BaseExplorer):
                 .format(error=e)
             )
 
+        # Transformer les étapes
         discovery_steps = []
         tool_names = [t["name"] for t in tools_desc]
         for idx, step in enumerate(steps):
@@ -218,13 +243,19 @@ class RegistryExplorer(BaseExplorer):
             else:
                 raise ValueError(_("Type d'étape inconnu : {type}").format(type=step.type))
 
-        signature = self.create_signature(technical_goal, target)
+        # Signature canonique pour le cache
+        if len(targets) == 1:
+            signature = f"{self._data_type}://{targets[0]}/{technical_goals[0]}"
+        else:
+            targets_str = "_".join(targets)
+            goals_str = "_".join(technical_goals)
+            signature = f"{self._data_type}://multi/{targets_str}/{goals_str}"
 
         Logger.event(
             Events.DISCOVERY_PLAN_GENERATION_END,
             data_type=self._data_type,
-            technical_goal=technical_goal,
-            target=target,
+            targets=targets,
+            technical_goals=technical_goals,
             step_count=len(discovery_steps),
             mission_id=self.runtime_state.current_mission_id
         )
@@ -233,26 +264,38 @@ class RegistryExplorer(BaseExplorer):
             goal=goal,
             steps=discovery_steps,
             data_type=self._data_type,
-            target=target,
-            technical_goal=technical_goal,
+            targets=targets,
+            technical_goals=technical_goals,
             signature=signature
         )
 
     # =====================================================
-    # VALIDATION AVEC DATA_PROVIDER
+    # VALIDATION ET SIGNATURE (obsolètes)
     # =====================================================
 
     def validate_target(self, target: str, provider: Optional['DataProvider'] = None) -> bool:
+        """
+        Validation d'une seule cible (conservée pour compatibilité).
+        """
         if provider:
             return target in provider.get_targets()
         registry = self._get_registry()
         return target in registry
 
-    def create_signature(self, technical_goal: str, target: str) -> str:
-        return f"{self._data_type}://{target}/{technical_goal}"
+    def create_signature(self, targets: List[str], technical_goals: List[str]) -> str:
+        if not targets or not technical_goals:
+            return f"{self._data_type}://unknown"
+        if len(targets) == 1:
+            return f"{self._data_type}://{targets[0]}/{technical_goals[0]}"
+        targets_str = "_".join(targets)
+        goals_str = "_".join(technical_goals)
+        return f"{self._data_type}://multi/{targets_str}/{goals_str}"
+    # =====================================================
+    # MÉTHODES INTERNES
+    # =====================================================
 
     def _get_registry(self) -> Dict[str, Any]:
-        # Fallback : si on a pas de data_context, on cherche dans runtime_state
+        """Récupère le registre depuis le runtime_state (fallback)."""
         if hasattr(self.runtime_state, "variable_registry"):
             return self.runtime_state.variable_registry
         Logger.warning("[RegistryExplorer] Aucun registre trouvé.")

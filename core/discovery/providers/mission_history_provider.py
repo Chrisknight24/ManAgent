@@ -2,7 +2,7 @@
 core/discovery/providers/mission_history_provider.py
 =====================================================
 DataProvider pour l'historique des missions d'une session.
-Expose les missions avec des cibles par index (index:0, index:1, ...).
+Expose les missions avec leurs mission_id et la cible spéciale "last_mission".
 """
 
 from typing import List, Any, Dict, Optional
@@ -16,8 +16,8 @@ class MissionHistoryProvider(DataProvider):
     """
     Fournit l'accès à l'historique des missions de la session courante.
     Les cibles sont :
-    - Un ID de mission direct (ex: "abc123")
-    - Un index relatif (ex: "index:0" pour la dernière mission, "index:1" pour l'avant-dernière, etc.)
+    - "last_mission" : la mission la plus récente.
+    - Un mission_id direct (ex: "abc123").
     """
 
     def __init__(self, session_id: str, mission_store: MissionStore):
@@ -31,12 +31,17 @@ class MissionHistoryProvider(DataProvider):
 
     def get_targets(self) -> List[str]:
         """
-        Retourne la liste des cibles disponibles sous forme d'index.
-        Ex: ["index:0", "index:1", "index:2", ...]
+        Retourne la liste des cibles disponibles.
+        - "last_mission" en premier (si au moins une mission existe).
+        - Puis les mission_id de toutes les missions (du plus récent au plus ancien).
         """
         if self._cached_targets is None:
             episodes = self._get_episodes()
-            self._cached_targets = [f"index:{i}" for i in range(len(episodes))]
+            targets = []
+            if episodes:
+                targets.append("last_mission")
+            targets.extend([ep.get("mission_id") for ep in episodes if ep.get("mission_id")])
+            self._cached_targets = targets
         return self._cached_targets
 
     def get_metadata(self, target: str) -> Dict[str, Any]:
@@ -53,9 +58,9 @@ class MissionHistoryProvider(DataProvider):
             "status": episode.get("status", ""),
             "summary": episode.get("summary", "Résumé non disponible"),
             "created_at": episode.get("created_at", ""),
+            "finished_at": episode.get("finished_at", ""),
             "environment": episode.get("environment", ""),
             "refined_goal": episode.get("refined_goal", ""),
-            "index": self._get_index(target),
         }
 
     def get_data(self, target: str) -> Any:
@@ -81,39 +86,18 @@ class MissionHistoryProvider(DataProvider):
         """
         Résout une cible en un épisode.
         La cible peut être :
-        - un mission_id direct
-        - un index "index:0", "index:1", ...
+        - "last_mission" : retourne la mission la plus récente (parsée).
+        - un mission_id direct (parsé).
         """
         if not target:
             return None
 
-        episodes = self._get_episodes()
-        if not episodes:
-            return None
-
-        # Cas : index relatif
-        if target.startswith("index:"):
-            try:
-                idx = int(target.split(":", 1)[1])
-                if 0 <= idx < len(episodes):
-                    return episodes[idx]
-                else:
-                    Logger.warning(
-                        f"[MissionHistoryProvider] Index {idx} hors limites (0..{len(episodes)-1}) pour la session {self.session_id}"
-                    )
-                    return None
-            except ValueError:
-                Logger.warning(f"[MissionHistoryProvider] Index invalide : {target}")
+        if target == "last_mission":
+            episodes = self._get_episodes()
+            if not episodes:
                 return None
-
-        # Cas : mission_id direct
-        return self.mission_store.get_episode(target)
-
-    def _get_index(self, target: str) -> Optional[int]:
-        """Retourne l'index correspondant à une cible (si c'est un index)."""
-        if target.startswith("index:"):
-            try:
-                return int(target.split(":", 1)[1])
-            except ValueError:
-                pass
-        return None
+            # Récupère l'épisode parsé via get_episode
+            return self.mission_store.get_episode(episodes[0].get("mission_id"))
+        else:
+            # mission_id direct
+            return self.mission_store.get_episode(target)

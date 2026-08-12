@@ -197,17 +197,17 @@ class Llm:
         if not provider:
             raise RuntimeError(_("Provider {provider_id} introuvable.").format(provider_id=self.provider_id))
 
-        ephemeral_context = self._build_full_context()
-        ephemeral_context.append({"role": "user", "content": prompt})
+        # Construire le contexte complet
+        full_context = self._build_full_context()
+        context_str = "\n".join([msg["content"] for msg in full_context]) if full_context else ""
+        full_prompt = f"{context_str}\n\n{prompt}" if context_str else prompt
 
         provider.model_name = self.model_id
 
         start_time = time.monotonic()
         try:
-            response = await provider.generate_text(
-                prompt=prompt,
-                context=ephemeral_context
-            )
+            # Utiliser la méthode générique generate_response (existe dans tous les providers)
+            response = await provider.generate_response(user_message=full_prompt)
             duration_ms = int((time.monotonic() - start_time) * 1000)
             event_fields = {
                 "tag": tag or "generate_text",
@@ -236,7 +236,7 @@ class Llm:
             }
             Logger.event("llm_call", **event_fields)
             raise
-
+        
     async def stream(
         self,
         prompt: str,
@@ -323,8 +323,11 @@ class Llm:
             # Vérifier si le LLM a demandé une découverte
             if hasattr(result, 'discovery_request') and result.discovery_request is not None:
                 discovery_req = result.discovery_request
-                current_signature = f"{discovery_req.data_type}:{discovery_req.target}:{discovery_req.technical_goal}"
 
+                # Construction d'une signature canonique multi‑cibles
+                targets_part = ",".join(discovery_req.targets)
+                goals_part = ",".join(discovery_req.technical_goals)
+                current_signature = f"{discovery_req.data_type}:{targets_part}:{goals_part}"
                 # --- Détection de redondance ---
                 if current_signature in discovery_history:
                     Logger.warning(
@@ -347,20 +350,24 @@ class Llm:
                 discovery_history.append(current_signature)
 
                 Logger.debug(
-                    _("[LLM] Découverte demandée : data_type={data_type}, target={target}, technical_goal={technical_goal}")
+                    _("[LLM] Découverte demandée : data_type={data_type}, targets={targets}, technical_goals={technical_goals}")
                     .format(
                         data_type=discovery_req.data_type,
-                        target=discovery_req.target,
-                        technical_goal=discovery_req.technical_goal
+                        targets=", ".join(discovery_req.targets),
+                        technical_goals=", ".join(discovery_req.technical_goals)
                     )
                 )
 
-                # Exécuter la découverte
-                refined = await self._execute_discovery(discovery_req)
-                self._last_refined_context = refined
-
-                # Ajouter le résultat au prompt pour la prochaine itération
-                full_prompt = full_prompt + f"\n\n[RÉSULTAT DE L'INVESTIGATION]\n{refined.summary}"
+                # --- Exécution de la découverte (avec capture d'erreur) ---
+                try:
+                    refined = await self._execute_discovery(discovery_req)
+                    self._last_refined_context = refined
+                    full_prompt = full_prompt + f"\n\n[RÉSULTAT DE L'INVESTIGATION]\n{refined.summary}"
+                except Exception as e:
+                    error_msg = f"⚠️ Erreur lors de l'investigation : {str(e)}. Veuillez répondre avec les données disponibles."
+                    full_prompt = full_prompt + f"\n\n[ERREUR D'INVESTIGATION]\n{error_msg}"
+                    Logger.error(f"[LLM] Erreur lors de l'exécution de la découverte : {e}")
+                    # On continue la boucle pour que le LLM puisse répondre malgré l'erreur
                 continue
 
             # Si le LLM a répondu sans discovery_request, on a fini
@@ -400,6 +407,7 @@ class Llm:
                     "et la dernière tentative a échoué.")
                     .format(max_iterations=self._max_iterations)
                 ) from e
+            
             
     def clear_discovery_history(self):
         self._discovery_history = []
@@ -609,8 +617,6 @@ class Llm:
                 raise
             
     async def _execute_discovery(self, discovery_req: 'DiscoveryRequest') -> 'RefinedContext':
-        from core.discovery.models import RefinedContext
-
         if not self._discovery_engine:
             raise RuntimeError(_("Discovery activé mais _discovery_engine est None."))
 
@@ -620,26 +626,29 @@ class Llm:
                 data_type=discovery_req.data_type
             ))
 
+        # Vérifier que tous les technical_goals sont disponibles
         available_goals = explorer.get_available_goals()
-        if discovery_req.technical_goal not in available_goals:
-            raise ValueError(
-                _("Le goal technique '{technical_goal}' n'est pas supporté par l'Explorer {data_type}. Goals disponibles : {goals}")
-                .format(
-                    technical_goal=discovery_req.technical_goal,
-                    data_type=discovery_req.data_type,
-                    goals=", ".join(available_goals)
+        for goal in discovery_req.technical_goals:
+            if goal not in available_goals:
+                raise ValueError(
+                    _("Le goal technique '{technical_goal}' n'est pas supporté par l'Explorer {data_type}. Goals disponibles : {goals}")
+                    .format(
+                        technical_goal=goal,
+                        data_type=discovery_req.data_type,
+                        goals=", ".join(available_goals)
+                    )
                 )
-            )
 
         data_provider = self._entity.get_data_provider(discovery_req.data_type)
 
+        # Appel à generate_plan avec les listes
         plan = await explorer.generate_plan(
             goal=discovery_req.goal,
-            technical_goal=discovery_req.technical_goal,
-            target=discovery_req.target,
             llm=self,
             data_provider=data_provider,
-            data_context=self._data_context
+            data_context=self._data_context,
+            targets=discovery_req.targets,
+            technical_goals=discovery_req.technical_goals
         )
 
         refined = await self._discovery_engine.start_discovery(
@@ -651,7 +660,7 @@ class Llm:
         )
 
         return refined
-    
+
     
     def _get_schema_description(self, schema: Type[BaseModel]) -> str:
         json_schema = schema.model_json_schema()

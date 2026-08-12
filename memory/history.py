@@ -15,7 +15,7 @@ class ConversationMemory:
         self.store = SQLiteStore()
         # On baisse la limite par défaut pour laisser une marge de sécurité de ~3500 tokens
         # pour le prompt système, les schemas de validation et les outils (La taxe Agent).
-        self.DEFAULT_MAX_CONTEXT_TOKENS = 2500 
+        self.DEFAULT_MAX_CONTEXT_TOKENS = 8000
 
     # =====================================================
     # GESTION GRANULAIRE DES ROLES

@@ -14,13 +14,11 @@ from core.i18n import _
 
 
 class StepType(str, Enum):
-    """Type d'étape dans un DiscoveryPlan."""
     TOOL = "tool"
     SEMANTIC = "semantic"
 
 
 class ExitPolicy(str, Enum):
-    """Raison de terminaison d'une DiscoverySession."""
     PLAN_COMPLETED = "plan_completed"
     GOAL_REACHED = "goal_reached"
     EXPECTED_RESULT_FOUND = "expected_result_found"
@@ -33,7 +31,6 @@ class ExitPolicy(str, Enum):
 
 
 class DiscoveryStep(BaseModel):
-    """Une étape du DiscoveryPlan (généré par l'Explorer)."""
     id: str = Field(default_factory=lambda: f"step_{uuid.uuid4().hex[:8]}")
     type: StepType
     description: str = Field(..., description="Description de l'étape (en langage naturel)")
@@ -51,44 +48,30 @@ class DiscoveryStep(BaseModel):
 
 
 class DiscoveryPlan(BaseModel):
-    """Plan d'investigation généré par l'Explorer."""
-    goal: str = Field(..., description="Objectif de la découverte (exprimé par le LLM)")
-    steps: List[DiscoveryStep] = Field(..., description="Étapes à exécuter")
-    data_type: str = Field(..., description="Type de données à explorer")
-    target: str = Field(..., description="Cible de la découverte")
-    technical_goal: str = Field(..., description="Goal technique choisi (ex: 'check_value')")
-    signature: Optional[str] = Field(None, description="Signature normalisée (générée par le Runtime)")
+    goal: str = Field(...)
+    steps: List[DiscoveryStep] = Field(...)
+    data_type: str = Field(...)
+    targets: List[str] = Field(..., description="Liste des cibles")
+    technical_goals: List[str] = Field(..., description="Liste des goals techniques")
+    signature: Optional[str] = Field(None, description="Signature normalisée")
 
 
 class DiscoveryRequest(BaseModel):
-    """
-    Demande de découverte émise par le LLM de l'entité.
-    Le LLM choisit un technical_goal parmi ceux exposés pour le data_type.
-    """
-    discovery_needed: bool = Field(
-        True,
-        description="True si tu souhaite obtenir des informations sur des donnees"
-    )
-    goal: str = Field(
-        ...,
-        description="Objectif de la découverte en langage naturel (ex: 'Valeur de la variable xxx du registre')"
-    )
-    data_type: str = Field(
-        ...,
-        description="Type de données à explorer (ex: 'misison')"
-    )
-    target: str = Field(
-        ...,
-        description="Cible de la découverte (ex: 'index0')"
-    )
-    technical_goal: str = Field(
-        ...,
-        description="Goal technique choisi parmi la liste disponible pour ce data_type (ex: 'check_value')"
-    )
+    discovery_needed: bool = Field(default=True, description="True si tu souhaites obtenir des informations sur des données")
+    goal: str = Field(..., description="Objectif de la découverte")
+    data_type: str = Field(..., description="Type de données")
+    targets: List[str] = Field(..., description="Liste des cibles (au moins une)")
+    technical_goals: List[str] = Field(..., description="Liste des goals techniques (même longueur)")
 
+    @model_validator(mode='after')
+    def validate_targets_consistency(self) -> 'DiscoveryRequest':
+        if not self.targets or not self.technical_goals:
+            raise ValueError(_("'targets' et 'technical_goals' sont requis."))
+        if len(self.targets) != len(self.technical_goals):
+            raise ValueError(_("Les listes 'targets' et 'technical_goals' doivent avoir la même longueur."))
+        return self
 
 class WorkspaceEntry(BaseModel):
-    """Une entrée dans le Workspace (question/réponse)."""
     step_id: str
     question: str
     answer: str
@@ -101,9 +84,9 @@ class WorkspaceEntry(BaseModel):
 class RefinedContext(BaseModel):
     signature: str
     data_type: str
-    target: str
+    targets: List[str] = Field(..., description="Liste des cibles")
+    technical_goals: List[str] = Field(..., description="Liste des goals techniques")
     goal: str
-    technical_goal: str
     entries: List[WorkspaceEntry] = Field(default_factory=list)
     summary: str
     exit_policy: ExitPolicy
@@ -113,7 +96,6 @@ class RefinedContext(BaseModel):
 
 
 class DiscoverySessionState(BaseModel):
-    """État interne d'une DiscoverySession en cours d'exécution."""
     session_id: str = Field(default_factory=lambda: f"ds_{uuid.uuid4().hex[:12]}")
     entity_id: str
     plan: DiscoveryPlan
@@ -125,15 +107,7 @@ class DiscoverySessionState(BaseModel):
     ended_at: Optional[datetime] = None
 
 
-# =====================================================
-# NOUVEAU : ExplorerStep avec tool_args_json
-# =====================================================
-
 class ExplorerStep(BaseModel):
-    """
-    Une étape produite par le LLM de l'Explorer.
-    L'Explorer transforme cette liste en DiscoveryPlan.
-    """
     type: Literal["tool", "semantic"] = Field(..., description="Type d'étape")
     description: str = Field(..., description="Description de l'étape")
     tool_name: Optional[str] = Field(None, description="Nom de l'outil (si type='tool')")
@@ -146,19 +120,15 @@ class ExplorerStep(BaseModel):
 
     @model_validator(mode='after')
     def validate_tool_args(self) -> 'ExplorerStep':
-        """Valide que les arguments sont cohérents avec le type d'étape."""
         if self.type == "tool":
             if not self.tool_name:
                 raise ValueError(_("Une étape de type 'tool' doit avoir un tool_name."))
-            # Vérifier que tool_args_json est un JSON valide
             try:
                 args = json.loads(self.tool_args_json) if self.tool_args_json else {}
             except json.JSONDecodeError:
                 raise ValueError(_("tool_args_json n'est pas un JSON valide."))
-            # Vérification spécifique à l'outil (ex: describe_value nécessite target)
             if self.tool_name == "describe_value" and "target" not in args:
                 raise ValueError(_("L'outil 'describe_value' nécessite un argument 'target' dans tool_args."))
-            # On pourrait ajouter d'autres vérifications ici
         elif self.type == "semantic":
             if not self.question:
                 raise ValueError(_("Une étape de type 'semantic' doit avoir une question."))

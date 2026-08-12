@@ -3,9 +3,10 @@ core/discovery/discovery_engine.py
 ==================================
 Moteur principal du Discovery Framework.
 Version corrigée : register_explorer accepte un LLM optionnel.
+Support multi‑cibles : plus de référence à target unique.
 """
 
-from typing import Dict, List, Optional, Any  # <-- AJOUT de Any
+from typing import Dict, List, Optional, Any
 from core.runtime_state import RuntimeState
 from core.discovery.base_explorer import BaseExplorer
 from core.discovery.discovery_session import DiscoverySession
@@ -78,7 +79,12 @@ class DiscoveryEngine:
             try:
                 return RefinedContext(**cached)
             except Exception as e:
-                Logger.error(f"[DiscoveryEngine] {_('Erreur désérialisation cache')}: {e}")
+                Logger.warning(f"[DiscoveryEngine] Cache invalide pour {signature}, suppression : {e}")
+                try:
+                    await self._cache_manager.delete(self._cache_type, params)
+                except Exception:
+                    pass
+                return None
         return None
 
     async def store_refined_context(self, refined: RefinedContext) -> None:
@@ -103,28 +109,34 @@ class DiscoveryEngine:
             explorer = self.get_explorer(plan.data_type)
             if not explorer:
                 raise ValueError(f"{_('Aucun Explorer pour le type')} '{plan.data_type}'")
-            plan.signature = explorer.create_signature(plan.technical_goal, plan.target)
+            plan.signature = explorer.create_signature(plan.targets, plan.technical_goals)
 
         cached = await self.get_refined_context(plan.signature)
         if cached:
             Logger.info(f"[DiscoveryEngine] {_('Cache hit pour')} {plan.signature}")
             Logger.event(Events.DISCOVERY_CACHE_HIT, signature=plan.signature, entity_id=entity_id)
-            
-            # --- NOUVEAU : émettre les événements détaillés pour l'observabilité ---
             await self._emit_discovery_events_from_cache(entity_id, plan, cached)
-            
             return cached
 
         explorer = self.get_explorer(plan.data_type)
         if not explorer:
             raise ValueError(f"{_('Aucun Explorer pour le type')} '{plan.data_type}'")
 
+        # Validation des cibles (toutes les cibles doivent être valides)
         if data_provider:
-            if not explorer.validate_target(plan.target, data_provider):
-                raise ValueError(f"{_('Cible')} '{plan.target}' {_('invalide pour')} {plan.data_type}")
+            for target in plan.targets:
+                if not explorer.validate_target(target, data_provider):
+                    raise ValueError(
+                        _("Cible '{target}' invalide pour {data_type} (cibles disponibles : {targets})")
+                        .format(target=target, data_type=plan.data_type, targets=", ".join(data_provider.get_targets()))
+                    )
         else:
-            if not explorer.validate_target(plan.target):
-                raise ValueError(f"{_('Cible')} '{plan.target}' {_('invalide pour')} {plan.data_type}")
+            for target in plan.targets:
+                if not explorer.validate_target(target):
+                    raise ValueError(
+                        _("Cible '{target}' invalide pour {data_type}")
+                        .format(target=target, data_type=plan.data_type)
+                    )
 
         session = DiscoverySession(
             entity_id=entity_id,
@@ -134,36 +146,33 @@ class DiscoveryEngine:
             llm=llm
         )
 
-        # <-- TRANSMISSION DU data_context à la session
         refined = await session.run(data_context=data_context)
 
-        if refined.exit_policy not in (ExitPolicy.TOOL_FAILED, ExitPolicy.INVALID_PLAN):
+        # On ne cache PAS les requêtes qui contiennent "last_mission" (pour éviter l'obsolescence)
+        should_cache = True
+        if "last_mission" in plan.targets:
+            should_cache = False
+
+        if refined.exit_policy not in (ExitPolicy.TOOL_FAILED, ExitPolicy.INVALID_PLAN) and should_cache:
             await self.store_refined_context(refined)
 
         return refined
 
     async def _emit_discovery_events_from_cache(self, entity_id: str, plan: DiscoveryPlan, refined: RefinedContext) -> None:
-        """
-        Émet les événements discovery.session_start/end/step à partir d'un RefinedContext en cache.
-        Utilise Logger.event pour l'observabilité (fichier JSONL).
-        """
         session_id = plan.signature
-
-        # Récupérer le contexte d'exécution pour enrichir les événements
         exec_ctx = getattr(self.runtime_state, 'execution_context', {})
         solver_id = exec_ctx.get("solver_id")
         attempt_number = exec_ctx.get("attempt_number")
         step_id = exec_ctx.get("step_id")
         mission_id = getattr(self.runtime_state, 'current_mission_id', None)
 
-        # Émettre session_start
         Logger.event(Events.DISCOVERY_SESSION_START, **{
             "session_id": session_id,
             "entity_id": entity_id,
             "goal": plan.goal,
             "data_type": plan.data_type,
-            "target": plan.target,
-            "technical_goal": plan.technical_goal,
+            "targets": plan.targets,
+            "technical_goals": plan.technical_goals,
             "max_iterations": 10,
             "cache_hit": True,
             "solver_id": solver_id,
@@ -172,7 +181,6 @@ class DiscoveryEngine:
             "mission_id": mission_id
         })
 
-        # Émettre chaque étape (si présentes)
         for entry in refined.entries:
             step_type = "tool" if entry.tool_name else "semantic"
             result = entry.tool_result or {"success": True, "data": entry.answer}
@@ -186,7 +194,6 @@ class DiscoveryEngine:
                 "cache_hit": True
             })
 
-        # Émettre session_end
         Logger.event(Events.DISCOVERY_SESSION_END, **{
             "session_id": session_id,
             "exit_policy": refined.exit_policy.value,
@@ -198,7 +205,7 @@ class DiscoveryEngine:
             "step_id": step_id,
             "mission_id": mission_id
         })
-            
+
     async def execute_discovery_request(
         self,
         entity_id: str,
@@ -208,7 +215,7 @@ class DiscoveryEngine:
         question: str,
         tools: Optional[List[Dict]] = None,
         llm: Optional[Llm] = None,
-        data_context: Optional[Any] = None  # <-- NOUVEAU (optionnel)
+        data_context: Optional[Any] = None
     ) -> RefinedContext:
         explorer = self.get_explorer(data_type)
         if not explorer:
@@ -235,12 +242,14 @@ class DiscoveryEngine:
             "expected_result": "true"
         })
 
+        # Construction d'un plan avec les listes
         plan = DiscoveryPlan(
             goal=goal,
             steps=steps,
             data_type=data_type,
-            target=target,
-            technical_goal=goal  # fallback
+            targets=[target],
+            technical_goals=[goal],
+            signature=None
         )
 
         return await self.start_discovery(entity_id, plan, llm=llm, data_context=data_context)

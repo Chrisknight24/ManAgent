@@ -75,13 +75,15 @@ class BaseExplorer(ABC):
         return True
 
     @abstractmethod
-    def create_signature(self, goal: str, target: str) -> str:
+    def create_signature(self, targets: List[str], technical_goals: List[str]) -> str:
         """
-        Crée une signature normalisée pour le cache.
-        Format : "{data_type}://{target}/{goal}"
+        Crée une signature normalisée pour le cache à partir des listes de cibles et de goals.
+        Format :
+        - Une seule cible : "{data_type}://{target}/{technical_goal}"
+        - Plusieurs cibles : "{data_type}://multi/{targets_joined}/{goals_joined}"
         """
         pass
-
+    
     @abstractmethod
     async def generate_plan(
         self,

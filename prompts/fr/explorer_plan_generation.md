@@ -1,13 +1,20 @@
 # Explorer Plan Generation
 
-You are an expert in data investigation. Your task is to build a step‑by‑step investigation plan to explore a specific piece of data using the available tools.
+You are an expert in data investigation. Your task is to build a step‑by‑step investigation plan to explore specific pieces of data using the available tools.
 
 ## System Context
 
 - **Data Type** : {{ data_type }}
-- **Technical Goal** : {{ technical_goal }}
-- **Target** : {{ target }}
 - **Natural Language Goal** : {{ goal }}
+- **Targets** :
+{% for t in targets %}
+  - `{{ t }}`
+{% endfor %}
+
+- **Technical Goals** :
+{% for tg in technical_goals %}
+  - `{{ tg }}`
+{% endfor %}
 
 ## Available Tools
 
@@ -24,65 +31,64 @@ You are an expert in data investigation. Your task is to build a step‑by‑ste
 ### Critical Rules for `tool_args_json`
 
 - **Every `tool` step MUST include a `tool_args_json` field containing a JSON string.**
-- **If the tool description requires a parameter (e.g., `target`), you MUST include that parameter using the exact value of `{{ target }}` provided in the context.**
-- **For tools that need `target`, your `tool_args_json` should be: `"{\"target\": \"{{ target }}\"}"`** (or with other parameters if needed).
+- **If the tool description requires a parameter (e.g., `target`), you MUST include that parameter using the exact value from the provided targets list.**
+- For tools that need a `target`, use the corresponding target from the list. You may need to repeat similar steps for each target.
 - If the tool does not require any parameter, you may use `"{}"`.
 
-**Example for `describe_value` with the current target:**
+**Example for `get_mission_details` with two targets (`targets[0]` and `targets[1]`):**
+
 ```json
-{
-  "type": "tool",
-  "tool_name": "describe_value",
-  "tool_args_json": "{\"target\": \"{{ target }}\"}"
-}
-Expected Response Format
-Return a JSON object with a list of steps:
-
-json
-{
-  "steps": [
-    {
-      "type": "tool" | "semantic",
-      "description": "description of the step",
-      "tool_name": "tool_name" (required for type="tool"),
-      "tool_args_json": "{\"param\": \"value\"}" (REQUIRED for type="tool"),
-      "question": "question to ask" (required for type="semantic"),
-      "expected_result": "true" | "false" | "any" (default "true")
-    }
-  ]
-}
-Complete Example
-Goal : Verify the value of the 'status' key inside the target variable.
-
-Response :
-
-json
 {
   "steps": [
     {
       "type": "tool",
-      "description": "Get metadata of the target to confirm its structure",
-      "tool_name": "describe_value",
-      "tool_args_json": "{\"target\": \"{{ target }}\"}",
+      "description": "Get details for the first target ({{ targets[0] }})",
+      "tool_name": "get_mission_details",
+      "tool_args_json": "{\"target\": \"{{ targets[0] }}\"}",
+      "expected_result": "true"
+    },
+    {
+      "type": "tool",
+      "description": "Get details for the second target ({{ targets[1] }})",
+      "tool_name": "get_mission_details",
+      "tool_args_json": "{\"target\": \"{{ targets[1] }}\"}",
       "expected_result": "true"
     },
     {
       "type": "semantic",
-      "description": "Analyze metadata to answer the question",
-      "question": "Does the target contain a 'status' key?",
+      "description": "Compare and synthesize results",
+      "question": "{{ goal }}",
       "expected_result": "true"
     }
   ]
 }
-Your Task
-Generate a plan for the following parameters:
+```
 
-Data Type : {{ data_type }}
+If you have only one target, you can simply use `targets[0]` in the JSON, and you may not need a final semantic step if the tool itself returns a sufficient answer.
 
-Technical Goal : {{ technical_goal }}
+## Expected Response Format
 
-Target : {{ target }}
+Return a JSON object with a list of steps:
 
-Goal : {{ goal }}
+```json
+{
+  "steps": [
+    {
+      "type": "tool" | "semantic",
+      "description": "...",
+      "tool_name": "...",
+      "tool_args_json": "...",
+      "question": "...",
+      "expected_result": "..."
+    }
+  ]
+}
+```
+
+## Your Task
+
+Generate a plan for the given targets and technical goals.
+
+**Important:** Use the actual target values (e.g., the mission IDs) as they appear in the `targets` list. Do not use placeholders like `targets[0]` literally in the JSON output; use the actual string value.
 
 Return only the JSON, no comments.
