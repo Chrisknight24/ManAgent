@@ -35,6 +35,12 @@ class ExecutionStatus(str, Enum):
     MAX_RETRIES_REACHED = "max_retries_reached"
     RUNNING = "running"
 
+class RiskLevel(str, Enum):
+    """Niveau de risque perçu d'un plan par la validation finale de l'Orchestrateur."""
+    LOW = "low"
+    MEDIUM = "medium"
+    CRITICAL = "critical"
+
 # =====================================================
 # MODÈLES (héritent désormais de BaseDiscoverySchema)
 # =====================================================
@@ -88,6 +94,21 @@ class PlanStep(BaseModel):
     is_crucial: bool = Field(
         False,
         description=_("Si True, cette variable sera ajoutée au Registre Utile de Mission (RUM) visible par le Présentateur. Utilisez ce flag pour les preuves directes de succès/échec de la mission.")
+    )
+
+    # --- NOUVEAU : déclaration d'irréversibilité (validation finale Orchestrateur) ---
+    is_irreversible: bool = Field(
+        False,
+        description=_(
+            "Si True, cette étape a un effet difficilement ou pas réversible une fois exécuté "
+            "(suppression, envoi, paiement, écrasement de données, etc.). C'est une DÉCLARATION "
+            "du Planner, pas une déduction automatique : soyez honnête, l'Orchestrateur peut "
+            "contester ce jugement lors de la validation finale mais part de votre déclaration."
+        )
+    )
+    irreversibility_reason: Optional[str] = Field(
+        None,
+        description=_("Si is_irreversible=True, explique brièvement en quoi l'effet est irréversible.")
     )
 
     @model_validator(mode='after')
@@ -215,7 +236,75 @@ class ConvergenceDecision(BaseDiscoverySchema):
     )
 
 
+class PlanValidationDecision(BaseDiscoverySchema):
+    """
+    Décision de l'Orchestrateur (le "LLM Judge") sur la conformité d'un plan
+    proposé par un Solver, avant exécution. Contrairement à FeasibilityDecision
+    (est-ce POSSIBLE ?) et ConvergenceDecision (est-ce que le RÉSULTAT converge ?),
+    celle-ci juge le PLAN lui-même : conformité à rules.md, patterns récursifs
+    signalés, actions irréversibles déclarées par le Planner.
+    """
+    is_conformant: bool = Field(
+        ...,
+        description=_("True si le plan respecte les critères de rules.md et converge raisonnablement vers l'objectif, False sinon.")
+    )
+    reason: str = Field(
+        ...,
+        description=_(
+            "Justification technique de la décision. Si is_conformant=False, doit être "
+            "assez précise pour que le Planner puisse corriger son prochain plan. "
+            "Ce texte est réinjecté tel quel dans le contexte du Planner en cas de refus."
+        )
+    )
+    risk_level: RiskLevel = Field(
+        default=RiskLevel.LOW,
+        description=_("Niveau de risque perçu du plan, indépendamment de sa conformité.")
+    )
+    requires_human_confirmation: bool = Field(
+        default=False,
+        description=_(
+            "True si, même conforme, ce plan doit être confirmé par un humain avant "
+            "exécution (action critique et/ou irréversible). Ignoré si is_conformant=False "
+            "(un plan déjà rejeté n'a pas besoin d'être confirmé)."
+        )
+    )
+    irreversibility_flags: List[str] = Field(
+        default_factory=list,
+        description=_(
+            "Liste des identifiants d'étapes jugées irréversibles ou critiques par "
+            "l'Orchestrateur — peut différer de ce que le Planner a déclaré via "
+            "is_irreversible sur chaque PlanStep (l'Orchestrateur peut contester)."
+        )
+    )
+
+
 class CompactedAdvice(BaseDiscoverySchema):
     advice: str = Field(..., description="Conseil stratégique (stratégies clés + pièges à éviter) pour le Planner.")
     is_novel: bool = Field(..., description="True si la mission actuelle semble réellement nouvelle (peu de patterns connus), False si elle est déjà bien couverte par les missions similaires.")
     confidence: float = Field(default=0.5, ge=0.0, le=1.0, description="Niveau de confiance du compactor dans son jugement (optionnel).")
+
+
+class DepthEscalationDecision(BaseDiscoverySchema):
+    """
+    Décision de l'Orchestrateur sur une demande d'extension de la profondeur
+    maximale de récursion (abstract_task imbriqués). Ne juge PAS un plan
+    précis (contrairement à PlanValidationDecision) mais la CHAÎNE de
+    sous-tâches ayant mené à ce point : est-ce une décomposition légitime
+    d'un problème réellement complexe, ou un motif dégénéré (boucle,
+    redite du même objectif sous des formulations différentes, absence de
+    progression tangible d'un niveau à l'autre) ?
+    """
+    is_legitimate_complexity: bool = Field(
+        ...,
+        description=_(
+            "True si la chaîne de sous-tâches reflète une décomposition légitime d'un "
+            "problème réellement complexe (chaque niveau a un objectif distinct qui fait "
+            "progresser la mission). False si c'est un motif récursif dégénéré : le même "
+            "objectif reformulé, une boucle sans progression, ou une décomposition qui "
+            "n'apporte rien de nouveau par rapport au niveau parent."
+        )
+    )
+    reason: str = Field(
+        ...,
+        description=_("Justification technique, assez précise pour comprendre le jugement même en cas de refus.")
+    )

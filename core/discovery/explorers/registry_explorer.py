@@ -154,6 +154,19 @@ class RegistryExplorer(BaseExplorer):
                 if t not in registry:
                     raise ValueError(_("Cible '{target}' invalide pour registry.").format(target=t))
 
+        # Signature canonique pour le cache — calculée ICI, tout en haut,
+        # car elle ne dépend que de targets/technical_goals/data_type, PAS de
+        # la réponse du LLM. On peut donc l'attacher dès le premier événement
+        # (DISCOVERY_PLAN_GENERATION_START), ce qui permet au rapport de
+        # rattacher explicitement cet appel LLM à la DiscoverySession qui va
+        # suivre, au lieu de le laisser orphelin faute d'identifiant commun.
+        if len(targets) == 1:
+            signature = f"{self._data_type}://{targets[0]}/{technical_goals[0]}"
+        else:
+            targets_str = "_".join(targets)
+            goals_str = "_".join(technical_goals)
+            signature = f"{self._data_type}://multi/{targets_str}/{goals_str}"
+
         # Construction du prompt avec les listes
         tools_desc = self.get_tools_description()
         tools_text = "\n".join([
@@ -177,29 +190,41 @@ class RegistryExplorer(BaseExplorer):
             targets=targets,
             technical_goals=technical_goals,
             goal=goal,
-            mission_id=self.runtime_state.current_mission_id
+            signature=signature,
+            # mission_id/run_id/entity_* : plus de valeur figée ici, on laisse
+            # Logger.event les injecter depuis le scope ambiant posé par
+            # l'appelant (Llm._execute_discovery). Passer explicitement
+            # `self.runtime_state.current_mission_id` reproduisait le bug de
+            # fuite entre tours (voir runtime_state.py).
         )
 
-        try:
-            result: ExplorerPlanOutput = await effective_llm.generate_structured(
-                prompt=prompt,
-                schema=ExplorerPlanOutput,
-                tag="explorer_plan_generation"
-            )
-            steps = result.steps
-        except Exception as e:
-            Logger.event(
-                Events.DISCOVERY_PLAN_GENERATION_ERROR,
-                data_type=self._data_type,
-                targets=targets,
-                technical_goals=technical_goals,
-                error=str(e),
-                mission_id=self.runtime_state.current_mission_id
-            )
-            raise ValueError(
-                _("Échec de la génération du plan par le LLM de l'Explorer : {error}")
-                .format(error=e)
-            )
+        # Englober l'appel LLM dans un scope portant la signature : même si
+        # `discovery_run_id` n'est pas encore connu à ce stade (il naît
+        # côté DiscoveryEngine juste après), le llm_call `explorer_plan_
+        # generation` hérite au moins de `discovery_signature`, ce qui
+        # suffit au rapport pour le rattacher à la bonne session une fois
+        # celle-ci créée.
+        with self.runtime_state.execution_context.scope(discovery_signature=signature):
+            try:
+                result: ExplorerPlanOutput = await effective_llm.generate_structured(
+                    prompt=prompt,
+                    schema=ExplorerPlanOutput,
+                    tag="explorer_plan_generation"
+                )
+                steps = result.steps
+            except Exception as e:
+                Logger.event(
+                    Events.DISCOVERY_PLAN_GENERATION_ERROR,
+                    data_type=self._data_type,
+                    targets=targets,
+                    technical_goals=technical_goals,
+                    error=str(e),
+                    signature=signature,
+                )
+                raise ValueError(
+                    _("Échec de la génération du plan par le LLM de l'Explorer : {error}")
+                    .format(error=e)
+                )
 
         # Transformer les étapes
         discovery_steps = []
@@ -243,21 +268,15 @@ class RegistryExplorer(BaseExplorer):
             else:
                 raise ValueError(_("Type d'étape inconnu : {type}").format(type=step.type))
 
-        # Signature canonique pour le cache
-        if len(targets) == 1:
-            signature = f"{self._data_type}://{targets[0]}/{technical_goals[0]}"
-        else:
-            targets_str = "_".join(targets)
-            goals_str = "_".join(technical_goals)
-            signature = f"{self._data_type}://multi/{targets_str}/{goals_str}"
-
+        # (signature déjà calculée en haut de la méthode — inutile de la
+        # recalculer, et surtout inutile de risquer qu'elle diverge)
         Logger.event(
             Events.DISCOVERY_PLAN_GENERATION_END,
             data_type=self._data_type,
             targets=targets,
             technical_goals=technical_goals,
             step_count=len(discovery_steps),
-            mission_id=self.runtime_state.current_mission_id
+            signature=signature,
         )
 
         return DiscoveryPlan(

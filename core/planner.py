@@ -18,6 +18,12 @@ from core.i18n import _
 from typing import Tuple, List, Optional, Any, Dict
 from core.entity import Entity
 
+# Désactivation temporaire de la Progressive Disclosure pour le Planner
+# (demande explicite : jugée trop lourde pour l'instant sur cette entité).
+# N'affecte QUE le Planner — Orchestrator/Presentator/autres Explorers ne
+# sont pas concernés. Pour réactiver : remettre à True (un seul endroit).
+PLANNER_PD_ENABLED = False
+
 
 class PlannerRegistryProvider:
     """
@@ -90,11 +96,17 @@ class Planner(Entity):
             )
 
             # --- Activation explicite de la Progressive Disclosure ---
-            if not self.llm._discovery_enabled:
-                self.llm.enable_discovery(self.runtime_state.discovery_engine, self)
-                Logger.info(
-                    _("[Planner:{name}] Progressive Disclosure activée.")
-                    .format(name=self.name)
+            if PLANNER_PD_ENABLED:
+                if not self.llm._discovery_enabled:
+                    self.llm.enable_discovery(self.runtime_state.discovery_engine, self)
+                    Logger.info(
+                        _("[Planner:{name}] Progressive Disclosure activée.")
+                        .format(name=self.name)
+                    )
+            else:
+                Logger.debug(
+                    f"[Planner:{self.name}] Progressive Disclosure désactivée pour cette entité "
+                    f"(PLANNER_PD_ENABLED=False)."
                 )
 
     async def process(self, *args, **kwargs) -> Plan:
@@ -146,8 +158,12 @@ class Planner(Entity):
         proposed_plan: Plan = await self.llm.generate_structured(
             prompt=prompt,
             schema=Plan,
-            tag="Plan",
-            mission_id=self.runtime_state.current_mission_id
+            tag="Plan"
+            # mission_id n'est plus passé explicitement : _emit_llm_event
+            # (llm.py) le récupère désormais depuis le contexte d'exécution
+            # scopé ambiant, qui est correct par construction (contrairement
+            # à l'ancien `runtime_state.current_mission_id`, jamais remis à
+            # None après la fin d'une mission).
         )
 
         try:

@@ -446,22 +446,43 @@ class Solver(Supervisor, Entity):
                             self.current_attempt.failure_reason = _("Annulation demandée")
                             break
 
-                        is_valid = await self.validate_plan(proposed_plan, self.id)
+                        # On exclut la tentative COURANTE (déjà ajoutée à l'arbre juste
+                        # au-dessus, ligne 346) : previous_attempts doit ne contenir que
+                        # les tentatives VRAIMENT antérieures, pour la détection de
+                        # motifs récursifs dans PlanValidator.
+                        previous_attempts = self.execution_tree.attempts[:-1] if self.execution_tree else []
+                        validation_outcome = await self.validate_plan(
+                            proposed_plan, self.id, previous_attempts=previous_attempts
+                        )
+                        # Compat : validate_plan pouvait historiquement renvoyer un bool
+                        # nu (avant l'introduction de PlanValidationOutcome). __bool__
+                        # est défini dessus, donc `not validation_outcome` fonctionne
+                        # dans les deux cas — mais on ne peut lire `.reason` que sur le
+                        # nouvel objet.
+                        is_valid = bool(validation_outcome)
+                        rejection_reason = getattr(
+                            validation_outcome, "reason", _("Plan refusé par le superviseur")
+                        )
                         if not is_valid:
                             self.runtime_state.update_marker("plan_rejected", True)
-                            Logger.warning(f"[Solver:{self.id}] Plan refusé par le superviseur.")
+                            Logger.warning(f"[Solver:{self.id}] Plan refusé par le superviseur : {rejection_reason}")
                             Logger.event(
                                 "plan_rejected_supervisor",
                                 solver_id=self.id,
                                 attempt=attempt_counter,
-                                reason="Plan refusé par le superviseur"
+                                reason=rejection_reason
                             )
                             self.current_attempt.ended_at = time.time()
                             self.current_attempt.outcome = "failed"
                             self.current_attempt.failure_class = FailureClass.PLAN_REJECTED_SUPERVISOR
-                            self.current_attempt.failure_reason = _("Plan refusé par le superviseur")
+                            self.current_attempt.failure_reason = rejection_reason
                             self.current_attempt.target_entity = "Orchestrator"
-                            self.context += _("\n[Échec] Plan refusé par le Superviseur.")
+                            # Le Planner voit maintenant POURQUOI le plan a été refusé
+                            # (rules.md, pattern récursif détecté, confirmation humaine
+                            # refusée...) au lieu d'un message générique — condition
+                            # nécessaire pour qu'il puisse réellement adapter son
+                            # prochain essai plutôt que de le répéter à l'identique.
+                            self.context += _("\n[Échec] Plan refusé par le Superviseur : {reason}").format(reason=rejection_reason)
                             self._preexecution_failures += 1
                             if self._preexecution_failures >= MAX_PREEXECUTION_FAILURES:
                                 break
@@ -685,8 +706,36 @@ class Solver(Supervisor, Entity):
         except Exception as e:
             Logger.warning(f"[Solver:{self.id}] Échec stockage embeddings : {e}")
 
-    async def validate_plan(self, plan: Plan, child_solver_id: str) -> bool:
-        return await self.parent.validate_plan(plan, child_solver_id)
+    async def validate_plan(
+        self, plan: Plan, child_solver_id: str, previous_attempts: Optional[List] = None
+    ):
+        ancestor_chain = self._build_ancestor_chain()
+        return await self.parent.validate_plan(
+            plan, child_solver_id, previous_attempts=previous_attempts, ancestor_chain=ancestor_chain
+        )
+
+    def _build_ancestor_chain(self) -> List[Dict[str, Any]]:
+        """
+        Chaîne d'ancêtres (racine -> ce Solver), utilisée à la fois par
+        validate_plan (détection de récursion dégénérée ENTRE niveaux
+        imbriqués — un cas que la comparaison aux seules previous_attempts
+        DE CE Solver ne peut pas voir, puisque chaque abstract_task crée un
+        Solver enfant flambant neuf) et par request_depth_extension.
+        S'arrête dès qu'on atteint un ancêtre qui n'a pas la forme d'un
+        Solver (typiquement l'Orchestrateur, qui n'a ni .depth ni .goal).
+        """
+        chain = []
+        node = self
+        while hasattr(node, "goal") and hasattr(node, "depth") and hasattr(node, "id"):
+            chain.append({"depth": node.depth, "goal": node.goal, "solver_id": node.id})
+            node = getattr(node, "parent", None)
+            if node is None:
+                break
+        chain.reverse()
+        return chain
+
+    async def request_depth_extension(self, ancestor_chain: List[Dict[str, Any]], child_solver_id: str) -> bool:
+        return await self.parent.request_depth_extension(ancestor_chain, child_solver_id)
 
     def _format_registry_metadata(self, registry_view: dict) -> str:
         """Formate la vue des métadonnées du registre pour l'affichage dans un prompt."""

@@ -8,6 +8,8 @@ Version avec Progressive Disclosure via discovery_request imbriqué.
 from __future__ import annotations
 
 import time
+import uuid
+from contextlib import nullcontext
 from typing import (
     Type, AsyncGenerator, List, Dict, Optional, Union, Any,
     TYPE_CHECKING
@@ -51,6 +53,8 @@ class Llm:
         self._discovery_engine = None
         self._entity = None
         self._entity_id: Optional[str] = None
+        self._entity_name: Optional[str] = None
+        self._entity_role: Optional[str] = None
         self._prompt_loader = get_prompt_loader()
         self._max_iterations = 5
 
@@ -69,6 +73,12 @@ class Llm:
         self._discovery_engine = engine
         self._entity = entity
         self._entity_id = entity.entity_id
+        # L'objet Entity porte déjà `name`/`role` (voir core/entity.py) — on
+        # les garde ici pour pouvoir les injecter explicitement dans le
+        # contexte d'exécution au moment d'une Discovery, plutôt que de ne
+        # transmettre qu'un ID brut que le rapport devrait ensuite deviner.
+        self._entity_name = getattr(entity, "name", None)
+        self._entity_role = getattr(entity, "role", None)
 
         # Définir le contexte de données à partir de l'entité
         if hasattr(entity, 'get_data_context'):
@@ -470,9 +480,16 @@ class Llm:
         if duration_ms is not None:
             event_fields["duration_ms"] = duration_ms
 
-        # --- NOUVEAU : propager le mission_id depuis le runtime_state si non fourni ---
+        # --- Propager le mission_id depuis le contexte d'exécution SCOPÉ si non fourni ---
+        # (avant : `getattr(self.runtime_state, 'current_mission_id', None)`, un
+        # attribut global jamais remis à None après la fin d'une mission — donc
+        # collant sur tous les appels LLM structurés suivants, mission ou pas.
+        # `execution_context.get("mission_id")` retombe naturellement à None
+        # hors de tout `scope(mission_id=...)` actif.)
         if mission_id is None and self.runtime_state:
-            mission_id = getattr(self.runtime_state, 'current_mission_id', None)
+            exec_ctx = getattr(self.runtime_state, 'execution_context', None)
+            if exec_ctx:
+                mission_id = exec_ctx.get('mission_id')
         if mission_id is not None:
             event_fields["mission_id"] = mission_id
 
@@ -641,23 +658,48 @@ class Llm:
 
         data_provider = self._entity.get_data_provider(discovery_req.data_type)
 
-        # Appel à generate_plan avec les listes
-        plan = await explorer.generate_plan(
-            goal=discovery_req.goal,
-            llm=self,
-            data_provider=data_provider,
-            data_context=self._data_context,
-            targets=discovery_req.targets,
-            technical_goals=discovery_req.technical_goals
+        # Un seul identifiant unique pour TOUTE cette exécution de Discovery
+        # (génération du plan + session), distinct de la signature de cache
+        # (déterministe, donc partagée entre plusieurs invocations
+        # différentes). C'est ce `discovery_run_id`, posé ici dans le scope
+        # ambiant AVANT même d'appeler generate_plan, qui permet au rapport
+        # de rattacher l'appel LLM "explorer_plan_generation" (et tout le
+        # reste : steps, outils, analyze_registry...) à la bonne exécution,
+        # sans avoir à deviner par proximité temporelle.
+        run_id = uuid.uuid4().hex
+        exec_ctx = getattr(self.runtime_state, 'execution_context', None)
+        scope_cm = (
+            exec_ctx.scope(
+                discovery_run_id=run_id,
+                entity_id=self._entity_id,
+                entity_name=self._entity_name,
+                entity_role=self._entity_role,
+            )
+            if exec_ctx is not None
+            else nullcontext()
         )
 
-        refined = await self._discovery_engine.start_discovery(
-            entity_id=self._entity_id,
-            plan=plan,
-            llm=self,
-            data_provider=data_provider,
-            data_context=self._data_context
-        )
+        with scope_cm:
+            # Appel à generate_plan avec les listes
+            plan = await explorer.generate_plan(
+                goal=discovery_req.goal,
+                llm=self,
+                data_provider=data_provider,
+                data_context=self._data_context,
+                targets=discovery_req.targets,
+                technical_goals=discovery_req.technical_goals
+            )
+
+            refined = await self._discovery_engine.start_discovery(
+                entity_id=self._entity_id,
+                plan=plan,
+                llm=self,
+                data_provider=data_provider,
+                data_context=self._data_context,
+                run_id=run_id,
+                entity_name=self._entity_name,
+                entity_role=self._entity_role,
+            )
 
         return refined
 

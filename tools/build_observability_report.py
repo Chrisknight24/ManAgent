@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-build_observability_report.py (v8.21)
+build_observability_report.py (v8.24)
 =====================================
-- Ajout de l'affichage des sessions Discovery (Progressive Disclosure) dans le fil de la session
-- Rattachement par session_id en plus de mission_id
-- Fonction renderDiscoverySessionCompact pour un affichage synthétique
+- Rattachement des sessions Discovery par mission_id ou timestamp
+- Déduction du nom et du rôle de l'entité à partir des champs disponibles
+- Affichage des sessions Discovery sous forme de blocs déroulants (details)
+- Intégration des appels explorer_plan_generation dans les sessions Discovery
 """
 
 import argparse
@@ -123,7 +124,22 @@ PRESENTATOR_TAGS = {"generate_text", "Presentator_report", "Presentator_error", 
 FEASIBILITY_TAGS = {"FeasibilityDecision", "SignatureExtractor"}
 PLANNING_TAGS = {"Plan", "RerankedLessons", "MissionCompactor"}
 CONVERGENCE_TAGS = {"ConvergenceDecision"}
+# Validation finale du plan par l'Orchestrateur (le "LLM Judge", voir
+# core/plan_validator.py). Rattaché à la tentative, entre Planner et
+# Executor dans la hiérarchie visuelle — c'est bien à cet endroit dans le
+# flux réel que validate_plan() intervient (juste après le Plan, avant
+# toute exécution de step).
+PLAN_VALIDATION_TAGS = {"PlanValidationDecision"}
 EXPLORER_PLAN_TAGS = {"explorer_plan_generation", "explorer_plan_generation_mission"}
+# Tout appel LLM émis DEPUIS l'intérieur d'une exécution Discovery (génération
+# de plan, mais aussi les outils qui appellent le LLM pendant les steps :
+# analyze_registry/analyze_execution_tree pour MissionHistoryExplorer,
+# discovery_semantic pour les steps sémantiques). Ces appels héritent tous du
+# `discovery_run_id` ambiant (voir llm.py::_execute_discovery et
+# discovery_session.py) et sont donc désormais rattachés en tant que
+# sous-arbre de leur DiscoverySession — jamais listés comme "appel LLM
+# orphelin" au niveau de la mission.
+DISCOVERY_LLM_TAGS = EXPLORER_PLAN_TAGS | {"analyze_registry", "analyze_execution_tree", "discovery_semantic"}
 
 # =====================================================
 # UTILITAIRES
@@ -156,6 +172,8 @@ def _store_call_on_attempt(attempt, call, tag):
         attempt.setdefault("_feasibility_calls", []).append(call)
     elif tag in PLANNING_TAGS:
         attempt.setdefault("_planning_calls", []).append(call)
+    elif tag in PLAN_VALIDATION_TAGS:
+        attempt.setdefault("_validation_calls", []).append(call)
     elif tag in CONVERGENCE_TAGS:
         attempt.setdefault("_convergence_calls", []).append(call)
     elif tag in PRESENTATOR_TAGS:
@@ -208,52 +226,108 @@ def build_solver_to_mission_map(episodes):
     return solver_to_mission
 
 # =====================================================
-# RATTACHEMENT DES ÉVÉNEMENTS DISCOVERY (MODIFIÉ)
+# RATTACHEMENT DES ÉVÉNEMENTS DISCOVERY
 # =====================================================
 
 def build_discovery_data(events: List[Dict], llm_calls: List[Dict]) -> Dict[str, Any]:
-    discovery_events = [e for e in events if e.get("event", "").startswith("discovery.")]
-    sessions_by_id = {}
+    """
+    Construit les sessions Discovery affichables, regroupées par exécution
+    RÉELLE (run_id) plutôt que par signature de cache.
 
-    llm_calls_by_session = {}
+    Pourquoi ce changement :
+    -------------------------
+    `session_id` (renommé ici en `signature`) est une clé de cache
+    déterministe : data_type/targets/goals -> toujours la même valeur, quels
+    que soient l'entité, la mission ou le moment. Deux invocations
+    complètement différentes (deux entités, deux missions, ou simplement la
+    même question posée deux fois dans deux tours directs) partagent donc la
+    même signature. Grouper par signature les fusionnait à tort en une seule
+    "session" affichée, dont l'entité/mission restaient figées sur la
+    PREMIÈRE invocation rencontrée, pendant que les étapes de toutes les
+    invocations suivantes continuaient à s'y empiler.
+
+    `run_id` est un identifiant unique par exécution (généré côté
+    DiscoveryEngine/Llm à chaque appel, cache hit inclus). Les événements
+    récents le portent tous ; les anciens logs, émis avant ce correctif, ne
+    l'ont pas — on retombe alors sur la signature pour ne pas perdre ces
+    entrées historiques, mais on les marque explicitement `"legacy": True`
+    pour que le rapport ne prétende pas à une précision qu'il n'a pas.
+    """
+    discovery_events = [e for e in events if e.get("event", "").startswith("discovery.")]
+    sessions_by_run = {}
+
+    # Indexer les appels LLM (explorer_plan_generation, analyze_registry, ...)
+    # par run_id — avec repli sur `session_id`/signature pour les vieux logs
+    # qui n'avaient pas encore de run_id ni de champ signature explicite sur
+    # ces appels-là.
+    llm_calls_by_run = {}
     for call in llm_calls:
         tag = call.get("tag", "")
-        if tag in EXPLORER_PLAN_TAGS:
-            sid = call.get("session_id")
-            if sid:
-                llm_calls_by_session.setdefault(sid, []).append(call)
+        if tag in DISCOVERY_LLM_TAGS:
+            key = call.get("run_id") or call.get("discovery_run_id") or call.get("signature") or call.get("session_id")
+            if key:
+                llm_calls_by_run.setdefault(key, []).append(call)
 
     for ev in discovery_events:
-        session_id = ev.get("session_id")
-        if not session_id:
+        signature = ev.get("session_id")  # clé de cache (métadonnée, pas une identité d'exécution)
+        run_id = ev.get("run_id")
+        is_legacy = run_id is None
+        # Repli pour les événements historiques : on utilise la signature
+        # comme clé de regroupement, faute de mieux — en sachant que ça peut
+        # à nouveau fusionner plusieurs exécutions distinctes, exactement le
+        # défaut qu'on corrige. D'où le badge "legacy" côté affichage.
+        key = run_id or signature
+        if not key:
             continue
-        if session_id not in sessions_by_id:
-            sessions_by_id[session_id] = {
-                "session_id": session_id,
-                "entity_id": ev.get("entity_id"),
-                "entity_name": ev.get("entity_name") or "?",
-                "entity_role": ev.get("entity_role") or "?",
+
+        if key not in sessions_by_run:
+            entity_id = ev.get("entity_id")
+            entity_name = ev.get("entity_name")
+            entity_role = ev.get("entity_role")
+            if not entity_name or entity_name == "unknown":
+                # Repli pour les très vieux logs sans entity_name du tout.
+                short_id = entity_id[:8] if entity_id and len(entity_id) >= 8 else (entity_id or "?")
+                entity_name = short_id
+            if not entity_role or entity_role == "unknown":
+                entity_role = "?"
+
+            sessions_by_run[key] = {
+                "run_id": run_id or key,
+                "signature": signature,
+                "legacy": is_legacy,
+                "entity_id": entity_id,
+                "entity_name": entity_name,
+                "entity_role": entity_role,
                 "mission_id": ev.get("mission_id"),
+                "turn_id": ev.get("turn_id"),
                 "goal": None,
                 "data_type": None,
-                "target": None,
-                "technical_goal": None,
+                "targets": [],
+                "technical_goals": [],
                 "exit_policy": None,
                 "summary": None,
                 "steps": [],
                 "cache_hit": False,
-                "explorer_plan_calls": llm_calls_by_session.get(session_id, []),
+                "explorer_plan_calls": llm_calls_by_run.get(run_id) or llm_calls_by_run.get(signature) or [],
                 "start_time": None,
                 "end_time": None,
             }
-        session = sessions_by_id[session_id]
+        session = sessions_by_run[key]
+        # Si turn_id/mission_id n'étaient pas encore connus (ex : premier
+        # événement rencontré était un discovery.step) et qu'un événement
+        # plus tardif les porte, on les complète sans jamais écraser une
+        # valeur déjà posée par un événement légitime.
+        if session.get("turn_id") is None and ev.get("turn_id"):
+            session["turn_id"] = ev.get("turn_id")
+        if session.get("mission_id") is None and ev.get("mission_id"):
+            session["mission_id"] = ev.get("mission_id")
 
         if ev.get("event") == "discovery.session_start":
             session["goal"] = ev.get("goal")
             session["data_type"] = ev.get("data_type")
-            session["target"] = ev.get("target")
-            session["technical_goal"] = ev.get("technical_goal")
-            session["cache_hit"] = ev.get("cache_hit", False)   # <-- on stocke le flag
+            session["targets"] = ev.get("targets", [])
+            session["technical_goals"] = ev.get("technical_goals", [])
+            session["cache_hit"] = ev.get("cache_hit", False)
             session["start_time"] = ev.get("ts")
         elif ev.get("event") == "discovery.session_end":
             session["exit_policy"] = ev.get("exit_policy")
@@ -273,15 +347,47 @@ def build_discovery_data(events: List[Dict], llm_calls: List[Dict]) -> Dict[str,
         elif ev.get("event") == "discovery.cache_hit":
             session["cache_hit"] = True
 
+    # Filtrage : une "session" sans goal, sans data_type ET sans étape n'a
+    # jamais reçu de vrai discovery.session_start exploitable — c'est du
+    # bruit (fragment d'un ancien run, événement isolé mal formé...), pas
+    # une session Discovery à afficher. La montrer produisait un bloc
+    # dépliable totalement vide, taggé "rattachement approximatif" qui
+    # n'apportait rien qu'de la confusion.
+    sessions_by_run = {
+        key: s for key, s in sessions_by_run.items()
+        if s.get("goal") or s.get("data_type") or s.get("steps")
+    }
+
+    # Regrouper par mission (rattachement fiable : mission_id est maintenant
+    # correctement scopé côté émission, cf. execution_context)
     by_mission = {}
-    by_session = {}
-    for session_id, session in sessions_by_id.items():
-        by_session.setdefault(session_id, []).append(session)
+    for key, session in sessions_by_run.items():
         mission_id = session.get("mission_id")
         if mission_id:
             by_mission.setdefault(mission_id, []).append(session)
 
-    return {"by_mission": by_mission, "by_session": by_session}
+    # Regrouper par tour (rattachement EXACT, remplace l'ancienne
+    # correspondance par timestamp pour les tours directs)
+    by_turn = {}
+    for key, session in sessions_by_run.items():
+        turn_id = session.get("turn_id")
+        if turn_id:
+            by_turn.setdefault(turn_id, []).append(session)
+
+    # Sessions ni rattachées à une mission ni à un tour identifié (uniquement
+    # des logs legacy, en principe — tout événement récent porte au moins
+    # turn_id ou mission_id)
+    unattached_sessions = [
+        s for s in sessions_by_run.values()
+        if not s.get("mission_id") and not s.get("turn_id")
+    ]
+
+    return {
+        "by_mission": by_mission,
+        "by_turn": by_turn,
+        "by_run": sessions_by_run,
+        "unattached_sessions": unattached_sessions,
+    }
 
 def attach_discovery_to_episodes(episodes, discovery_data):
     for ep in episodes:
@@ -368,6 +474,12 @@ def attach_llm_calls_by_mission(episodes, llm_calls):
             attempt_num = call.get("attempt_number")
             tag = call.get("tag")
 
+            if tag in DISCOVERY_LLM_TAGS:
+                # Déjà rattaché à sa DiscoverySession (voir build_discovery_data
+                # / session["explorer_plan_calls"]) : on ne le duplique pas
+                # dans les appels "génériques" de la mission.
+                continue
+
             if tag == "tools_manager_decision":
                 step_id = call.get("step_id")
                 if step_id and solver_id is not None and attempt_num is not None:
@@ -389,6 +501,15 @@ def attach_llm_calls_by_mission(episodes, llm_calls):
                     ep.setdefault("_solver_preparations", {}).setdefault(solver_id, []).append(call)
                 else:
                     ep.setdefault("_other_calls", []).append(call)
+                continue
+
+            if tag in PLAN_VALIDATION_TAGS:
+                if solver_id is not None and attempt_num is not None:
+                    attempt = attempt_index.get((solver_id, attempt_num))
+                    if attempt:
+                        _store_call_on_attempt(attempt, call, tag)
+                        continue
+                ep.setdefault("_other_calls", []).append(call)
                 continue
 
             if tag in CONVERGENCE_TAGS:
@@ -477,6 +598,12 @@ def attach_llm_calls_by_mission(episodes, llm_calls):
             traverse(tree)
 
         for call in orphan_calls:
+            tag = call.get("tag")
+            if tag in DISCOVERY_LLM_TAGS:
+                # Idem : déjà rattaché via sa DiscoverySession (identifiée par
+                # run_id/turn_id, pas par mission_id — c'est justement pour ça
+                # qu'il atterrit ici, dans les appels "sans mission").
+                continue
             solver_id = call.get("solver_id")
             mission_id = solver_to_mission.get(solver_id)
             if mission_id:
@@ -634,13 +761,56 @@ def build_data(db_path: str, events_path: str) -> Dict[str, Any]:
     attach_discovery_to_episodes(episodes, discovery_data)
     attach_discovery_events_to_nodes(episodes, events)
 
-    # Ajouter les sessions Discovery aux tours de session
+    # Rattacher les sessions Discovery aux tours — par turn_id EXACT.
+    # (Avant : mission_id "en gros" pour les tours de mission — ce qui posait
+    # déjà problème si l'ancien mission_id sticky fuitait sur des tours
+    # directs sans rapport — et une fenêtre de 5 secondes par timestamp pour
+    # les tours directs, intrinsèquement instable. turn_id est maintenant posé
+    # explicitement à l'émission (voir orchestrator.py::_handle_chat_send),
+    # donc la correspondance est exacte, qu'il s'agisse d'un tour direct ou
+    # d'une mission — plus aucune devinette par proximité temporelle pour les
+    # événements récents.)
+    discovery_by_turn = discovery_data.get("by_turn", {})
+    discovery_by_mission = discovery_data.get("by_mission", {})
+    unattached_sessions = discovery_data.get("unattached_sessions", [])
+
     for turn in session_turns:
-        session_id = turn.get("session_id")
-        if session_id and session_id in discovery_data.get("by_session", {}):
-            turn["_discovery_sessions"] = discovery_data["by_session"][session_id]
-        else:
-            turn["_discovery_sessions"] = []
+        turn_id = turn.get("turn_id")
+        sessions = discovery_by_turn.get(turn_id, []) if turn_id else []
+
+        if not sessions:
+            # Repli LEGACY uniquement : logs émis avant ce correctif, sans
+            # turn_id. On retente par mission_id (précis pour une mission),
+            # explicitement marqué comme tel pour ne pas laisser croire à un
+            # rattachement garanti.
+            mission_id = turn.get("mission_id")
+            if mission_id:
+                sessions = [
+                    s for s in discovery_by_mission.get(mission_id, [])
+                    if s.get("legacy")
+                ]
+            else:
+                # Dernier recours pour un tour direct historique : fenêtre de
+                # 5s par timestamp, comme avant ce correctif. Réservé aux
+                # sessions elles-mêmes legacy (sans turn_id ni mission_id) —
+                # une session récente correctement taguée ne doit jamais être
+                # rattachée par ce mécanisme.
+                turn_ts = _parse_ts(turn.get("ts"))
+                if turn_ts is not None:
+                    best, best_diff = None, float('inf')
+                    for s in unattached_sessions:
+                        s_ts = _parse_ts(s.get("start_time") or s.get("end_time"))
+                        if s_ts is None:
+                            continue
+                        diff = abs(s_ts - turn_ts)
+                        if diff < best_diff:
+                            best_diff, best = diff, s
+                    if best is not None and best_diff < 5.0:
+                        sessions = [best]
+            for s in sessions:
+                s["_approximate_match"] = True
+
+        turn["_discovery_sessions"] = sessions
 
     for turn in session_turns:
         mission_id = turn.get("mission_id")
@@ -687,7 +857,7 @@ def build_data(db_path: str, events_path: str) -> Dict[str, Any]:
     }
 
 # =====================================================
-# GABARIT HTML (v8.21)
+# GABARIT HTML (v8.24)
 # =====================================================
 
 HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -943,9 +1113,12 @@ h3.sub-title { font-size: 15px; font-weight: 800; text-transform: uppercase; let
   border-left: 4px solid var(--border-strong);
   padding: 4px 0 4px 18px;
   margin: 14px 0 14px 6px;
+  min-width: 0;
+  box-sizing: border-box;
 }
 .entity-block--solver { border-left-color: #4d5770; }
 .entity-block--planner { border-left-color: var(--accent); }
+.entity-block--validation { border-left-color: #8e44ad; }
 .entity-block--executor { border-left-color: #0f7a3d; }
 .entity-block--presentator { border-left-color: var(--accent-2); }
 .entity-block--feasibility { border-left-color: #e67e22; }
@@ -1051,6 +1224,9 @@ details[open] > summary .chevron { transform: rotate(90deg); }
   margin-top: 10px;
   padding-left: 16px;
   border-left: 3px dashed var(--border-strong);
+  min-width: 0;
+  box-sizing: border-box;
+  overflow-x: auto;
 }
 .prompt-block {
   background: var(--surface-alt);
@@ -1061,7 +1237,12 @@ details[open] > summary .chevron { transform: rotate(90deg); }
   font-size: 13.5px;
   white-space: pre-wrap;
   max-height: 360px;
+  max-width: 100%;
   overflow-y: auto;
+  overflow-x: auto;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  box-sizing: border-box;
   margin-top: 8px;
   color: var(--text);
 }
@@ -1105,45 +1286,48 @@ details[open] > summary .chevron { transform: rotate(90deg); }
 }
 .source-ep-link:hover { border-color: var(--accent); box-shadow: var(--shadow-sm); }
 
-.discovery-compact {
-  background: var(--surface-alt);
-  border-radius: 8px;
-  padding: 12px;
-  margin-top: 8px;
-  border-left: 4px solid var(--accent-2);
+/* Style pour les sessions Discovery dans la timeline */
+.discovery-session-timeline {
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  margin: 8px 0;
+  box-shadow: var(--shadow-sm);
+  max-width: 85%;
 }
-.discovery-compact__header {
-  font-weight: 700;
-  font-size: 14px;
+.discovery-session-timeline > summary {
+  padding: 12px 16px;
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 15px;
+  font-weight: 600;
 }
-.discovery-compact__meta {
-  font-size: 13px;
-  color: var(--text-muted);
-  margin-top: 4px;
-}
-.discovery-compact__summary {
-  font-size: 13px;
-  margin-top: 6px;
-  white-space: pre-wrap;
-}
-.discovery-compact__steps {
+.discovery-session-timeline > summary::-webkit-details-marker { display: none; }
+.discovery-session-timeline .chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--accent-bg);
+  color: var(--accent);
   font-size: 12px;
-  color: var(--text-faint);
-  margin-top: 4px;
+  font-weight: 900;
+  flex-shrink: 0;
+  transition: transform .12s ease;
 }
-
-.discovery-body .prompt-block {
-  word-wrap: break-word;
-  overflow-wrap: break-word;
-  max-width: 100%;
-}
-.discovery-compact {
-  word-wrap: break-word;
-  overflow-wrap: break-word;
-}
-.step-body {
-  word-wrap: break-word;
-  overflow-wrap: break-word;
+.discovery-session-timeline[open] > summary .chevron { transform: rotate(90deg); }
+.discovery-session-timeline .discovery-body {
+  padding: 6px 18px 16px 46px;
+  font-size: 15px;
+  color: var(--text-muted);
+  border-top: 1.5px solid var(--border);
+  margin-top: 2px;
+  padding-top: 14px;
 }
 </style>
 </head>
@@ -1236,32 +1420,91 @@ function findEpisode(missionId) {
 }
 
 // =====================================================
-// RENDU DES SESSIONS DISCOVERY (compact)
+// RENDU DES SESSIONS DISCOVERY (détaillé, pour la timeline)
 // =====================================================
-function renderDiscoverySessionCompact(session) {
+function renderDiscoverySessionTimeline(session) {
     if (!session) return '';
-    const technicalGoal = session.technical_goal || 'non spécifié';
-    const dataType = session.data_type || '?';
-    const target = session.target || '?';
+    const dataType = session.data_type || 'Type inconnu';
+    const targets = session.targets || [];
+    const technicalGoals = session.technical_goals || [];
     const goal = session.goal || 'Objectif non défini';
-    let html = `<div class="discovery-compact">
-        <div class="discovery-compact__header">🔍 Découverte</div>
-        <div class="discovery-compact__meta">
-            ${goal ? 'Objectif : '+esc(goal) : ''}
-            ${' · Type : '+esc(dataType)}
-            ${' · Cible : '+esc(target)}
-            ${' · Goal : '+esc(technicalGoal)}
-            ${session.cache_hit ? '<span class="badge badge--cache">Cache</span>' : ''}
-            ${session.exit_policy ? statusBadge(session.exit_policy === 'plan_completed' ? 'success' : 'failed') : ''}
+    const steps = session.steps || [];
+    const summary = session.summary || '';
+    const cacheHit = session.cache_hit || false;
+    const exitPolicy = session.exit_policy;
+    const entityName = session.entity_name || '?';
+    const entityRole = session.entity_role || '?';
+    const calls = session.explorer_plan_calls || [];
+    const approximate = session.legacy || session._approximate_match;
+
+    let html = `<details class="discovery-session-timeline">
+        <summary>
+            <span class="chevron">▸</span>
+            <span style="font-weight:700;">🧠 ${esc(entityName)} (${esc(entityRole)})</span>
+            <span class="badge badge--entity">${esc(goal)}</span>
+            <span class="badge badge--info" style="background:var(--accent-bg);color:var(--accent);">${esc(dataType)} / ${targets.length ? targets.map(esc).join(', ') : '?'}</span>
+            ${cacheHit ? '<span class="badge badge--cache">⚡ Cache</span>' : ''}
+            ${approximate ? '<span class="badge badge--failed" title="Log émis avant le rattachement exact par run_id/turn_id : ce rapprochement est une approximation, pas une certitude.">⚠ rattachement approximatif (log historique)</span>' : ''}
+            ${exitPolicy ? `<span class="badge badge--${exitPolicy === 'plan_completed' ? 'success' : 'failed'}">${esc(exitPolicy)}</span>` : ''}
+            <span style="font-size:13px;color:var(--text-faint);font-family:var(--mono);margin-left:auto;">${steps.length} étapes</span>
+        </summary>
+        <div class="discovery-body">
+            <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 16px;font-size:14px;margin-bottom:12px;">
+                <div style="font-weight:600;color:var(--text-faint);">Goal technique(s)</div>
+                <div style="font-family:var(--mono);word-break:break-all;">${technicalGoals.length ? technicalGoals.map(esc).join(', ') : 'non spécifié'}</div>
+                <div style="font-weight:600;color:var(--text-faint);">Data type</div>
+                <div>${esc(dataType)}</div>
+                <div style="font-weight:600;color:var(--text-faint);">Cible(s)</div>
+                <div style="font-family:var(--mono);word-break:break-all;">${targets.length ? targets.map(esc).join(', ') : 'non spécifiée'}</div>
+                <div style="font-weight:600;color:var(--text-faint);">Exit policy</div>
+                <div><span class="badge badge--${exitPolicy === 'plan_completed' ? 'success' : 'failed'}">${esc(exitPolicy || '—')}</span></div>
+            </div>
+
+            ${calls.length ? `<div class="field-label">📐 Plan généré par l'Explorer</div>${renderLlmCalls(calls)}` : ''}
+
+            ${steps.length ? `<div class="field-label" style="margin-top:12px;">🔄 Étapes exécutées</div>` : ''}
+            <div style="padding-left:8px;">
+            ${steps.map((step, i) => {
+                const result = step.result || {};
+                const success = result.success !== false;
+                const stepDesc = step.description || 'Étape sans description';
+                const toolName = step.tool_name || 'outil inconnu';
+                let detailHtml = '';
+                if (step.step_type === 'tool') {
+                    detailHtml = `<span class="step-tool">🔧 ${esc(toolName)}</span>
+                                  <div style="font-size:13px;color:var(--text-muted);margin-top:4px;">
+                                    <span style="font-weight:600;">Résultat :</span>
+                                    ${success ? '<span style="color:var(--success);">✅ succès</span>' : '<span style="color:var(--failure);">❌ échec</span>'}
+                                    ${result.data ? `<div style="font-family:var(--mono);font-size:12px;background:var(--surface-alt);padding:4px 8px;border-radius:4px;margin-top:4px;word-break:break-word;">${esc(typeof result.data === 'string' ? result.data : JSON.stringify(result.data))}</div>` : ''}
+                                  </div>`;
+                } else if (step.step_type === 'semantic') {
+                    detailHtml = `<div style="font-size:13px;color:var(--text-muted);"><span style="font-weight:600;">Question :</span> ${esc(step.question || '?')}</div>
+                                  <div style="font-size:13px;color:var(--text-muted);"><span style="font-weight:600;">Réponse :</span> ${success ? esc(result.data || '—') : '<span style="color:var(--failure);">❌ échec</span>'}</div>`;
+                }
+                return `<div style="display:flex;gap:10px;padding:6px 0;border-bottom:1px solid var(--surface-alt);align-items:flex-start;">
+                    <span style="font-family:var(--mono);font-size:12px;color:var(--text-faint);min-width:60px;">#${i+1}</span>
+                    <div style="flex:1;word-break:break-word;">
+                        <div style="font-weight:600;">${esc(stepDesc)}</div>
+                        ${detailHtml}
+                    </div>
+                    <span class="badge badge--${success ? 'success' : 'failed'}">${success ? 'OK' : 'KO'}</span>
+                </div>`;
+            }).join('')}
+            </div>
+
+            ${summary ? `<div style="margin-top:14px;padding:12px 16px;background:var(--accent-bg);border-radius:8px;border-left:4px solid var(--accent);">
+                <div style="font-weight:700;font-size:14px;color:var(--text);">📝 RefinedContext (connaissance acquise)</div>
+                <div style="white-space:pre-wrap;font-size:14px;color:var(--text-muted);margin-top:4px;word-break:break-word;">${esc(summary)}</div>
+            </div>` : ''}
         </div>
-        ${session.summary ? `<div class="discovery-compact__summary">${esc(session.summary)}</div>` : ''}
-        ${session.steps && session.steps.length ? `<div class="discovery-compact__steps">${session.steps.length} étape(s) exécutée(s)</div>` : ''}
-    </div>`;
+    </details>`;
     return html;
 }
+
 function renderDiscoverySessionsCompact(sessions) {
     if (!sessions || sessions.length === 0) return '';
-    return sessions.map(s => renderDiscoverySessionCompact(s)).join('');
+    // On utilise la version détaillée pour la timeline
+    return sessions.map(s => renderDiscoverySessionTimeline(s)).join('');
 }
 
 // =====================================================
@@ -1282,7 +1525,6 @@ function renderLlmCall(c) {
       ${!ok ? `<div style="color:var(--failure);font-weight:700">${esc(c.error_type||'Erreur')} : ${esc(c.error||'(message vide)')}</div>` : ''}
       <div class="field-label">Prompt</div>
       <div class="prompt-block">${esc(c.prompt || '')}</div>
-      ${c.context && c.context.length ? `<div class="field-label">Contexte</div><div class="prompt-block">${esc(fmtJson(c.context))}</div>` : ''}
       ${c.response !== undefined ? `<div class="field-label">Réponse</div><div class="prompt-block">${esc(fmtJson(c.response))}</div>` : ''}
     </div>
   </details>`;
@@ -1293,7 +1535,7 @@ function renderLlmCalls(calls) {
 }
 
 // =====================================================
-// RENDU DISCOVERY (Progressive Disclosure) – global
+// RENDU DISCOVERY (Progressive Disclosure) – global (pour vue mission)
 // =====================================================
 function renderDiscoverySessions(ep) {
   const sessions = ep._discovery_sessions || [];
@@ -1305,31 +1547,34 @@ function renderDiscoverySessions(ep) {
   sessions.forEach((s, idx) => {
     const steps = s.steps || [];
     const calls = s.explorer_plan_calls || [];
-
-    // Valeurs par défaut pour éviter '—'
-    const technicalGoal = s.technical_goal || 'non spécifié';
-    const dataType = s.data_type || '?';
-    const target = s.target || '?';
+    const targets = s.targets || [];
+    const technicalGoals = s.technical_goals || [];
+    const entityName = s.entity_name || '?';
+    const entityRole = s.entity_role || '?';
     const goal = s.goal || 'Objectif non défini';
+    const dataType = s.data_type || '?';
+    const cacheHit = s.cache_hit || false;
+    const approximate = s.legacy || s._approximate_match;
 
     html += `<details class="discovery-session" ${idx === 0 ? 'open' : ''}>
       <summary>
         <span class="chevron">▸</span>
-        <span style="font-weight:700;">🧠 ${esc(s.entity_name || '?')} (${esc(s.entity_role || '?')})</span>
+        <span style="font-weight:700;">🧠 ${esc(entityName)} (${esc(entityRole)})</span>
         <span class="badge badge--entity">${esc(goal)}</span>
-        <span class="badge badge--info" style="background:var(--accent-bg);color:var(--accent);">${esc(dataType)} / ${esc(target)}</span>
-        ${s.cache_hit ? '<span class="badge badge--cache">⚡ Cache</span>' : ''}
+        <span class="badge badge--info" style="background:var(--accent-bg);color:var(--accent);">${esc(dataType)} / ${targets.length ? targets.map(esc).join(', ') : '?'}</span>
+        ${cacheHit ? '<span class="badge badge--cache">⚡ Cache</span>' : ''}
+        ${approximate ? '<span class="badge badge--failed" title="Log émis avant le rattachement exact par run_id/turn_id : ce rapprochement est une approximation, pas une certitude.">⚠ rattachement approximatif (log historique)</span>' : ''}
         ${s.exit_policy ? `<span class="badge badge--${s.exit_policy === 'plan_completed' ? 'success' : 'failed'}">${esc(s.exit_policy)}</span>` : ''}
         <span style="font-size:13px;color:var(--text-faint);font-family:var(--mono);margin-left:auto;">${steps.length} étapes</span>
       </summary>
       <div class="discovery-body">
         <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 16px;font-size:14px;margin-bottom:12px;">
-          <div style="font-weight:600;color:var(--text-faint);">Goal technique</div>
-          <div style="font-family:var(--mono);word-break:break-all;">${esc(technicalGoal)}</div>
+          <div style="font-weight:600;color:var(--text-faint);">Goal technique(s)</div>
+          <div style="font-family:var(--mono);word-break:break-all;">${technicalGoals.length ? technicalGoals.map(esc).join(', ') : 'non spécifié'}</div>
           <div style="font-weight:600;color:var(--text-faint);">Data type</div>
           <div>${esc(dataType)}</div>
-          <div style="font-weight:600;color:var(--text-faint);">Target</div>
-          <div style="font-family:var(--mono);word-break:break-all;">${esc(target)}</div>
+          <div style="font-weight:600;color:var(--text-faint);">Cible(s)</div>
+          <div style="font-family:var(--mono);word-break:break-all;">${targets.length ? targets.map(esc).join(', ') : 'non spécifiée'}</div>
           <div style="font-weight:600;color:var(--text-faint);">Exit policy</div>
           <div><span class="badge badge--${s.exit_policy === 'plan_completed' ? 'success' : 'failed'}">${esc(s.exit_policy || '—')}</span></div>
         </div>
@@ -1377,6 +1622,7 @@ function renderDiscoverySessions(ep) {
   html += `</div>`;
   return html;
 }
+
 // =====================================================
 // RENDU RETRIEVAL
 // =====================================================
@@ -1424,7 +1670,7 @@ function renderDiscoveryEvents(events) {
   events.forEach(ev => {
     if (ev.event === 'discovery.session_start') {
       html += `<div style="padding:4px 8px; font-size:13px; background:var(--accent-bg); border-radius:4px; margin:4px 0;">
-        <b>Session</b> : ${esc(ev.goal || '?')} → ${esc(ev.data_type||'')}/${esc(ev.target||'')}
+        <b>Session</b> : ${esc(ev.goal || '?')} → ${esc(ev.data_type||'')}/${esc(ev.targets?.[0] || '?')}
       </div>`;
     } else if (ev.event === 'discovery.step') {
       const res = ev.result || {};
@@ -1690,6 +1936,17 @@ function renderAttempt(attempt, idx, ep) {
 
   const planningCalls = attempt._planning_calls || [];
   const feasibilityCalls = attempt._feasibility_calls || [];
+  const validationCalls = attempt._validation_calls || [];
+  let validationBadge = '';
+  if (validationCalls.length) {
+    const lastDecision = validationCalls[validationCalls.length - 1].response;
+    if (lastDecision && typeof lastDecision === 'object') {
+      const accepted = lastDecision.is_conformant;
+      const risk = lastDecision.risk_level;
+      validationBadge = ` <span class="badge badge--${accepted ? 'success' : 'failed'}">${accepted ? '✅ accepté' : '🛑 refusé'}</span>` +
+        (risk ? ` <span class="badge badge--${risk === 'critical' ? 'failed' : 'info'}" style="${risk !== 'critical' ? 'background:var(--accent-bg);color:var(--accent);' : ''}">${esc(risk)}</span>` : '');
+    }
+  }
 
   let planDetailHtml = '';
   if (attempt.proposed_plan) {
@@ -1725,6 +1982,10 @@ function renderAttempt(attempt, idx, ep) {
         ${planningCalls.length ? renderLlmCalls(planningCalls) : '<div style="color:var(--text-faint);font-size:13.5px">Aucun appel capturé pour cette tentative.</div>'}
         ${adviceHtml}
       </div>
+      ${validationCalls.length ? `<div class="entity-block entity-block--validation">
+        <div class="entity-block__label">⚖️ Orchestrator — validation du plan${validationBadge}</div>
+        ${renderLlmCalls(validationCalls)}
+      </div>` : ''}
       <div class="entity-block entity-block--executor">
         <div class="entity-block__label">⚙️ Executor — exécution étape par étape</div>
         ${nodesHtml}
@@ -2011,7 +2272,7 @@ def render_html(data: Dict[str, Any]) -> str:
 # =====================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Génère le rapport d'observabilité HTML autonome (v8.21).")
+    parser = argparse.ArgumentParser(description="Génère le rapport d'observabilité HTML autonome (v8.24).")
     parser.add_argument("--db", default="memory.db")
     parser.add_argument("--events", default="observability/events.jsonl")
     parser.add_argument("--out", default="observability_report.html")

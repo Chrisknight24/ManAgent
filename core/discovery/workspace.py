@@ -9,6 +9,23 @@ from core.discovery.models import WorkspaceEntry, RefinedContext, ExitPolicy
 from utils.logger import Logger
 import json
 
+# Certains outils (ex. get_mission_details, inspect_value) renvoient des
+# données brutes non condensées (arbre d'exécution complet, dump de
+# registre...). Sans limite, ces réponses se propagent telles quelles dans
+# insights_by_mission (session_memory), dans le prompt de l'étape sémantique
+# suivante, puis dans le RefinedContext.summary injecté directement dans le
+# prompt de l'Orchestrateur — c'est la source du "gaspillage de tokens".
+# On borne donc la taille stockée ICI, à la source, pour protéger tous les
+# consommateurs en aval en un seul endroit.
+MAX_ENTRY_ANSWER_CHARS = 4000
+
+
+def _cap_answer(answer: str, max_chars: int = MAX_ENTRY_ANSWER_CHARS) -> str:
+    if len(answer) <= max_chars:
+        return answer
+    total = len(answer)
+    return answer[:max_chars] + f"\n... [tronqué, {total} caractères au total]"
+
 
 class Workspace:
     def __init__(self, session_id: str):
@@ -24,13 +41,15 @@ class Workspace:
         answer: Any,
         tool_name: Optional[str] = None,
         tool_args_raw: Optional[Dict[str, Any]] = None,
-        tool_result: Optional[Dict[str, Any]] = None
+        tool_result: Optional[Dict[str, Any]] = None,
+        max_answer_chars: int = MAX_ENTRY_ANSWER_CHARS,
     ) -> None:
         if not isinstance(answer, str):
             try:
                 answer = json.dumps(answer, ensure_ascii=False, default=str)
             except Exception:
                 answer = str(answer)
+        answer = _cap_answer(answer, max_answer_chars)
         entry = WorkspaceEntry(
             step_id=step_id,
             question=question,

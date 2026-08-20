@@ -37,10 +37,31 @@ class DiscoverySession:
         explorer: BaseExplorer,
         runtime_state: RuntimeState,
         llm: Optional[Llm] = None,
-        max_iterations: int = DISCOVERY_MAX_ITERATIONS
+        max_iterations: int = DISCOVERY_MAX_ITERATIONS,
+        run_id: Optional[str] = None,
+        entity_name: Optional[str] = None,
+        entity_role: Optional[str] = None,
     ):
+        # `session_id` reste la SIGNATURE de cache (déterministe : mêmes
+        # data_type/targets/goals -> même valeur). Elle sert à retrouver un
+        # RefinedContext en cache, PAS à identifier une exécution précise.
+        # `run_id`, lui, est unique à CHAQUE exécution (fraîche ou servie
+        # depuis le cache) : c'est lui que l'observabilité doit utiliser pour
+        # regrouper les événements d'une seule et même session, faute de quoi
+        # deux invocations distinctes qui partagent la même signature (deux
+        # entités différentes, ou la même question posée à deux tours
+        # d'intervalle) se retrouvent fusionnées en un seul bloc dans le
+        # rapport.
         self.session_id = plan.signature or f"ds_{entity_id[:8]}_{int(time.time())}"
+        ambient_run_id = None
+        try:
+            ambient_run_id = runtime_state.execution_context.get("discovery_run_id")
+        except Exception:
+            pass
+        self.run_id = run_id or ambient_run_id or self.session_id
         self.entity_id = entity_id
+        self.entity_name = entity_name
+        self.entity_role = entity_role
         self.plan = plan
         self.explorer = explorer
         self.runtime_state = runtime_state
@@ -172,6 +193,15 @@ class DiscoverySession:
                 "step_id": step.id,
                 "step_index": index,
                 "step_type": step.type.value,
+                # BUG CORRIGÉ : ces trois champs manquaient ici (présents
+                # uniquement dans le chemin cache-hit de discovery_engine.py),
+                # alors que le rapport HTML les lit pour afficher la
+                # description et l'outil de chaque étape. Sans eux, toute
+                # session Discovery exécutée EN DIRECT (pas servie depuis le
+                # cache) affichait "Étape sans description" / "outil inconnu".
+                "description": step.description,
+                "tool_name": step.tool_name,
+                "question": step.question,
                 "result": result
             })
 
@@ -235,11 +265,22 @@ class DiscoverySession:
 
     async def _emit_event(self, event_name: str, payload: dict):
         exec_ctx = getattr(self.runtime_state, 'execution_context', {})
-        payload["session_id"] = self.session_id
+        payload["session_id"] = self.session_id      # signature de cache (métadonnée)
+        payload["run_id"] = self.run_id               # identité unique de CETTE exécution
         payload["entity_id"] = self.entity_id
-        payload["entity_type"] = getattr(self.runtime_state, "current_entity_type", "unknown")
+        # entity_name/entity_role : d'abord la valeur explicite passée à la
+        # session, sinon celle posée dans le scope ambiant, sinon "unknown"
+        # (jamais un `current_entity_type` global qui n'était de toute façon
+        # jamais renseigné nulle part).
+        payload["entity_name"] = self.entity_name or exec_ctx.get("entity_name") or "unknown"
+        payload["entity_role"] = self.entity_role or exec_ctx.get("entity_role") or "unknown"
         payload["solver_id"] = exec_ctx.get("solver_id")
         payload["attempt_number"] = exec_ctx.get("attempt_number")
         payload["step_id"] = exec_ctx.get("step_id")
-        payload["mission_id"] = self.runtime_state.current_mission_id
+        payload["turn_id"] = exec_ctx.get("turn_id")
+        # mission_id vient EXCLUSIVEMENT du contexte scopé : hors de tout
+        # `execution_context.scope(mission_id=...)` actif (cas d'une PD
+        # déclenchée depuis un tour direct), il vaut naturellement None,
+        # au lieu de l'ID de la dernière mission exécutée dans le process.
+        payload["mission_id"] = exec_ctx.get("mission_id")
         Logger.event(event_name, **payload)

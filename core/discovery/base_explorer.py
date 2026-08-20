@@ -108,3 +108,16 @@ class BaseExplorer(ABC):
     def supports(self, data_type: str) -> bool:
         """Vérifie si cet Explorer supporte le type de données donné."""
         return self.get_data_type() == data_type
+
+    def get_non_cacheable_goals(self) -> List[str]:
+        """
+        Sous-ensemble de get_available_goals() dont le RÉSULTAT dépend du
+        texte libre de la question (goal), pas seulement de (data_type,
+        target, technical_goal) — typiquement les goals qui délèguent à un
+        outil d'analyse LLM (ex: analyze_registry, analyze_execution_tree).
+        La signature de cache ne contenant pas ce texte libre, mettre ces
+        goals en cache ferait servir la réponse à une AUTRE question posée
+        précédemment sur la même cible. Par défaut, aucun (tous cacheables) :
+        à surcharger dans les Explorers concernés.
+        """
+        return []

@@ -27,18 +27,25 @@ class SessionStore:
                         last_mission_status TEXT,
                         last_activity DATETIME,
                         discovery_history TEXT,       -- JSON : ["sig1", "sig2"]   <-- NOUVEAU
+                        active_investigation_targets TEXT,  -- JSON : ["last_mission", "abc123"]
+                        insights_by_mission TEXT,     -- JSON : {"abc123": [{"question":..., "answer":...}]}
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                     )
                 ''')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_sessions_activity ON sessions(last_activity)')
                 
-                # Migration : ajouter la colonne discovery_history si elle n'existe pas
-                try:
-                    cursor.execute("ALTER TABLE sessions ADD COLUMN discovery_history TEXT DEFAULT '[]'")
-                    Logger.info("[SessionStore] Migration: colonne 'discovery_history' ajoutée.")
-                except sqlite3.OperationalError:
-                    pass  # colonne déjà présente
+                # Migration : ajouter les colonnes si elles n'existent pas (bases existantes)
+                for col, default in (
+                    ("discovery_history", "'[]'"),
+                    ("active_investigation_targets", "'[]'"),
+                    ("insights_by_mission", "'{}'"),
+                ):
+                    try:
+                        cursor.execute(f"ALTER TABLE sessions ADD COLUMN {col} TEXT DEFAULT {default}")
+                        Logger.info(f"[SessionStore] Migration: colonne '{col}' ajoutée.")
+                    except sqlite3.OperationalError:
+                        pass  # colonne déjà présente
                 
                 conn.commit()
                 Logger.info("[SessionStore] Table 'sessions' prête.")
@@ -48,7 +55,14 @@ class SessionStore:
     def upsert_session(self, session_id: str, context_dict: Dict[str, Any]) -> None:
         """
         Sauvegarde ou met à jour une session.
-        context_dict peut contenir : goal_stack, unresolved_issues, mission_history, mood, last_mission_status, discovery_history
+        context_dict peut contenir : goal_stack, unresolved_issues, mission_history, mood,
+        last_mission_status, discovery_history, active_investigation_targets, insights_by_mission.
+
+        NB : l'ensemble des champs persistables est défini une seule fois dans
+        `memory.session_memory.SessionContext.PERSISTABLE_FIELDS` — c'est
+        `SessionContext.to_persistable_dict()` qui doit alimenter ce
+        `context_dict`, pour éviter que ce store et SessionContext ne
+        redivergent silencieusement comme ça a été le cas par le passé.
         """
         try:
             with self._get_connection() as conn:
@@ -63,8 +77,10 @@ class SessionStore:
                         last_mission_status,
                         last_activity,
                         discovery_history,
+                        active_investigation_targets,
+                        insights_by_mission,
                         updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ''', (
                     session_id,
                     json.dumps(context_dict.get("goal_stack", []), ensure_ascii=False),
@@ -73,7 +89,9 @@ class SessionStore:
                     context_dict.get("mood"),
                     context_dict.get("last_mission_status"),
                     datetime.now().isoformat(),
-                    json.dumps(context_dict.get("discovery_history", []), ensure_ascii=False)
+                    json.dumps(context_dict.get("discovery_history", []), ensure_ascii=False),
+                    json.dumps(context_dict.get("active_investigation_targets", []), ensure_ascii=False),
+                    json.dumps(context_dict.get("insights_by_mission", {}), ensure_ascii=False),
                 ))
                 conn.commit()
         except Exception as e:
@@ -92,6 +110,8 @@ class SessionStore:
                     d["unresolved_issues"] = json.loads(d.get("unresolved_issues") or "[]")
                     d["mission_history"] = json.loads(d.get("mission_history") or "[]")
                     d["discovery_history"] = json.loads(d.get("discovery_history") or "[]")
+                    d["active_investigation_targets"] = json.loads(d.get("active_investigation_targets") or "[]")
+                    d["insights_by_mission"] = json.loads(d.get("insights_by_mission") or "{}")
                     return d
                 return None
         except Exception as e:

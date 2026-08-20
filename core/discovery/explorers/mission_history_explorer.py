@@ -60,6 +60,17 @@ class MissionHistoryExplorer(BaseExplorer):
             "analyze_execution_tree",
         ]
 
+    def get_non_cacheable_goals(self) -> List[str]:
+        # Ces deux goals délèguent à un outil d'analyse LLM (execute_tool ->
+        # analyze_registry / analyze_execution_tree) dont la réponse dépend
+        # entièrement de la question posée en langage naturel — jamais sûrs
+        # à mettre en cache par la seule signature (voir DiscoveryEngine
+        # .start_discovery). list_missions/get_mission_summary/
+        # get_mission_details/search_missions_by_keyword restent cacheables :
+        # ce sont des lectures déterministes, indépendantes du texte de la
+        # question.
+        return ["analyze_registry", "analyze_execution_tree"]
+
     def get_tools_description(self) -> List[Dict[str, Any]]:
         return [
             {
@@ -216,6 +227,16 @@ class MissionHistoryExplorer(BaseExplorer):
                     .format(tg=tg, goals=", ".join(available_goals))
                 )
 
+        # Signature canonique pour le cache — calculée tout en haut (voir
+        # registry_explorer.py pour la justification détaillée) afin de
+        # pouvoir l'attacher dès le premier événement de génération de plan.
+        if len(targets) == 1:
+            signature = f"{self._data_type}://{targets[0]}/{technical_goals[0]}"
+        else:
+            targets_str = "_".join(targets)
+            goals_str = "_".join(technical_goals)
+            signature = f"{self._data_type}://multi/{targets_str}/{goals_str}"
+
         # Construction de la description des outils
         tools_desc = self.get_tools_description()
         tools_text = "\n".join([
@@ -240,29 +261,32 @@ class MissionHistoryExplorer(BaseExplorer):
             targets=targets,
             technical_goals=technical_goals,
             goal=goal,
-            mission_id=self.runtime_state.current_mission_id
+            signature=signature,
+            # mission_id/run_id/entity_* injectés depuis le scope ambiant
+            # (voir registry_explorer.py : plus de lecture du global sticky).
         )
 
-        try:
-            result: ExplorerPlanOutput = await effective_llm.generate_structured(
-                prompt=prompt,
-                schema=ExplorerPlanOutput,
-                tag="explorer_plan_generation"
-            )
-            steps = result.steps
-        except Exception as e:
-            Logger.event(
-                Events.DISCOVERY_PLAN_GENERATION_ERROR,
-                data_type=self._data_type,
-                targets=targets,
-                technical_goals=technical_goals,
-                error=str(e),
-                mission_id=self.runtime_state.current_mission_id
-            )
-            raise ValueError(
-                _("Échec de la génération du plan par le LLM de l'Explorer : {error}")
-                .format(error=e)
-            )
+        with self.runtime_state.execution_context.scope(discovery_signature=signature):
+            try:
+                result: ExplorerPlanOutput = await effective_llm.generate_structured(
+                    prompt=prompt,
+                    schema=ExplorerPlanOutput,
+                    tag="explorer_plan_generation"
+                )
+                steps = result.steps
+            except Exception as e:
+                Logger.event(
+                    Events.DISCOVERY_PLAN_GENERATION_ERROR,
+                    data_type=self._data_type,
+                    targets=targets,
+                    technical_goals=technical_goals,
+                    error=str(e),
+                    signature=signature,
+                )
+                raise ValueError(
+                    _("Échec de la génération du plan par le LLM de l'Explorer : {error}")
+                    .format(error=e)
+                )
 
         # Transformer les ExplorerStep en DiscoveryStep
         discovery_steps = []
@@ -307,21 +331,14 @@ class MissionHistoryExplorer(BaseExplorer):
             else:
                 raise ValueError(_("Type d'étape inconnu : {type}").format(type=step.type))
 
-        # Signature canonique pour le cache
-        if len(targets) == 1:
-            signature = f"{self._data_type}://{targets[0]}/{technical_goals[0]}"
-        else:
-            targets_str = "_".join(targets)
-            goals_str = "_".join(technical_goals)
-            signature = f"{self._data_type}://multi/{targets_str}/{goals_str}"
-
+        # (signature déjà calculée en haut de la méthode)
         Logger.event(
             Events.DISCOVERY_PLAN_GENERATION_END,
             data_type=self._data_type,
             targets=targets,
             technical_goals=technical_goals,
             step_count=len(discovery_steps),
-            mission_id=self.runtime_state.current_mission_id
+            signature=signature,
         )
 
         return DiscoveryPlan(
@@ -390,11 +407,20 @@ class MissionHistoryExplorer(BaseExplorer):
         episode = provider.get_data(target)
         if not episode:
             return {"success": False, "data": None, "message": f"Mission '{target}' non trouvée."}
+        # Même principe que _analyze_execution_tree : vue métadonnées, pas
+        # le JSON brut complet (qui inclut tool_args, proposed_plan complet,
+        # metadata...). resolved_data passe par le même _condense_value déjà
+        # utilisé pour analyze_registry, pour la même raison (variables
+        # potentiellement volumineuses dans le registre).
+        raw_tree = episode.get("execution_tree")
+        raw_resolved = episode.get("resolved_data") or {}
         return {
             "success": True,
             "data": {
-                "execution_tree": episode.get("execution_tree"),
-                "resolved_data": episode.get("resolved_data"),
+                "execution_tree": self._summarize_execution_tree(raw_tree) if raw_tree else None,
+                "resolved_data": {
+                    k: self._condense_value(v, self.max_data_length) for k, v in raw_resolved.items()
+                },
                 "goal": episode.get("goal"),
                 "status": episode.get("status"),
                 "summary": episode.get("summary"),
@@ -477,9 +503,18 @@ class MissionHistoryExplorer(BaseExplorer):
         if not tree:
             return {"success": True, "data": _("L'arbre d'exécution de cette mission est vide.")}
 
-        # Condensation de l'arbre (limiter la taille du JSON)
-        tree_str = json.dumps(tree, indent=2, ensure_ascii=False)
-        if len(tree_str) > self.max_data_length * 5:  # on autorise un peu plus pour l'arbre
+        # Résumé structurel (métadonnées + déroulé), pas le JSON brut de
+        # l'arbre complet — voir _summarize_execution_tree pour le détail
+        # de ce qui est volontairement omis (tool_args bruts, proposed_plan
+        # complet, metadata).
+        tree_summary = self._summarize_execution_tree(tree)
+        tree_str = json.dumps(tree_summary, indent=2, ensure_ascii=False)
+        # Garde-fou : même le résumé structurel peut rester volumineux sur
+        # une mission très riche (beaucoup d'étapes/tentatives/sous-missions).
+        # Ici la troncature est un dernier filet de sécurité, pas le
+        # mécanisme principal de réduction — elle ne devrait quasiment
+        # jamais se déclencher en pratique.
+        if len(tree_str) > self.max_data_length * 5:
             tree_str = tree_str[:self.max_data_length * 5] + "\n... (contenu tronqué)"
 
         llm_to_use = self.llm or self.runtime_state.discovery_llm
@@ -503,6 +538,90 @@ class MissionHistoryExplorer(BaseExplorer):
     # =====================================================
     # UTILITAIRE : CONDENSATION DES DONNÉES
     # =====================================================
+
+    def _summarize_execution_tree(self, tree: Dict[str, Any], depth: int = 0, max_depth: int = 3) -> Dict[str, Any]:
+        """
+        Réduit un ExecutionTree brut à ses métadonnées utiles pour une
+        analyse en langage naturel, au lieu de sérialiser l'objet complet.
+
+        Pourquoi : l'arbre brut contient, pour CHAQUE tentative, à la fois
+        `proposed_plan` (le plan complet proposé par le Planner — tous les
+        champs de chaque PlanStep, y compris ceux jamais exécutés) ET
+        `nodes` (le détail de ce qui a réellement été exécuté, avec
+        `tool_args` bruts et `metadata`) — un doublon quasi total pour
+        répondre à une question du type "que s'est-il passé ?". L'ancienne
+        approche (json.dumps puis troncature brute au Nème caractère)
+        coupait le JSON n'importe où — on a vu dans les logs un
+        `"actual_result` coupé en plein milieu d'un mot — ce qui produit un
+        JSON invalide illisible pour le LLM en fin de contexte.
+
+        Cette version ne garde QUE ce qui a de la valeur pour répondre à une
+        question sur le déroulé : objectif, statut, et par tentative/étape
+        le strict nécessaire (description, outil, statut, résultat attendu
+        vs obtenu) — jamais les arguments bruts d'outil ni le plan complet
+        non exécuté. Les sous-arbres enfants (abstract_task) sont résumés
+        récursivement, bornés en profondeur pour éviter une explosion sur
+        une mission très imbriquée.
+        """
+        if not tree:
+            return {}
+
+        summary = {
+            "solver_id": tree.get("solver_id"),
+            "goal": tree.get("goal"),
+            "status": tree.get("status"),
+            "started_at": tree.get("started_at"),
+            "ended_at": tree.get("ended_at"),
+        }
+
+        attempts = tree.get("attempts") or []
+        summarized_attempts = []
+        for attempt in attempts:
+            steps_summary = []
+            for node in (attempt.get("nodes") or []):
+                step_entry = {
+                    "step_id": node.get("step_id"),
+                    "description": node.get("description"),
+                    "type": node.get("step_type"),
+                    "status": node.get("status"),
+                }
+                if node.get("tool_name"):
+                    step_entry["tool_name"] = node.get("tool_name")
+                # expected_result/actual_result : utiles pour juger d'une
+                # convergence, mais pas tool_args (souvent volumineux et
+                # rarement pertinent pour une question en langage naturel).
+                if node.get("expected_result") is not None:
+                    step_entry["expected_result"] = node.get("expected_result")
+                if node.get("actual_result") is not None:
+                    step_entry["actual_result"] = node.get("actual_result")
+                if node.get("error_reason"):
+                    step_entry["error_reason"] = node.get("error_reason")
+                child_tree = node.get("child_execution_tree")
+                if child_tree:
+                    if depth < max_depth:
+                        step_entry["sub_mission"] = self._summarize_execution_tree(
+                            child_tree, depth=depth + 1, max_depth=max_depth
+                        )
+                    else:
+                        step_entry["sub_mission"] = _(
+                            "(sous-mission non développée : profondeur maximale atteinte)"
+                        )
+                steps_summary.append(step_entry)
+
+            attempt_entry = {
+                "attempt_number": attempt.get("attempt_number"),
+                "outcome": attempt.get("outcome"),
+                "steps": steps_summary,
+            }
+            if attempt.get("failure_class") and attempt.get("failure_class") != "none":
+                attempt_entry["failure_class"] = attempt.get("failure_class")
+            if attempt.get("failure_reason"):
+                attempt_entry["failure_reason"] = attempt.get("failure_reason")
+            summarized_attempts.append(attempt_entry)
+
+        summary["attempts_count"] = len(summarized_attempts)
+        summary["attempts"] = summarized_attempts
+        return summary
 
     def _condense_value(self, value: Any, max_length: int = 1000) -> Any:
         """

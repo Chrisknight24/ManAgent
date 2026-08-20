@@ -19,6 +19,24 @@ class Executor:
     def __init__(self, solver_node):
         self.solver = solver_node
 
+    def _step_event_meta(self, node: 'ExecutionNode') -> dict:
+        """
+        Métadonnées communes à injecter dans chaque événement STEP_STATUS_CHANGED
+        pour que le frontend puisse afficher les arguments d'outil et les
+        horodatages dans le panneau de détails d'une étape. Ces informations
+        existent déjà intégralement sur `node` (ExecutionNode) mais n'étaient
+        jusqu'ici jamais transmises au-delà du backend.
+        """
+        meta = {
+            "started_at": datetime.fromtimestamp(node.started_at).isoformat() if node.started_at else None,
+            "ended_at": datetime.fromtimestamp(node.ended_at).isoformat() if getattr(node, "ended_at", None) else None,
+        }
+        if node.tool_name:
+            meta["tool_name"] = node.tool_name
+        if node.tool_args:
+            meta["tool_args"] = node.tool_args
+        return meta
+
     async def execute_plan(self, plan: Plan, current_context: str, current_attempt: PlanAttempt) -> SolverResult:
         Logger.info(f"[Executor] 🚀 Initialisation de l'exécution du plan : '{plan.goal}'")
 
@@ -65,7 +83,8 @@ class Executor:
                             await self.solver.propagate_event(Events.STEP_STATUS_CHANGED, {
                                 "step_id": step.id,
                                 "status": ExecutionStatus.SKIPPED,
-                                "reason": _("Condition ({}) non remplie").format(step.execute_if)
+                                "reason": _("Condition ({}) non remplie").format(step.execute_if),
+                                **self._step_event_meta(node)
                             })
 
                             step.result_context = _("Étape ignorée par branchement conditionnel : {}").format(step.execute_if)
@@ -97,7 +116,8 @@ class Executor:
                     await self.solver.propagate_event(Events.STEP_STATUS_CHANGED, {
                         "step_id": step.id,
                         "status": ExecutionStatus.RUNNING,
-                        "description": step.description
+                        "description": step.description,
+                        **self._step_event_meta(node)
                     })
 
                     if step.type == StepType.ABSTRACT_TASK:
@@ -130,7 +150,8 @@ class Executor:
                         await self.solver.propagate_event(Events.STEP_STATUS_CHANGED, {
                             "step_id": step.id,
                             "status": ExecutionStatus.FAILED,
-                            "reason": step.result_context
+                            "reason": step.result_context,
+                            **self._step_event_meta(node)
                         })
 
                         failure_trace = self._build_failure_trace(
@@ -169,7 +190,8 @@ class Executor:
                         await self.solver.propagate_event(Events.STEP_STATUS_CHANGED, {
                             "step_id": step.id,
                             "status": ExecutionStatus.SUCCESS,
-                            "result": execution_output
+                            "result": execution_output,
+                            **self._step_event_meta(node)
                         })
 
                         # --- TRACE VALIDÉE (ENRICHIE, SANS TRONCATURE) ---
@@ -204,7 +226,8 @@ class Executor:
                         await self.solver.propagate_event(Events.STEP_STATUS_CHANGED, {
                             "step_id": step.id,
                             "status": ExecutionStatus.FAILED,
-                            "reason": convergence.reason
+                            "reason": convergence.reason,
+                            **self._step_event_meta(node)
                         })
 
                         failure_trace = self._build_failure_trace(
@@ -246,7 +269,9 @@ class Executor:
 
         except Exception as e:
             Logger.error(f"[Executor] 🔥 Exception critique : {str(e)}")
-            raise e    # =====================================================
+            raise e
+
+    # =====================================================
     # PROPAGATION DES VARIABLES CRUCIALES
     # =====================================================
 
@@ -342,18 +367,71 @@ class Executor:
         from .solver import Solver, MAX_DEPTH
 
         if self.solver.depth >= MAX_DEPTH:
-            return False, "", _("Profondeur maximale de réflexion atteinte, sous-tâche avortée."), None
+            # Au lieu d'avorter systématiquement : on construit la chaîne
+            # d'ancêtres (racine -> Solver courant, uniquement des Solvers —
+            # on s'arrête dès qu'on atteint l'Orchestrateur, qui n'a ni
+            # .depth ni .goal de la même forme) et on demande au juge de
+            # l'Orchestrateur si cette profondeur reflète une décomposition
+            # légitime d'un problème complexe, ou un motif récursif dégénéré.
+            #
+            # Note de conception : on ne "réinitialise" PAS self.solver.depth
+            # (qui doit rester le reflet fidèle de la vraie profondeur de
+            # l'arbre, notamment pour l'observabilité). Une extension
+            # accordée permet seulement de franchir CE contrôle précis ; le
+            # Solver enfant créé aura quand même depth+1, donc si LUI aussi
+            # tente un abstract_task au-delà de MAX_DEPTH, une NOUVELLE
+            # extension sera redemandée — et Orchestrator.request_depth_
+            # extension plafonne le nombre total d'extensions accordées par
+            # mission, indépendamment de l'avis du juge à chaque fois. Sans
+            # ce plafond absolu, un juge trompé de façon répétée pourrait
+            # neutraliser complètement le garde-fou de profondeur.
+            ancestor_chain = self.solver._build_ancestor_chain()
+
+            try:
+                extended = await self.solver.request_depth_extension(ancestor_chain, step.id)
+            except Exception as e:
+                Logger.error(f"[Executor] Échec de la demande d'extension de profondeur : {e}")
+                extended = False
+
+            if not extended:
+                return False, "", _("Profondeur maximale de réflexion atteinte, sous-tâche avortée (extension non accordée)."), None
+
+            Logger.info(
+                f"[Executor] 🔓 Profondeur étendue pour [{step.id}] : le juge n'a pas détecté de "
+                f"récursion dégénérée dans la chaîne de sous-tâches actuelle."
+            )
 
         Logger.info(f"[Executor] 🌀 Déploiement d'un sous-agent pour l'identifiant [{step.id}]")
 
+        # BUG CORRIGÉ (root cause d'une boucle infinie observée en test réel) :
+        # step.step_context et step.description peuvent contenir des références
+        # $@_nom (ex: "$@_data_target_apps") destinées à transmettre au Solver
+        # enfant des données déjà résolues par le PARENT. Elles n'étaient
+        # JAMAIS interpolées avant d'être transmises — le Planner enfant
+        # recevait donc littéralement la chaîne "$@_data_target_apps" au lieu
+        # de la vraie liste d'applications. Sans donnée concrète sur laquelle
+        # agir, il ne pouvait que re-déléguer à un nouvel abstract_task avec
+        # un objectif tout aussi vague — qui reproduisait le même placeholder
+        # non résolu, indéfiniment. L'interpolation utilise le registre du
+        # solver PARENT (self, ici) — c'est lui qui détient la valeur, pas
+        # l'enfant, qui n'a pas encore de registre à ce stade.
+        interpolated_step_context = self._interpolate_text(step.step_context, for_json=False) if step.step_context else ""
+        interpolated_goal = self._interpolate_text(step.description, for_json=False)
+
+        if interpolated_step_context != (step.step_context or "") or interpolated_goal != step.description:
+            Logger.debug(
+                f"[Executor] Variables interpolées pour la sous-tâche [{step.id}] "
+                f"avant délégation au Solver enfant (évite la perte de données entre niveaux)."
+            )
+
         dynamic_context = (
             _("--- DIRECTIVE LOCALE SPÉCIFIQUE À CETTE TÂCHE ---\n") +
-            _("{}").format(step.step_context or _('Pas de donnees supplementaires'))
+            _("{}").format(interpolated_step_context or _('Pas de donnees supplementaires'))
         )
 
         child_solver = Solver(
             solver_id=step.id,
-            goal=step.description,
+            goal=interpolated_goal,
             parent=self.solver,
             provider_manager=self.solver.provider_manager,
             runtime_state=self.solver.runtime_state,
@@ -412,7 +490,7 @@ class Executor:
             error_msg = child_result.error_reason or "Échec de la sous-tâche"
             enriched_error = f"[TOOLS FAILED] {error_msg}"
             return False, "", enriched_error, child_result
-        
+
     async def _handle_tool_call(self, step: PlanStep) -> Tuple[bool, str, Optional[str]]:
         try:
             tool_args = self._safe_json_loads(step.tool_args_json)
@@ -484,7 +562,7 @@ class Executor:
         except json.JSONDecodeError:
             Logger.warning(f"[Executor] Échec de parsing JSON pour l'outil {step.tool_name}. Contenu reçu : {hardware_result_str[:200]}")
             return False, "", "Le retour de l'outil C++ ne respecte pas le format JSON strict."
-        
+
     # =====================================================
     # CONVERGENCE ET VALIDATION
     # =====================================================

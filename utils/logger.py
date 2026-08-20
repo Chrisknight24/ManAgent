@@ -48,11 +48,17 @@ from datetime import datetime, timezone
 
 _runtime_state_ref = None
 
-def _get_current_mission_id():
-    """Retourne le mission_id courant depuis RuntimeState, ou None."""
-    if _runtime_state_ref:
-        return getattr(_runtime_state_ref, "current_mission_id", None)
-    return None
+# NOTE (correctif observabilité) : il existait ici une fonction
+# `_get_current_mission_id()` qui lisait `runtime_state.current_mission_id`,
+# un attribut global JAMAIS remis à None après la fin d'une mission. Résultat :
+# une fois qu'une mission avait tourné, TOUT événement émis ensuite (y compris
+# pour des tours directs sans rapport) héritait silencieusement de l'ancien
+# mission_id. Elle est supprimée : `mission_id` est désormais injecté
+# exclusivement via `execution_context` ci-dessous (bloc "injection du
+# contexte d'exécution"), qui est correctement scopé et se nettoie tout seul
+# à la sortie de chaque `with execution_context.scope(...)`. Un événement émis
+# hors de tout scope portant mission_id aura donc, à juste titre, mission_id
+# absent plutôt qu'une valeur périmée.
 
 # =========================================================
 # LOGGER CLASS
@@ -109,13 +115,13 @@ class Logger:
 
     @staticmethod
     def event(event_type: str, **fields):
-        # Injection automatique du mission_id (déjà présent)
-        if "mission_id" not in fields:
-            mid = _get_current_mission_id()
-            if mid is not None:
-                fields["mission_id"] = mid
-
-        # OBSERVABILITY : injection du contexte d'exécution
+        # OBSERVABILITY : injection du contexte d'exécution.
+        # mission_id, turn_id, solver_id, attempt_number, step_id,
+        # discovery_run_id, entity_id, entity_name, entity_role, span_id,
+        # parent_span_id... tout ce qui a été posé par un `execution_context
+        # .scope(...)` ambiant est injecté ici automatiquement, SAUF si
+        # l'appelant a déjà fourni explicitement la même clé (auquel cas la
+        # valeur explicite gagne toujours).
         if _runtime_state_ref:
             ctx_dict = _runtime_state_ref.execution_context.to_dict()
             for key, value in ctx_dict.items():

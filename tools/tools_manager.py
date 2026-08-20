@@ -48,7 +48,7 @@ class ToolsManager(Entity):
 
     def _register_default_internal_tools(self):
         try:
-            from tools.internal_tools import extract_json_value, llm_analyze_data
+            from tools.internal_tools import extract_json_value, llm_analyze_data, llm_analyze_multi_data
 
             self.register_internal_tool(
                 name="extract_json_value",
@@ -77,7 +77,10 @@ class ToolsManager(Entity):
                 description=_(
                     "Analyse une donnée (JSON, CSV, texte, etc.) à l'aide d'un LLM. "
                     "Requiert 'source' (nom de la variable) et 'query' (question en langage naturel). "
-                    "Retourne le résultat de l'analyse dans 'data'."
+                    "Retourne le résultat de l'analyse dans 'data'. "
+                    "N'utilisez cet outil QUE pour UNE SEULE variable : si la requête porte sur "
+                    "DEUX variables ou plus (comparaison, cohérence, calcul croisé...), utilisez "
+                    "'llm_analyze_multi_data' à la place."
                 ),
                 parameters_schema={
                     "type": "object",
@@ -93,7 +96,41 @@ class ToolsManager(Entity):
                 ]
             )
 
-            Logger.debug("[ToolsManager] Outils internes enregistrés : extract_json_value, llm_analyze_data.")
+            self.register_internal_tool(
+                name="llm_analyze_multi_data",
+                handler=llm_analyze_multi_data,
+                description=_(
+                    "Analyse CONJOINTE de plusieurs variables à l'aide d'un LLM : comparaison, "
+                    "cohérence, calcul croisé entre DEUX variables ou plus. "
+                    "Requiert 'sources' (liste d'AU MOINS DEUX noms de variables) et 'query' "
+                    "(question en langage naturel portant sur l'ensemble des sources). "
+                    "N'utilisez PAS cet outil pour une seule variable : dans ce cas, utilisez "
+                    "'llm_analyze_data' à la place."
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "sources": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 2,
+                            "description": "Liste des noms de variables à analyser conjointement (au moins 2)"
+                        },
+                        "query": {"type": "string", "description": "Question en langage naturel portant sur l'ensemble des sources"}
+                    },
+                    "required": ["sources", "query"]
+                },
+                capabilities=[
+                    "comparer plusieurs variables entre elles",
+                    "analyser conjointement plusieurs sources de données",
+                    "calculer une différence ou une cohérence entre deux variables ou plus"
+                ]
+            )
+
+            Logger.debug(
+                "[ToolsManager] Outils internes enregistrés : "
+                "extract_json_value, llm_analyze_data, llm_analyze_multi_data."
+            )
         except ImportError as e:
             Logger.warning(f"[ToolsManager] Impossible d'importer les outils internes : {e}")
 
@@ -256,7 +293,11 @@ class ToolsManager(Entity):
         solver_id = exec_ctx.get("solver_id")
         attempt_number = exec_ctx.get("attempt_number")
         step_id = exec_ctx.get("step_id")
-        mission_id = self.runtime_state.current_mission_id
+        # mission_id lu depuis le contexte scopé, pas depuis l'ancien attribut
+        # global `current_mission_id` (jamais remis à None après une mission,
+        # cf. le correctif fait sur le Discovery Framework — même cause,
+        # même remède : voir execution_context.py / logger.py).
+        mission_id = exec_ctx.get("mission_id")
         span_id = exec_ctx.get("span_id")
 
         # Construction de la vue métadonnées du registre (uniquement depuis le temporaire)

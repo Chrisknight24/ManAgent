@@ -83,6 +83,45 @@ class SessionContext:
     def touch(self):
         self.last_activity = datetime.now()
 
+    # Champs qui ont vocation à survivre à un rechargement de session
+    # (depuis un store persistant type SQLite). Source unique de vérité :
+    # tout store de persistance doit s'appuyer sur cette liste plutôt que de
+    # dupliquer la connaissance de "quels champs existent" ailleurs (c'est
+    # cette duplication qui avait fait dériver SessionStore et SessionContext
+    # l'un de l'autre — `active_investigation_targets`/`insights_by_mission`
+    # avaient été ajoutés ici mais jamais côté SQLite).
+    PERSISTABLE_FIELDS = (
+        "goal_stack",
+        "unresolved_issues",
+        "mission_history",
+        "mood",
+        "last_mission_status",
+        "discovery_history",
+        "insights_by_mission",
+        "active_investigation_targets",
+    )
+
+    def to_persistable_dict(self) -> Dict[str, Any]:
+        """Sous-ensemble de l'état à transmettre à un store persistant."""
+        return {name: getattr(self, name) for name in self.PERSISTABLE_FIELDS}
+
+    def restore_from_dict(self, data: Dict[str, Any]) -> None:
+        """
+        Restaure l'état depuis un dict rechargé (ex: SQLite via SessionStore).
+
+        IMPORTANT : seules les clés effectivement PRÉSENTES dans `data` sont
+        appliquées. Une clé absente (store plus ancien qui ne la supporte pas
+        encore, migration en cours, etc.) laisse la valeur déjà en mémoire
+        intacte au lieu de l'écraser par un défaut vide — c'est précisément
+        l'inverse de l'ancien code qui faisait
+        `session_memory.context.active_investigation_targets = session_data.get("active_investigation_targets", [])`
+        et remettait donc `[]` à CHAQUE tour, y compris juste après qu'une
+        Progressive Disclosure venait de le peupler.
+        """
+        for name in self.PERSISTABLE_FIELDS:
+            if name in data:
+                setattr(self, name, data[name])
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "session_id": self.session_id,

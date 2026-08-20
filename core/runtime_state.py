@@ -35,7 +35,16 @@ class RuntimeState:
             #   "signatures": List[MissionSignature],
             #   "similar_missions": Optional[List[Dict]]  # résultat du retriever (mis en cache)
             # }
+        # DEPRECATED pour l'observabilité : cet attribut est "sticky" (jamais remis à None
+        # après la fin d'une mission), donc plus AUCUN code d'observabilité/logging ne doit
+        # le lire (il fuit sur les tours directs suivants). Utiliser exclusivement
+        # `execution_context.get("mission_id")`, qui est scopé et se nettoie tout seul.
+        # Conservé uniquement pour compatibilité descendante d'éventuels autres usages.
         self.current_mission_id = None  # Stockage du mission_id de la mission en cours
+        # Compteur d'extensions de profondeur accordées, par mission_id — voir
+        # Orchestrator.request_depth_extension / MAX_DEPTH_EXTENSIONS. Volontairement
+        # jamais purgé automatiquement (une mission_id ne se réutilise pas).
+        self.depth_extensions_granted: Dict[str, int] = {}
         self.execution_context = ExecutionContext()
         self.embedding_manager = EmbeddingProviderManager()
         self.active_embedding_model: Optional[str] = None  # ID du modèle choisi par l'user

@@ -23,7 +23,9 @@ from utils.logger import Logger
 
 # Nouveaux imports pour l'architecture HTN (Hierarchical Task Network)
 from .supervisor import Supervisor
-from .plan_models import Plan, ExecutionStatus, OrchestratorDecision
+from .plan_models import Plan, ExecutionStatus, OrchestratorDecision, PlanValidationDecision, DepthEscalationDecision
+from .plan_validator import PlanValidator, PlanValidationOutcome, review_depth_escalation, DepthEscalationOutcome
+from core.execution_models import PlanAttempt
 from .solver import Solver
 from core.entity import Entity
 from core.llm import Llm
@@ -54,6 +56,21 @@ from tools.tools_manager import ToolsManager
 
 from core.discovery.providers.mission_history_provider import MissionHistoryProvider
 from core.discovery.explorers.mission_history_explorer import MissionHistoryExplorer
+
+# Nombre maximum d'insights conservés par cible dans session_memory.context.insights_by_mission.
+# Sans cette borne, la liste grossit indéfiniment sur toute la durée de vie de la session
+# (elle n'était vidée qu'à travers active_investigation_targets lors d'une nouvelle mission,
+# jamais elle-même) et regonfle le prompt de l'Orchestrateur à chaque fois qu'une cible déjà
+# investiguée redevient active.
+MAX_INSIGHTS_PER_TARGET = 5
+
+# Plafond ABSOLU du nombre d'extensions de profondeur accordées par mission,
+# indépendamment de ce que dit le juge à chaque demande. Sans ce plafond,
+# une chaîne de sous-tâches capable de convaincre le juge à répétition
+# (à tort ou à raison) pourrait neutraliser complètement MAX_DEPTH — le
+# juge est une aide à la décision, pas une autorité illimitée sur un
+# garde-fou de sécurité.
+MAX_DEPTH_EXTENSIONS = 2
 
 class Orchestrator(Supervisor, Entity):
     """
@@ -86,6 +103,14 @@ class Orchestrator(Supervisor, Entity):
 
         # Observabilité structurée (Logger -> JSON)
         Logger.configure_json_sink("observability/events.jsonl")
+
+        # --- VALIDATION FINALE DES PLANS (LLM Judge) ---
+        self._prompt_loader = get_prompt_loader()
+        # Chemin configurable au besoin ; rules.md peut ne pas encore exister
+        # (voir _load_rules_md) — dans ce cas la validation continue sans
+        # critères explicites plutôt que de bloquer toutes les missions.
+        self._rules_path = "rules.md"
+        self._rules_cache: Optional[str] = None
 
     async def process(self, packet: RequestPacket):
         """Implémentation de la méthode abstraite de Entity."""
@@ -202,18 +227,17 @@ class Orchestrator(Supervisor, Entity):
 
         # --- MISE À JOUR DE TOUS LES EXPLORATEURS AVEC LE LLM COURANT ---
         if self.runtime_state.discovery_engine:
-            # Récupérer tous les explorateurs enregistrés
             for data_type, explorer in self.runtime_state.discovery_engine._explorers.items():
-                if explorer.llm is not self.llm:  # Évite les assignations inutiles
+                if explorer.llm is not self.llm:
                     explorer.llm = self.llm
                     Logger.debug(f"[Orchestrator] LLM assigné à l'Explorer '{data_type}'.")
-
 
         # Restaurer l'historique des signatures depuis le contexte de session
         history = session_memory.context.discovery_history or []
         if self.llm:
             self.llm.set_discovery_history(history)
             Logger.debug(f"[Orchestrator] Historique des signatures PD restauré : {len(history)} entrée(s).")
+
         # 2. Réarmer le système
         self.runtime_state.cancel_requested = False
         self.runtime_state.reset_execution_markers()
@@ -227,48 +251,53 @@ class Orchestrator(Supervisor, Entity):
         # 4. Préparer les contextes d'exécution
         self._prepare_execution_context(session_id, forced_provider, forced_model)
 
-        await self.propagate_event(Events.THINKING_STARTED, {})
+        # --- NOUVEAU : générer un turn_id unique pour ce tour ---
+        turn_id = str(uuid.uuid4())
+        with self.runtime_state.execution_context.scope(turn_id=turn_id, session_id=session_id):
+            await self.propagate_event(Events.THINKING_STARTED, {})
 
-        try:
-            # 5. Récupérer l'historique de conversation
-            context_list = self.memory.get_context_for_llm(session_id) or []
-            context_str = "\n".join([f"{msg['role']}: {msg['content']}" for msg in context_list]) if context_list else ""
+            try:
+                # 5. Récupérer l'historique de conversation
+                context_list = self.memory.get_context_for_llm(session_id) or []
+                context_str = "\n".join([f"{msg['role']}: {msg['content']}" for msg in context_list]) if context_list else ""
 
-            # 6. Récupérer les conseils pour l'Orchestrateur (routage)
-            advice_orchestrator = await self._get_orchestrator_advice(user_message)
+                # 6. Récupérer les conseils pour l'Orchestrateur (routage)
+                advice_orchestrator = await self._get_orchestrator_advice(user_message)
 
-            # 7. Construire le prompt d'orchestration
-            loader = get_prompt_loader()
-            session_context_vars = {
-                "session_goal_stack": session_memory.context.goal_stack,
-                "session_unresolved_issues": session_memory.context.unresolved_issues,
-                "session_last_mission_status": session_memory.context.last_mission_status,
-                "session_mood": session_memory.context.mood,
-            }
-            session_context_vars["session_mission_list"] = session_mission_list
+                # 7. Construire le prompt d'orchestration
+                loader = get_prompt_loader()
+                session_context_vars = {
+                    "session_goal_stack": session_memory.context.goal_stack,
+                    "session_unresolved_issues": session_memory.context.unresolved_issues,
+                    "session_last_mission_status": session_memory.context.last_mission_status,
+                    "session_mood": session_memory.context.mood,
+                }
+                session_context_vars["session_mission_list"] = session_mission_list
 
-            # --- INVESTIGATION ACTIVE (multi-cibles) ---
-            active_targets = session_memory.context.active_investigation_targets
-            if active_targets:
-                combined_insights = []
-                for target in active_targets:
-                    combined_insights.extend(session_memory.context.insights_by_mission.get(target, []))
-                session_context_vars["active_investigation_insights"] = combined_insights
-                session_context_vars["active_investigation_targets"] = active_targets
-            else:
-                session_context_vars["active_investigation_insights"] = []
-                session_context_vars["active_investigation_targets"] = []
-            orchestrator_prompt = loader.load(
-                "orchestrator.md",
-                lang=self.runtime_state.language,
-                user_message=user_message,
-                history=context_str,
-                advice=advice_orchestrator,
-                **session_context_vars
-            )
+                # --- INVESTIGATION ACTIVE (multi-cibles) ---
+                active_targets = session_memory.context.active_investigation_targets
+                if active_targets:
+                    combined_insights = []
+                    for target in active_targets:
+                        combined_insights.extend(session_memory.context.insights_by_mission.get(target, []))
+                    session_context_vars["active_investigation_insights"] = combined_insights
+                    session_context_vars["active_investigation_targets"] = active_targets
+                else:
+                    session_context_vars["active_investigation_insights"] = []
+                    session_context_vars["active_investigation_targets"] = []
 
-            # 8. Appeler le LLM pour la décision de routage (via le LLM de l'Orchestrateur)
-            with self.runtime_state.execution_context.scope(session_id=session_id):
+                orchestrator_prompt = loader.load(
+                    "orchestrator.md",
+                    lang=self.runtime_state.language,
+                    user_message=user_message,
+                    history=context_str,
+                    advice=advice_orchestrator,
+                    **session_context_vars
+                )
+
+                # 8. Appeler le LLM pour la décision de routage
+                #     Le scope global fournit déjà turn_id et session_id,
+                #     donc on appelle _route_orchestrator sans scope interne.
                 decision = await self._route_orchestrator(
                     orchestrator_prompt,
                     context_list,
@@ -276,18 +305,14 @@ class Orchestrator(Supervisor, Entity):
                     forced_model
                 )
 
-            # Récupérer le dernier RefinedContext si une PD a eu lieu (ou cache hit)
-            if hasattr(self.llm, 'get_last_refined_context'):
-                refined = self.llm.get_last_refined_context()
-                if refined:
-                    session_memory = self.runtime_state.session_memory
-                    if session_memory:
-                        # Extraire les cibles
+                # Récupérer le dernier RefinedContext si une PD a eu lieu (ou cache hit)
+                if hasattr(self.llm, 'get_last_refined_context'):
+                    refined = self.llm.get_last_refined_context()
+                    if refined and session_memory:
                         targets = refined.targets or []
                         if targets:
-                            # Stocker les insights pour chaque cible
                             for target in targets:
-                                session_memory.context.insights_by_mission.setdefault(target, [])
+                                existing = session_memory.context.insights_by_mission.setdefault(target, [])
                                 for entry in refined.entries:
                                     insight = {
                                         "question": entry.question,
@@ -295,47 +320,49 @@ class Orchestrator(Supervisor, Entity):
                                         "tool_name": entry.tool_name,
                                         "timestamp": entry.timestamp.isoformat()
                                     }
-                                    session_memory.context.insights_by_mission[target].append(insight)
+                                    existing.append(insight)
                                     session_memory.context.discovery_insights.append(insight)
-                            # Définir les cibles actives (pour affichage)
+                                del existing[:-MAX_INSIGHTS_PER_TARGET]
                             session_memory.context.active_investigation_targets = targets
                             session_memory.context.touch()
                             Logger.debug(f"[Orchestrator] Investigation active définie sur {len(targets)} cible(s).")
                         else:
-                            Logger.warning("[Orchestrator] RefinedContext sans cibles, impossible de définir l'investigation active.")        
-            # Stocker les signatures dans le contexte d'exécution
-            self.current_execution_context["signatures"] = decision.signatures
-            signatures = decision.signatures or [] 
-            if signatures:
-                Logger.info(f"[Orchestrator] Signatures extraites : {[f'{s.action} {s.object}' for s in signatures]}")
-            else:
-                Logger.debug("[Orchestrator] Aucune signature extraite.")
-            self.runtime_state.current_signatures = signatures
+                            Logger.warning("[Orchestrator] RefinedContext sans cibles, impossible de définir l'investigation active.")
 
-            # 9. Vérifier l'annulation
-            if self.runtime_state.cancel_requested:
-                Logger.info("[Orchestrator] Stop demandé pendant l'évaluation, réponse ignorée.")
+                # Stocker les signatures dans le contexte d'exécution
+                self.current_execution_context["signatures"] = decision.signatures
+                signatures = decision.signatures or []
+                if signatures:
+                    Logger.info(f"[Orchestrator] Signatures extraites : {[f'{s.action} {s.object}' for s in signatures]}")
+                else:
+                    Logger.debug("[Orchestrator] Aucune signature extraite.")
+                self.runtime_state.current_signatures = signatures
+
+                # 9. Vérifier l'annulation
+                if self.runtime_state.cancel_requested:
+                    Logger.info("[Orchestrator] Stop demandé pendant l'évaluation, réponse ignorée.")
+                    await self.propagate_event(Events.THINKING_FINISHED, {})
+                    return ErrorPacket(type="error", message=_("Génération annulée"))
+
+                # 10. Traiter selon le mode
+                if decision.type == OrchestratorMode.DIRECT:
+                    return await self._handle_direct_decision(
+                        decision, session_id, user_message, forced_provider
+                    )
+                elif decision.type == OrchestratorMode.MISSION:
+                    return await self._handle_mission_decision(
+                        decision, session_id, user_message, forced_provider, forced_model, session_memory
+                    )
+                else:
+                    raise ValueError(f"Unknown OrchestratorMode: {decision.type}")
+
+            except Exception as e:
+                Logger.error(f"[Orchestrator] Critical failure during agent loop: {str(e)}")
+                await self.propagate_event(Events.RUNTIME_ERROR, {"message": str(e)})
+                return ErrorPacket(type="error", message=str(e))
+            finally:
                 await self.propagate_event(Events.THINKING_FINISHED, {})
-                return ErrorPacket(type="error", message=_("Génération annulée"))
 
-            # 10. Traiter selon le mode
-            if decision.type == OrchestratorMode.DIRECT:
-                return await self._handle_direct_decision(
-                    decision, session_id, user_message, forced_provider
-                )
-            elif decision.type == OrchestratorMode.MISSION:
-                return await self._handle_mission_decision(
-                    decision, session_id, user_message, forced_provider, forced_model, session_memory
-                )
-            else:
-                raise ValueError(f"Unknown OrchestratorMode: {decision.type}")
-
-        except Exception as e:
-            Logger.error(f"[Orchestrator] Critical failure during agent loop: {str(e)}")
-            await self.propagate_event(Events.RUNTIME_ERROR, {"message": str(e)})
-            return ErrorPacket(type="error", message=str(e))
-        finally:
-            await self.propagate_event(Events.THINKING_FINISHED, {})
     # =====================================================
     # SOUS‑MÉTHODES DE CHAT SEND
     # =====================================================
@@ -347,18 +374,17 @@ class Orchestrator(Supervisor, Entity):
         session_memory = self.session_memories[session_id]
 
         if session_data:
-            session_memory.context.goal_stack = session_data.get("goal_stack", [])
+            # NOTE : `restore_from_dict` ne touche QUE les clés effectivement
+            # présentes dans `session_data`. C'est important : avant ce correctif,
+            # `active_investigation_targets` était réécrit ICI à CHAQUE tour avec
+            # `session_data.get("active_investigation_targets", [])`, qui valait
+            # toujours `[]` (SessionStore ne persistait pas encore ce champ) —
+            # ce qui effaçait systématiquement, avant même de construire le
+            # prompt du tour courant, l'investigation qui venait pourtant
+            # d'être posée à la fin du tour précédent. C'est la cause racine
+            # de la section "INVESTIGATION EN COURS" toujours vide.
+            session_memory.context.restore_from_dict(session_data)
             session_memory.context.global_goal = session_data["goal_stack"][-1]["text"] if session_data.get("goal_stack") else None
-            session_memory.context.mission_history = session_data.get("mission_history", [])
-            session_memory.context.unresolved_issues = session_data.get("unresolved_issues", [])
-            session_memory.context.mood = session_data.get("mood")
-            session_memory.context.last_mission_status = session_data.get("last_mission_status")
-            session_memory.context.discovery_history = session_data.get("discovery_history", [])
-            session_memory.context.active_investigation_targets = session_data.get("active_investigation_targets", [])
-            # Restauration des insights (si stockés par mission)
-            insights_by_mission = session_data.get("insights_by_mission", {})
-            if insights_by_mission:
-                session_memory.context.insights_by_mission = insights_by_mission
             Logger.info(f"[Orchestrator] Contexte restauré pour session {session_id} ({len(session_memory.context.goal_stack)} objectifs, {len(session_memory.context.mission_history)} missions)")
         else:
             Logger.debug(f"[Orchestrator] Nouvelle session : {session_id}")
@@ -396,6 +422,78 @@ class Orchestrator(Supervisor, Entity):
             "model_id": forced_model,
             "refined_goal": None
         }
+
+    def _sanitize_technical_error(self, e: Exception) -> str:
+        """
+        Reformate une exception technique (provider IA externe, réseau, etc.)
+        en message générique présentable à l'utilisateur/l'agent. Le détail
+        brut complet reste UNIQUEMENT dans les logs (Logger.error, déjà fait
+        au point d'appel) — jamais dans mission_cache.summary ni dans les
+        événements propagés au frontend (MISSION_FAILED), pour ne pas
+        exposer d'URL d'endpoint, de quota, de fragment de clé API ou tout
+        autre détail spécifique au fournisseur. Catégorisation large plutôt
+        qu'exhaustive : mieux vaut un message générique correct que
+        d'essayer de deviner tous les noms d'exceptions de chaque provider
+        (Gemini/Groq/OpenAI/OpenRouter).
+        """
+        error_type = type(e).__name__.lower()
+        lowered = str(e).lower()
+        if "timeout" in lowered or "timeout" in error_type:
+            return _("Le service d'IA a mis trop de temps à répondre (délai dépassé).")
+        if "rate limit" in lowered or "quota" in lowered or "429" in lowered:
+            return _("Le service d'IA a temporairement refusé la requête (limite de débit atteinte).")
+        if "auth" in lowered or "api key" in lowered or "401" in lowered or "403" in lowered:
+            return _("Le service d'IA a refusé la requête (problème d'authentification côté fournisseur).")
+        if "connection" in lowered or "network" in lowered or "dns" in lowered:
+            return _("Impossible de contacter le service d'IA (problème réseau).")
+        return _("Une erreur technique inattendue est survenue côté fournisseur d'IA.")
+
+    async def request_depth_extension(self, ancestor_chain: List[Dict[str, Any]], child_solver_id: str) -> bool:
+        mission_id = self.runtime_state.execution_context.get("mission_id") or "unknown"
+
+        granted_so_far = self.runtime_state.depth_extensions_granted.get(mission_id, 0)
+        if granted_so_far >= MAX_DEPTH_EXTENSIONS:
+            Logger.warning(
+                f"[Orchestrator] 🛑 Extension de profondeur refusée pour la mission {mission_id} "
+                f"(sous-tâche '{child_solver_id}') : plafond absolu de {MAX_DEPTH_EXTENSIONS} "
+                f"extension(s) déjà atteint pour cette mission — refus sans même consulter le "
+                f"juge, ce plafond n'est pas négociable."
+            )
+            Logger.event(
+                "depth_escalation_decision",
+                mission_id=mission_id, child_solver_id=child_solver_id,
+                approved=False, reason="Plafond absolu d'extensions atteint.",
+                extensions_granted_before=granted_so_far, hard_cap_hit=True,
+            )
+            return False
+
+        outcome: DepthEscalationOutcome = await review_depth_escalation(
+            llm=self.llm,
+            prompt_loader=self._prompt_loader,
+            language=getattr(self.runtime_state, "language", "fr"),
+            ancestor_chain=ancestor_chain,
+        )
+
+        Logger.event(
+            "depth_escalation_decision",
+            mission_id=mission_id, child_solver_id=child_solver_id,
+            approved=outcome.approved, reason=outcome.reason,
+            extensions_granted_before=granted_so_far, hard_cap_hit=False,
+        )
+
+        if outcome.approved:
+            self.runtime_state.depth_extensions_granted[mission_id] = granted_so_far + 1
+            Logger.info(
+                f"[Orchestrator] ✅ Extension de profondeur accordée pour la mission {mission_id} "
+                f"({granted_so_far + 1}/{MAX_DEPTH_EXTENSIONS}) : {outcome.reason}"
+            )
+        else:
+            Logger.warning(
+                f"[Orchestrator] 🛑 Extension de profondeur refusée par le juge pour la mission "
+                f"{mission_id} : {outcome.reason}"
+            )
+
+        return outcome.approved
 
     async def _get_orchestrator_advice(self, user_message: str) -> str:
         # Reranker désactivé pour l'instant.
@@ -516,17 +614,7 @@ class Orchestrator(Supervisor, Entity):
         # Sauvegarder le contexte de session (discovery_history, insights, etc.)
         session_memory = self.session_memories.get(session_id)
         if session_memory:
-            context_dict = {
-                "goal_stack": session_memory.context.goal_stack,
-                "unresolved_issues": session_memory.context.unresolved_issues,
-                "mission_history": session_memory.context.mission_history,
-                "mood": session_memory.context.mood,
-                "last_mission_status": session_memory.context.last_mission_status,
-                "discovery_history": session_memory.context.discovery_history,
-                "insights_by_mission": session_memory.context.insights_by_mission,
-                "active_investigation_targets": session_memory.context.active_investigation_targets,
-            }
-            await self._save_session_context(session_id, context_dict)
+            await self._save_session_context(session_id, session_memory.context.to_persistable_dict())
         else:
             Logger.warning(f"[Orchestrator] SessionMemory introuvable pour {session_id}, contexte non sauvegardé.")
 
@@ -562,8 +650,14 @@ class Orchestrator(Supervisor, Entity):
         self.current_execution_context["refined_goal"] = refined_goal
         self.active_sessions[session_id]["refined_goal"] = refined_goal
 
-        # Au début de _handle_mission_decision
+        # Au début de _handle_mission_decision : une nouvelle mission rend
+        # caduque toute investigation précédente. On invalide à la fois le
+        # pointeur "cibles actives" ET le contenu accumulé lui-même — avant
+        # ce correctif, seul le pointeur était vidé, ce qui pouvait faire
+        # réapparaître des insights périmés si la même cible (ex: un
+        # mission_id) redevenait active plus tard dans la session.
         session_memory.context.active_investigation_targets = []
+        session_memory.context.insights_by_mission = {}
         Logger.debug("[Orchestrator] Investigation active invalidée (nouvelle mission).")
         # 2. Mettre à jour la mémoire de session
         session_memory.context.global_goal = refined_goal
@@ -655,7 +749,18 @@ class Orchestrator(Supervisor, Entity):
                         session_memory.context.unresolved_issues.append(
                             f"Mission {mission_cache.mission_id} annulée par l'utilisateur."
                         )
-                        await self._save_session_context(session_id, session_memory.context.to_dict())
+                        # BUG CORRIGÉ : cette ligne manquait sur les 3 chemins
+                        # d'annulation/crash (elle n'existait que sur le
+                        # chemin succès/échec normal, ligne ~755). Sans elle,
+                        # l'épisode était bien sauvé dans MissionStore (SQLite)
+                        # mais son ID n'entrait jamais dans
+                        # session_memory.context.mission_history — la liste
+                        # que l'Orchestrateur relit pour construire
+                        # `session_mission_list` (## Missions passées du
+                        # prompt). La mission existait donc en base mais était
+                        # invisible pour l'agent lui-même.
+                        session_memory.context.mission_history.append(mission_cache.mission_id)
+                        await self._save_session_context(session_id, session_memory.context.to_persistable_dict())
 
                         await self.propagate_event(Events.MISSION_FAILED, {
                             "reason": "Mission annulée par l'utilisateur",
@@ -691,7 +796,8 @@ class Orchestrator(Supervisor, Entity):
                 session_memory.context.unresolved_issues.append(
                     f"Mission {mission_cache.mission_id} annulée par l'utilisateur."
                 )
-                await self._save_session_context(session_id, session_memory.context.to_dict())
+                session_memory.context.mission_history.append(mission_cache.mission_id)
+                await self._save_session_context(session_id, session_memory.context.to_persistable_dict())
             raise
 
         except Exception as e:
@@ -703,7 +809,9 @@ class Orchestrator(Supervisor, Entity):
                 if self.root_solver:
                     mission_cache.execution_tree = self.root_solver.execution_tree
                     mission_cache.resolved_data = copy.deepcopy(getattr(self.runtime_state, 'mission_rum', {}))
-                mission_cache.summary = f"Mission '{refined_goal}' interrompue par une erreur système : {str(e)}"
+                mission_cache.summary = _("Mission '{goal}' interrompue par une erreur système : {reason}").format(
+                    goal=refined_goal, reason=self._sanitize_technical_error(e)
+                )
                 await asyncio.to_thread(
                     self.mission_store.save_episode,
                     mission_cache,
@@ -715,9 +823,10 @@ class Orchestrator(Supervisor, Entity):
                 session_memory.context.unresolved_issues.append(
                     f"Mission {mission_cache.mission_id} interrompue par une erreur système."
                 )
-                await self._save_session_context(session_id, session_memory.context.to_dict())
+                session_memory.context.mission_history.append(mission_cache.mission_id)
+                await self._save_session_context(session_id, session_memory.context.to_persistable_dict())
                 await self.propagate_event(Events.MISSION_FAILED, {
-                    "reason": str(e),
+                    "reason": self._sanitize_technical_error(e),
                     "mission_id": mission_cache.mission_id,
                     "session_id": session_id
                 })
@@ -748,6 +857,24 @@ class Orchestrator(Supervisor, Entity):
                 if result.error_reason:
                     issue += f" - {result.error_reason}"
                 session_memory.context.unresolved_issues.append(issue)
+
+                # ============================================================
+                # FIX : jusqu'ici, Events.MISSION_FAILED n'était émis QUE dans
+                # les branches d'exception (annulation utilisateur, exception
+                # non gérée) plus haut dans cette fonction. Un échec "propre"
+                # (ex: le Solver juge la mission infaisable et retourne
+                # normalement, sans lever d'exception) ne passait par AUCUNE
+                # des deux -> le frontend ne recevait jamais MISSION_FAILED,
+                # et MissionTrackerWidget restait bloqué dans son état
+                # "Planning..." (spinner infini) une fois le message
+                # d'explication du Presentator déjà affiché dans le chat.
+                # Ajouté d'après la version 2.
+                # ============================================================
+                await self.propagate_event(Events.MISSION_FAILED, {
+                    "reason": result.error_reason or _("Mission échouée"),
+                    "mission_id": mission_cache.mission_id,
+                    "session_id": session_id
+                })
 
         # 7. Vérifier l'annulation post-Solver
         if self.runtime_state.cancel_requested:
@@ -855,17 +982,7 @@ class Orchestrator(Supervisor, Entity):
         await self._evaluate_learning_trigger(mission_context)
 
         # 10. Sauvegarde du SessionContext
-        context_dict = {
-            "goal_stack": session_memory.context.goal_stack,
-            "unresolved_issues": session_memory.context.unresolved_issues,
-            "mission_history": session_memory.context.mission_history,
-            "mood": session_memory.context.mood,
-            "last_mission_status": session_memory.context.last_mission_status,
-            "discovery_history": session_memory.context.discovery_history,
-            "insights_by_mission": session_memory.context.insights_by_mission,
-            "active_investigation_targets": session_memory.context.active_investigation_targets,
-        }
-        await self._save_session_context(session_id, context_dict)
+        await self._save_session_context(session_id, session_memory.context.to_persistable_dict())
 
         # Thèmes récurrents (optionnel)
         themes = self.session_store.get_recurrent_themes(session_id, limit=5)
@@ -907,16 +1024,116 @@ class Orchestrator(Supervisor, Entity):
     # =====================================================
     # IMPLÉMENTATION DE SUPERVISOR
     # =====================================================
-    async def validate_plan(self, plan: Plan, child_solver_id: str) -> bool:
-        """Valide un plan (actuellement toujours accepté)."""
-        Logger.info(f"[Orchestrator] ⚖️ Validation du plan du Solver '{child_solver_id}'")
+    async def validate_plan(
+        self,
+        plan: Plan,
+        child_solver_id: str,
+        previous_attempts: Optional[List[PlanAttempt]] = None,
+        ancestor_chain: Optional[List[Dict[str, Any]]] = None,
+    ) -> PlanValidationOutcome:
+        """
+        Validation finale d'un plan proposé par un Solver, avant exécution.
+        Délègue le jugement à PlanValidator (voir core/plan_validator.py) pour
+        rester testable indépendamment de tout le reste d'Orchestrator.
+
+        NOTE DE MIGRATION : cette méthode retournait auparavant un simple
+        `bool` toujours égal à True (stub). Elle retourne maintenant un
+        `PlanValidationOutcome`, qui reste utilisable comme un bool
+        (`if not outcome:`) pour la compatibilité, mais porte aussi `reason`,
+        `risk_level`, etc. `Solver._run` (le point d'appel) a été mis à jour
+        en conséquence pour réinjecter `reason` dans le feedback au Planner
+        au lieu du message générique fixe d'avant.
+
+        `ancestor_chain` (NOUVEAU) : chaîne racine -> Solver courant, pour
+        détecter une récursion INTER-niveaux (chaîne d'abstract_task qui
+        redélègue le même objectif reformulé) — invisible à la seule
+        comparaison intra-solver de `previous_attempts`, puisque chaque
+        niveau imbriqué est un Solver flambant neuf. Confirmé nécessaire par
+        un cas réel observé en test (boucle de délégation sans fin).
+        """
         target_goal = self.current_execution_context.get("refined_goal") or plan.goal
-        Logger.info(f"[Orchestrator] [CONVERGENCE CHECK] Objectif cible : '{target_goal}'")
-        for step in plan.steps:
-            Logger.info(f"   -> Étape : {step.description} [{step.type.value}]")
-        # Ici sera ajouté le LLM Judge plus tard
-        Logger.info("[Orchestrator] ✅ Le plan converge vers l'objectif raffiné. Feu vert.")
-        return True
+        Logger.info(f"[Orchestrator] ⚖️ Validation du plan du Solver '{child_solver_id}' (objectif cible : '{target_goal}')")
+
+        validator = PlanValidator(
+            llm=self.llm,
+            prompt_loader=self._prompt_loader,
+            rules_text=self._load_rules_md(),
+            language=getattr(self.runtime_state, "language", "fr"),
+            request_human_confirmation=self._request_human_confirmation,
+        )
+        outcome = await validator.validate(
+            plan=plan,
+            child_solver_id=child_solver_id,
+            target_goal=target_goal,
+            previous_attempts=previous_attempts,
+            ancestor_chain=ancestor_chain,
+        )
+
+        Logger.event(
+            "plan_validation_decision",
+            solver_id=child_solver_id,
+            is_valid=outcome.is_valid,
+            reason=outcome.reason,
+            risk_level=outcome.risk_level.value,
+            requires_human_confirmation=outcome.requires_human_confirmation,
+            human_confirmed=outcome.human_confirmed,
+            irreversibility_flags=outcome.irreversibility_flags,
+        )
+
+        if outcome.is_valid:
+            Logger.info(f"[Orchestrator] ✅ Plan de '{child_solver_id}' accepté ({outcome.risk_level.value}). {outcome.reason}")
+        else:
+            Logger.warning(f"[Orchestrator] 🛑 Plan de '{child_solver_id}' refusé : {outcome.reason}")
+
+        return outcome
+
+    def _load_rules_md(self) -> str:
+        """
+        Charge (et cache en mémoire) le contenu de rules.md — les critères de
+        conformité en langage naturel utilisés par le LLM Judge. Fichier
+        volontairement optionnel : son absence ne bloque pas les missions,
+        elle dégrade juste la validation à "pas de critère explicite fourni"
+        (le LLM garde son jugement général, mais n'a plus de politique
+        spécifique à faire respecter).
+        """
+        if self._rules_cache is not None:
+            return self._rules_cache
+        try:
+            with open(self._rules_path, "r", encoding="utf-8") as f:
+                self._rules_cache = f.read()
+        except Exception as e:
+            Logger.warning(
+                f"[Orchestrator] rules.md introuvable ou illisible ({self._rules_path} : {e}) — "
+                f"validation sans critères explicites."
+            )
+            self._rules_cache = ""
+        return self._rules_cache
+
+    async def _request_human_confirmation(self, plan: Plan, decision: PlanValidationDecision) -> bool:
+        """
+        Pont entre PlanValidator et le frontend : réutilise TEL QUEL le
+        mécanisme déjà en place pour les outils externes (Future + call_id,
+        cf. _execute_external_tool) plutôt que d'inventer un nouveau canal.
+        Un outil nommé 'request_human_confirmation' doit être enregistré côté
+        frontend (register_tool) pour que ce mécanisme fonctionne — TANT QUE
+        CE N'EST PAS LE CAS, execute_tool renverra un échec de validation
+        (tool inconnu), et PlanValidator.validate() refusera par prudence
+        (voir son propre repli explicite si `request_human_confirmation`
+        n'était pas fourni du tout) — donc pas de faux-positif "confirmé"
+        silencieux si le frontend n'a pas encore implémenté ce point.
+        """
+        try:
+            result_str = await self.execute_tool("request_human_confirmation", {
+                "plan_goal": plan.goal,
+                "risk_level": decision.risk_level.value,
+                "reason": decision.reason,
+                "irreversibility_flags": decision.irreversibility_flags,
+            })
+            result = json.loads(result_str)
+            return bool(result.get("result"))
+        except Exception as e:
+            Logger.error(f"[Orchestrator] Échec de la demande de confirmation humaine : {e}")
+            return False
 
     async def report_critical_failure(self, error_context: str, child_solver_id: str):
         Logger.error(f"[Orchestrator] 🚨 ALERTE CRITIQUE du Solver '{child_solver_id}' : {error_context}")
