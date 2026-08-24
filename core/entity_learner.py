@@ -8,7 +8,7 @@ from typing import Optional, List, Dict, Any
 from utils.logger import Logger
 from memory.lesson_store import LessonStore
 from core.constants import ENTITY_LEARNER_MIN_EVIDENCE
-
+from core.embedding_service import embed_text
 
 class EntityLearner:
     def __init__(self, lesson_store: LessonStore, cache_manager=None):
@@ -42,11 +42,6 @@ class EntityLearner:
     async def _consolidate_group(self, entity_type: str, scope: str, environment: str) -> None:
         """
         Consolide un groupe spécifique.
-        - Récupère toutes les brutes du groupe.
-        - Sépare avoid / prefer.
-        - Détermine la leçon gagnante (celle avec la meilleure confiance).
-        - Crée une nouvelle leçon consolidée à partir de la gagnante.
-        - (Optionnel) enregistre la résolution de conflit.
         """
         brutes = self.lesson_store.get_brute_lessons_by_group(entity_type, scope, environment)
         if len(brutes) < ENTITY_LEARNER_MIN_EVIDENCE:
@@ -57,8 +52,6 @@ class EntityLearner:
         avoids = [b for b in brutes if b["polarity"] == "avoid"]
         prefers = [b for b in brutes if b["polarity"] == "prefer"]
 
-        # Déterminer la leçon gagnante
-        # Critère : confiance la plus élevée (puis evidence_count)
         def best_lesson(lessons):
             if not lessons:
                 return None
@@ -74,10 +67,8 @@ class EntityLearner:
             winner = best_lesson(prefers)
             conflict_resolution = "Groupe monovalent (prefer uniquement)."
         elif avoids and prefers:
-            # Conflit : comparer les meilleurs
             best_avoid = best_lesson(avoids)
             best_prefer = best_lesson(prefers)
-            # On garde celui avec la meilleure confiance globale
             if best_prefer["confidence"] >= best_avoid["confidence"]:
                 winner = best_prefer
                 conflict_resolution = (
@@ -102,9 +93,12 @@ class EntityLearner:
             all_keywords.update(b.get("keywords", []))
             all_sources.update(b.get("source_episodes", []))
 
-        # Somme des evidence_count et contradiction_count de toutes les brutes
         total_evidence = sum(b.get("evidence_count", 0) for b in brutes)
         total_contradiction = sum(b.get("contradiction_count", 0) for b in brutes)
+
+        # Générer le vecteur de la leçon consolidée
+        emb_text = f"{scope} {winner['recommendation']} {' '.join(list(all_keywords))}"
+        embedding = await embed_text(emb_text)
 
         # Créer la leçon consolidée
         new_id = self.lesson_store.create_consolidated_lesson(
@@ -119,11 +113,11 @@ class EntityLearner:
             keywords=list(all_keywords),
             source_episodes=list(all_sources),
             polarity=winner["polarity"],
-            conflict_resolution=conflict_resolution
+            conflict_resolution=conflict_resolution,
+            embedding=embedding
         )
 
         if new_id and self.cache_manager:
-            # Invalider le cache Advisor pour ce scope
             try:
                 await self.cache_manager.invalidate([scope])
                 Logger.debug(f"[EntityLearner] Cache Advisor invalidé pour scope {scope}")

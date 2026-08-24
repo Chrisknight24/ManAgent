@@ -39,8 +39,17 @@ class Retriever:
             Logger.debug("[Retriever] Aucune signature fournie, retrieval ignoré.")
             return []
 
+        # Identifier la mission racine et le solver_id
+        solver_id = query_mission_id
+        mission_id = None
+        if self.runtime_state:
+            mission_id = getattr(self.runtime_state, "current_mission_id", None)
+
         Logger.event(
             "retriever_query",
+            query_mission_id=query_mission_id,
+            solver_id=solver_id,
+            mission_id=mission_id,
             signatures=[{"action": s.action, "object": s.object, "desired_state": s.desired_state} for s in signatures],
             top_k=self.top_k,
             threshold=self.threshold
@@ -49,7 +58,6 @@ class Retriever:
         top_k = top_k or self.top_k
         threshold = threshold or self.threshold
 
-        # Normaliser les signatures pour la clé de cache
         normalized_sigs = []
         for s in signatures:
             normalized_sigs.append({
@@ -58,7 +66,6 @@ class Retriever:
                 "desired_state": s.desired_state.strip().lower() if s.desired_state else None
             })
 
-        # Construire les paramètres de cache
         cache_params = {
             "signatures": normalized_sigs,
             "top_k": top_k,
@@ -123,7 +130,7 @@ class Retriever:
                         "matched_signature": signature_text,
                         "action": sig.action,
                         "object": sig.object,
-                        "root_mission_id": res.get("root_mission_id")  # <-- ON STOCKE LE root_mission_id
+                        "root_mission_id": res.get("root_mission_id")
                     }
 
         if not all_candidates:
@@ -134,14 +141,10 @@ class Retriever:
 
         results = []
         for mission_id, data in all_candidates.items():
-            # Récupérer le root_mission_id depuis le profile
             root_mission_id = data.get("root_mission_id") or mission_id
-
-            # Charger l'épisode depuis le root_mission_id (pour avoir le résumé global)
             episode = self.mission_store.get_episode(root_mission_id)
             if not episode:
                 Logger.warning(f"[Retriever] Mission racine {root_mission_id} (issue de {mission_id}) introuvable dans episodes.")
-                # Fallback sur l'ID du profile
                 episode = self.mission_store.get_episode(mission_id)
                 if not episode:
                     Logger.warning(f"[Retriever] Mission {mission_id} introuvable dans episodes (fallback échoué).")
@@ -150,8 +153,8 @@ class Retriever:
             summary = episode.get("summary") or episode.get("goal") or "Mission sans résumé"
 
             results.append({
-                "mission_id": root_mission_id,  # on retourne l'ID racine
-                "source_profile_id": mission_id,  # pour traçabilité
+                "mission_id": root_mission_id,
+                "source_profile_id": mission_id,
                 "goal": episode.get("goal"),
                 "summary": summary,
                 "score": data["score"],
@@ -168,6 +171,8 @@ class Retriever:
             Logger.event(
                 "retriever_results",
                 query_mission_id=query_mission_id,
+                solver_id=solver_id,
+                mission_id=mission_id,
                 found_mission_id=result["mission_id"],
                 goal=result.get("goal"),
                 summary=result.get("summary"),
@@ -178,7 +183,6 @@ class Retriever:
                 embedding_model=active_model
             )
 
-        # --- 3. Stocker les résultats dans le cache ---
         if results:
             await self.cache_manager.set(
                 "retrieval",
@@ -190,7 +194,6 @@ class Retriever:
             )
 
         return results
-    
     
     async def retrieve_from_goal(
         self,

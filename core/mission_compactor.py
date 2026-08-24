@@ -1,15 +1,18 @@
 # core/mission_compactor.py
-# Version avec récupération des leçons issues des missions similaires
+# Version avec récupération des leçons issues des missions similaires,
+# désactivation de la Progressive Disclosure (with_discovery=False)
+# et ordonnancement temporel explicite.
 
 import time
 from typing import List, Dict, Any, Optional
+from datetime import datetime
 from core.entity import Entity
 from core.llm import Llm
 from core.prompt_loader import get_prompt_loader
 from utils.logger import Logger
 from core.plan_models import CompactedAdvice
 from core.cache import CacheManager
-from memory.lesson_store import LessonStore  # <-- AJOUT
+from memory.lesson_store import LessonStore
 
 class MissionCompactor(Entity):
     """
@@ -30,7 +33,7 @@ class MissionCompactor(Entity):
             cache_manager = CacheManager()
         super().__init__(name=name, role="compactor", llm=None, parent=parent)
         self.cache_manager = cache_manager
-        self.lesson_store = LessonStore()  # <-- pour accéder aux leçons
+        self.lesson_store = LessonStore()
 
     async def process(self, *args, **kwargs) -> CompactedAdvice:
         """Implémentation de la méthode abstraite de Entity."""
@@ -44,12 +47,41 @@ class MissionCompactor(Entity):
 
         return await self.compact(goal, similar_missions, llm, runtime_state)
 
+    def _sort_and_annotate_missions(self, raw_missions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Trie les missions similaires du plus récent au plus ancien
+        et ajoute une annotation explicite de récence temporelle.
+        """
+        def _get_timestamp(ep: Dict[str, Any]):
+            ts = ep.get("finished_at") or ep.get("created_at")
+            if ts:
+                try:
+                    return datetime.fromisoformat(str(ts).replace("Z", ""))
+                except Exception:
+                    pass
+            return datetime.min
+
+        sorted_eps = sorted(raw_missions, key=_get_timestamp, reverse=True)
+        
+        annotated = []
+        for idx, ep in enumerate(sorted_eps):
+            ep_copy = dict(ep)
+            date_str = ep_copy.get("finished_at") or ep_copy.get("created_at") or "Date inconnue"
+            if idx == 0 and len(sorted_eps) > 1:
+                ep_copy["_recency_label"] = f"⭐ LA PLUS RÉCENTE (terminée le {date_str})"
+            elif idx == 0:
+                ep_copy["_recency_label"] = f"Terminée le {date_str}"
+            else:
+                ep_copy["_recency_label"] = f"Antérieure ({idx+1}e plus récente - {date_str})"
+            annotated.append(ep_copy)
+        return annotated
+
     async def compact(
         self,
         goal: str,
         similar_missions: List[Dict[str, Any]],
         llm: Llm,
-        runtime_state,
+        runtime_state=None,
         query_signatures: Optional[List] = None
     ) -> CompactedAdvice:
         """
@@ -62,9 +94,9 @@ class MissionCompactor(Entity):
             normalized_sigs = []
             for s in query_signatures:
                 normalized_sigs.append({
-                    "action": s.action.strip().lower(),
-                    "object": s.object.strip().lower(),
-                    "desired_state": s.desired_state.strip().lower() if s.desired_state else None
+                    "action": getattr(s, "action", "").strip().lower(),
+                    "object": getattr(s, "object", "").strip().lower(),
+                    "desired_state": getattr(s, "desired_state", "").strip().lower() if getattr(s, "desired_state", None) else None
                 })
             cache_params = {
                 "signatures": normalized_sigs,
@@ -92,11 +124,14 @@ class MissionCompactor(Entity):
 
         start_time = time.monotonic()
         try:
+            # Ordonner par récence
+            ordered_missions = self._sort_and_annotate_missions(similar_missions)
+
             # --- 2a. Formater les missions similaires ---
-            missions_text = self._format_missions(similar_missions)
+            missions_text = self._format_missions(ordered_missions)
 
             # --- 2b. Récupérer les leçons associées à ces missions ---
-            mission_ids = [m.get("mission_id") for m in similar_missions if m.get("mission_id")]
+            mission_ids = [m.get("mission_id") for m in ordered_missions if m.get("mission_id")]
             lessons_text = ""
             if mission_ids:
                 lessons = self._fetch_lessons_for_missions(mission_ids)
@@ -107,23 +142,25 @@ class MissionCompactor(Entity):
                     Logger.debug("[MissionCompactor] Aucune leçon associée aux missions similaires.")
 
             # --- 2c. Construire le prompt ---
-            # On combine les deux sections : d'abord les missions, puis les leçons
             combined_context = missions_text
             if lessons_text:
                 combined_context += f"\n\n--- LEÇONS TIRÉES DE CES MISSIONS ---\n{lessons_text}"
 
             loader = get_prompt_loader()
+            lang = getattr(runtime_state, "language", "fr") if runtime_state else "fr"
             prompt = loader.load(
                 "mission_compactor.md",
-                lang=runtime_state.language,
+                lang=lang,
                 goal=goal,
-                missions=combined_context  # on remplace missions par le contexte enrichi
+                missions=combined_context
             )
 
+            # Appel structuré avec désactivation FORMELLE de la Progressive Disclosure
             compacted: CompactedAdvice = await llm.generate_structured(
                 prompt=prompt,
                 schema=CompactedAdvice,
-                tag="MissionCompactor"
+                tag="MissionCompactor",
+                with_discovery=False
             )
 
             duration_ms = int((time.monotonic() - start_time) * 1000)
@@ -145,7 +182,9 @@ class MissionCompactor(Entity):
             if query_signatures and self.cache_manager:
                 markers = []
                 for s in query_signatures:
-                    markers.append(f"{s.action.strip().lower()}|{s.object.strip().lower()}")
+                    act = getattr(s, "action", "").strip().lower()
+                    obj = getattr(s, "object", "").strip().lower()
+                    markers.append(f"{act}|{obj}")
                 await self.cache_manager.set(
                     "compactor",
                     cache_params,
@@ -173,13 +212,15 @@ class MissionCompactor(Entity):
             )
 
     def _format_missions(self, missions: List[Dict[str, Any]]) -> str:
-        """Formate la liste des missions pour le prompt."""
+        """Formate la liste des missions pour le prompt avec information de récence."""
         lines = []
         for idx, m in enumerate(missions, 1):
-            goal = m.get("goal", "Objectif inconnu")
-            summary = m.get("summary", "Résumé non disponible")
+            goal = m.get("goal") or m.get("user_goal", "Objectif inconnu")
+            summary = m.get("summary") or m.get("final_response") or "Résumé non disponible"
             score = m.get("score", 0.0)
-            lines.append(f"{idx}. **Mission** : {goal}")
+            recency = m.get("_recency_label", "")
+            recency_str = f" [{recency}]" if recency else ""
+            lines.append(f"{idx}. **Mission**{recency_str} : {goal}")
             lines.append(f"   **Résumé** : {summary}")
             lines.append(f"   **Score de similarité** : {score:.3f}")
         return "\n".join(lines)
@@ -192,13 +233,10 @@ class MissionCompactor(Entity):
         if not mission_ids:
             return []
         try:
-            # On va chercher toutes les leçons actives et filtrer manuellement
-            # (car SQLite ne supporte pas bien JSON_ARRAY_OVERLAPS dans toutes les versions)
             all_lessons = self.lesson_store.get_active_lessons(
                 entity_types=["Planner", "Executor", "Solver", "Presentator"],
-                environment="simulated"  # on prend toutes, peu importe l'environnement
+                environment="simulated"
             )
-            # Filtre : garder celles qui ont au moins un mission_id commun
             relevant = []
             for lesson in all_lessons:
                 sources = lesson.get("source_episodes", [])

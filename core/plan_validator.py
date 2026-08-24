@@ -27,7 +27,6 @@ Trois responsabilités, dans cet ordre :
 
 from __future__ import annotations
 
-import difflib
 from typing import List, Optional, Callable, Awaitable, Any, Dict
 from core.plan_models import Plan, PlanValidationDecision, RiskLevel, DepthEscalationDecision
 from core.execution_models import PlanAttempt
@@ -80,6 +79,7 @@ class PlanValidator:
         request_human_confirmation: Optional[
             Callable[[Plan, PlanValidationDecision], Awaitable[bool]]
         ] = None,
+        learner: Optional[Any] = None,
     ):
         """
         llm : objet exposant `generate_structured(prompt, schema, tag=...)`.
@@ -90,12 +90,14 @@ class PlanValidator:
         request_human_confirmation : callback optionnel appelé quand le LLM
             juge qu'une confirmation humaine est requise. None = pas de canal
             disponible (refus par prudence systématique dans ce cas).
+        learner : instance du Learner pour récupérer les leçons apprises par le Validator.
         """
         self._llm = llm
         self._prompt_loader = prompt_loader
         self._rules_text = rules_text
         self._language = language
         self._request_human_confirmation = request_human_confirmation
+        self._learner = learner
 
     # =====================================================
     # 1. Détection de motifs récursifs (déterministe, sans LLM)
@@ -157,57 +159,70 @@ class PlanValidator:
         ).format(repeats=repeats)
 
     @staticmethod
-    def _goal_similarity(a: str, b: str) -> float:
-        if not a or not b:
-            return 0.0
-        return difflib.SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
-
-    def detect_ancestor_goal_recursion(
-        self,
-        plan: Plan,
-        ancestor_chain: Optional[List[Dict[str, Any]]],
-        similarity_threshold: float = 0.55,
-    ) -> Optional[str]:
+    def summarize_mission_history(
+        root_tree: Optional[Any],
+        max_display_depth: int = 4,
+        max_nodes_per_attempt: int = 8,
+    ) -> str:
         """
-        Compare l'objectif du plan (et celui de ses étapes abstract_task,
-        s'il en a) aux objectifs des Solvers ANCÊTRES (racine -> parent
-        direct). Contrairement à detect_repeated_plan_pattern (intra-solver,
-        basé sur previous_attempts), ceci détecte un motif confirmé en test
-        réel : une chaîne d'abstract_task imbriqués qui redélègue, niveau
-        après niveau, une reformulation du MÊME objectif sans jamais produire
-        d'action concrète — invisible à la comparaison intra-solver puisque
-        chaque niveau est un Solver flambant neuf dont les previous_attempts
-        sont toujours vides au premier essai. Similarité floue (difflib)
-        plutôt qu'égalité stricte, pour attraper les reformulations
-        ("fermer les applications" / "fermer l'ensemble des fenêtres et
-        processus applicatifs cibles"...).
+        Vue compacte de l'historique d'exécution de TOUTE la mission depuis
+        la racine (pas seulement ce Solver) : quels sous-objectifs ont été
+        tentés, à quel niveau, avec quel résultat, et pourquoi un échec a eu
+        lieu le cas échéant.
+
+        REMPLACE l'ancienne détection par similarité de texte entre
+        objectifs (`detect_ancestor_goal_recursion`, supprimée) : cette
+        dernière déclenchait sur toute reformulation "qui sonne pareil",
+        y compris pour une décomposition parfaitement légitime d'un
+        sous-problème (ex: une étape qui ne délègue qu'UNE PARTIE de
+        l'objectif du parent se voyait comparée au texte complet de ce
+        parent). Un faux positif documenté a bloqué une mission valide.
+
+        Ici, pas de jugement pré-calculé : on donne au LLM juge les FAITS
+        (quels sous-objectifs ont déjà été tentés et avec quel résultat),
+        et c'est LUI qui raisonne pour distinguer "cette approche a déjà
+        échoué plusieurs fois à ce niveau" (récursion dégénérée réelle) de
+        "c'est simplement la suite logique d'une mission complexe qui
+        avance" (décomposition légitime) — une distinction qu'aucune
+        heuristique de surface ne peut fiablement trancher à sa place.
         """
-        if not ancestor_chain:
-            return None
+        if not root_tree:
+            return _("(aucun historique disponible — probablement le tout premier plan de la mission)")
 
-        matches = []
-        for ancestor in ancestor_chain:
-            ancestor_goal = ancestor.get("goal") or ""
-            sim = self._goal_similarity(plan.goal, ancestor_goal)
-            if sim >= similarity_threshold:
-                matches.append((ancestor.get("depth"), ancestor_goal, sim))
-            for step in plan.steps:
-                if getattr(step, "type", None) and getattr(step.type, "value", None) == "abstract_task":
-                    step_sim = self._goal_similarity(step.description, ancestor_goal)
-                    if step_sim >= similarity_threshold:
-                        matches.append((ancestor.get("depth"), ancestor_goal, step_sim))
+        lines: List[str] = []
 
-        if not matches:
-            return None
+        def walk(tree: Any, indent: int = 0) -> None:
+            if indent // 2 > max_display_depth:
+                lines.append("  " * indent + _("… (sous-arbre non développé, profondeur d'affichage atteinte)"))
+                return
+            prefix = "  " * indent
+            status = getattr(tree, "status", "?")
+            goal = getattr(tree, "goal", "?")
+            lines.append(f"{prefix}- [{status}] {goal}")
 
-        best = max(matches, key=lambda m: m[2])
-        return _(
-            "⚠️ L'objectif de ce plan (ou l'une de ses étapes abstract_task) ressemble "
-            "fortement (similarité {sim:.0%}) à celui d'un ANCÊTRE à la profondeur {depth} : "
-            "« {goal} ». Chaîne actuelle : {chain_len} niveau(x). Si ce plan ne fait que "
-            "redéléguer le même objectif sans action concrète nouvelle par rapport à ce "
-            "niveau ancêtre, c'est un motif récursif dégénéré, pas une décomposition légitime."
-        ).format(sim=best[2], depth=best[0], goal=best[1], chain_len=len(ancestor_chain))
+            attempts = getattr(tree, "attempts", None) or []
+            for attempt in attempts:
+                outcome = getattr(attempt, "outcome", "?")
+                failure_reason = getattr(attempt, "failure_reason", None)
+                suffix = f" — ÉCHEC : {failure_reason}" if outcome == "failed" and failure_reason else ""
+                lines.append(f"{prefix}    tentative {getattr(attempt, 'attempt_number', '?')} : {outcome}{suffix}")
+
+                nodes = getattr(attempt, "nodes", None) or []
+                for node in nodes[:max_nodes_per_attempt]:
+                    node_desc = getattr(node, "description", "") or ""
+                    node_status = getattr(node, "status", "?")
+                    lines.append(f"{prefix}      · {node_desc} [{node_status}]")
+                    child = getattr(node, "child_execution_tree", None)
+                    if child:
+                        walk(child, indent + 2)
+                if len(nodes) > max_nodes_per_attempt:
+                    lines.append(
+                        f"{prefix}      … ({len(nodes) - max_nodes_per_attempt} "
+                        f"étape(s) supplémentaire(s) non affichée(s))"
+                    )
+
+        walk(root_tree)
+        return "\n".join(lines) if lines else _("(historique vide)")
 
     # =====================================================
     # 2 & 3. Jugement LLM + confirmation humaine si nécessaire
@@ -235,11 +250,22 @@ class PlanValidator:
         child_solver_id: str,
         target_goal: str,
         previous_attempts: Optional[List[PlanAttempt]] = None,
-        ancestor_chain: Optional[List[Dict[str, Any]]] = None,
+        mission_history_tree: Optional[Any] = None,
     ) -> PlanValidationOutcome:
         pattern_warning = self.detect_repeated_plan_pattern(plan, previous_attempts or [])
-        ancestor_warning = self.detect_ancestor_goal_recursion(plan, ancestor_chain)
+        mission_history_summary = self.summarize_mission_history(mission_history_tree)
         declared_irreversible = [s.id for s in plan.steps if getattr(s, "is_irreversible", False)]
+
+        # Récupérer les conseils spécifiques au Validator (Learner)
+        advice = ""
+        if hasattr(self, "_learner") and self._learner:
+            try:
+                advice = await self._learner.get_advice(
+                    entity_types=["Validator"],
+                    goal=target_goal
+                )
+            except Exception as e:
+                Logger.warning(f"[PlanValidator] Erreur récupération conseils Validator : {e}")
 
         prompt = self._prompt_loader.load(
             "plan_validation.md",
@@ -248,8 +274,9 @@ class PlanValidator:
             plan_summary=self._summarize_plan_for_prompt(plan),
             rules=self._rules_text or _("(rules.md absent ou vide — aucun critère explicite fourni.)"),
             pattern_warning=pattern_warning,
-            ancestor_warning=ancestor_warning,
+            mission_history_summary=mission_history_summary,
             declared_irreversible_steps=declared_irreversible,
+            advice=advice,
         )
 
         try:

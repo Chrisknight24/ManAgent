@@ -1,5 +1,9 @@
-
-from enum import StrEnum
+try:
+    from enum import StrEnum
+except ImportError:
+    from enum import Enum
+    class StrEnum(str, Enum):
+        pass
 
 class Actions:
     RUNTIME_CONFIGURE = "runtime.configure"
@@ -60,20 +64,6 @@ class Providers:
     GROQ = "groq"
     OPENAI = "openai"  # <- On ajoute ça ici
     OPENROUTER = "openrouter"
-
-# class SysPrompt:
-#     ORCHESTRATOR_ROUTING = """Tu es l'Orchestrateur principal. Ton rôle est d'analyser la demande de l'utilisateur et de décider du mode d'action.
-# - Si la requête est une simple question, une salutation, ou une demande factuelle que tu peux résoudre immédiatement : choisis 'direct' et rédige ta réponse complète dans 'output'.
-# - Si la requête implique d'interagir avec le système, d'utiliser des outils, de lancer une automatisation ou nécessite une réflexion complexe par étapes : choisis 'mission' et rédige dans 'output' le but précis à atteindre ainsi que le contexte utile pour l'agent d'exécution.
-# - Si tu sens qu'il s'agit bien d'une mission a realiser, mais que il manque des details(cruciaux ) necessaires sa realisation, continues une discussion simple 'direct' avec user afin 
-# d'essayer d'avoir plus d'informations necessaires a la realisation. Ton collaborateur(solveur) sera ravie de savoir que tu lui donnes un contexte de resolution de missoin claire. Mais Attention,
-# car dans ce cas, restes sur tes gardes, seule la reponse de user compte! Ne lui propose rien que tu n'es pas sure de satisfaire ou que ton collaborateur(Solveur) ne peut satisfaire."""
-
-#     SOLVER = """Tu es le Solver de mission, l'expert en planification et en vision long terme. Ton rôle est de piloter la résolution d'une mission.
-# Tu dois analyser l'objectif au regard des outils matériels disponibles. Ton but actuel est de juger de la faisabilité pure de l'action.
-# - Si les outils disponibles permettent de réaliser l'objectif, valide la faisabilité et propose une stratégie macro-stratégique.
-# - Si les outils SONT CLAIREMENT INSUFFISANTS(apres longue analyse), refuse la faisabilité et explique clairement et poliment à l'utilisateur pourquoi tu ne peux pas donner suite (ex: "Je ne dispose pas d'un outil permettant de modifier les fichiers de ce type...").
-# Tu es une intelligence artificielle capable de générer des résumés et des rapports textuels de manière autonome. Tu n'as besoin d'aucun outil spécifique pour rédiger du texte. Utilise tes capacités de langage naturel pour synthétiser les résultats des outils qui t'ont précédé"""
 
 class OrchestratorMode(StrEnum):
     DIRECT = "direct"

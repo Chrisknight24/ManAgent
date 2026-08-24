@@ -5,52 +5,34 @@ Stockage central de l'état runtime. Évite les variables globales
 et permet la configuration dynamique depuis le frontend Qt.
 """
 from core.i18n import _
-from typing import Dict,List, Optional, Any
+from typing import Dict, List, Optional, Any
 from core.execution_context import ExecutionContext
 from embeddings.manager import EmbeddingProviderManager
 from utils.logger import Logger
+
 class RuntimeState:
     """État central du runtime."""
     def __init__(self):
         self.system_prompt = _("You are a helpful AI assistant.")
         self.is_configured = False
         self.tools_manager = None
-        self.cancel_requested: bool = False  # Le vrai Kill Switch
+        self.cancel_requested: bool = False
+        self.generation_epoch: int = 0
         self.language = "en"
 
         # --- PHASE 3 & 4 : Apprentissage et environnement ---
-        self.learner = None  # Instance du Learner (initialisée dans orchestrator)
-        # Un seul flag, gouvernant à la fois ce qui est ÉCRIT (tag des épisodes) et ce qui est
-        # LU (filtre des leçons injectées) — toujours identiquement, sans exception ni override.
-        # "real" est une étiquette de confiance décidée consciemment côté front, pas une
-        # promesse technique sur la fiabilité des outils C++ : ne la passer à "real" que quand
-        # ils ne sont plus des générateurs aléatoires de test.
+        self.learner = None
         self.environment: str = "simulated"  # 'simulated' ou 'real'
-        self.session_memory = None   # Référence à SessionMemory (définie dans orchestrator)
+        self.session_memory = None
         self.presentator_detail_level = "brief"   # "brief" ou "detailed"
-        self.current_signatures = []  # Stockage des signatures de la mission en cours
+        self.current_signatures = []
         self.solver_registry: Dict[str, Dict] = {}
-            # Clé = solver_id (string)
-            # Valeur = {
-            #   "signatures": List[MissionSignature],
-            #   "similar_missions": Optional[List[Dict]]  # résultat du retriever (mis en cache)
-            # }
-        # DEPRECATED pour l'observabilité : cet attribut est "sticky" (jamais remis à None
-        # après la fin d'une mission), donc plus AUCUN code d'observabilité/logging ne doit
-        # le lire (il fuit sur les tours directs suivants). Utiliser exclusivement
-        # `execution_context.get("mission_id")`, qui est scopé et se nettoie tout seul.
-        # Conservé uniquement pour compatibilité descendante d'éventuels autres usages.
-        self.current_mission_id = None  # Stockage du mission_id de la mission en cours
-        # Compteur d'extensions de profondeur accordées, par mission_id — voir
-        # Orchestrator.request_depth_extension / MAX_DEPTH_EXTENSIONS. Volontairement
-        # jamais purgé automatiquement (une mission_id ne se réutilise pas).
+        self.current_mission_id = None
         self.depth_extensions_granted: Dict[str, int] = {}
         self.execution_context = ExecutionContext()
         self.embedding_manager = EmbeddingProviderManager()
-        self.active_embedding_model: Optional[str] = None  # ID du modèle choisi par l'user
+        self.active_embedding_model: Optional[str] = None
 
-        self.embedding_manager = EmbeddingProviderManager()
-        self.active_embedding_model: Optional[str] = None  # ID du modèle actif
         self.auto_learn_enabled = True
 
         self.execution_markers = {
@@ -61,9 +43,9 @@ class RuntimeState:
         }
 
         # --- DISCOVERY FRAMEWORK ---
-        self.cache_manager = None  # Sera initialisé par l'Orchestrator
-        self.discovery_llm = None   # LLM dédié pour les SemanticTools (ou None pour utiliser le LLM de l'entité)
-        self.discovery_engine = None  # Instance du DiscoveryEngine (initialisé dans orchestrator)            
+        self.cache_manager = None
+        self.discovery_llm = None
+        self.discovery_engine = None            
         
     def reset_execution_markers(self):
         """Réinitialise les marqueurs d'exécution pour une nouvelle mission."""
@@ -87,7 +69,6 @@ class RuntimeState:
         elif key in ('has_abstract_task', 'plan_rejected', 'is_novel'):
             if value:
                 self.execution_markers[key] = True
-            # Si value est False, on ne fait rien (ne jamais désactiver un flag)
         else:
             self.execution_markers[key] = value
 
@@ -100,4 +81,3 @@ class RuntimeState:
     def set_discovery_engine(self, engine):
         """Définit le DiscoveryEngine."""
         self.discovery_engine = engine
-        

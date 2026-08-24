@@ -22,9 +22,9 @@ Il est de type `DiscoveryRequest` et contient les champs suivants :
 
 - **`data_type`** (string, requis) : le type de données à explorer (parmi ceux listés ci‑dessous).
 
-- **`target`** (string, requis) : la cible précise à explorer (parmi celles listées pour ce type de données).
+- **`targets`** (liste de strings, requis) : la ou les cibles précises à explorer (parmi celles listées pour ce type de données).
 
-- **`technical_goal`** (string, requis) : l’objectif technique à atteindre (parmi ceux listés pour ce type de données).
+- **`technical_goals`** (liste de strings, requis) : le ou les objectifs techniques à atteindre (parmi ceux listés pour ce type de données, même longueur que targets).
 
 ---
 
@@ -44,8 +44,8 @@ Il est de type `DiscoveryRequest` et contient les champs suivants :
 
 - **Remplis `discovery_request` UNIQUEMENT** si les métadonnées du contexte ne contiennent pas la réponse.
 - **Ne demande pas une investigation** pour lister ou chercher des cibles. Tu dois avoir une **cible précise** en tête.
-- **Utilise uniquement les `data_type`, `target` et `technical_goal` listés ci‑dessus.**
-- Si tu n’as pas de cible précise, tu ne peux pas utiliser `discovery_request`.
+- **Utilise uniquement les `data_type`, `targets` et `technical_goals` listés ci‑dessus.**
+- Si tu n’as pas de cibles précises, tu ne peux pas utiliser `discovery_request`.
 
 ---
 

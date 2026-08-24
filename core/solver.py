@@ -125,13 +125,6 @@ class Solver(Supervisor, Entity):
         )
         self.executor = Executor(solver_node=self)
 
-    # =====================================================
-    # VUE NORMALISÉE DU REGISTRE (METTRE À JOUR POUR UTILISER LES TYPES STOCKÉS)
-    # =====================================================
-
-    # Dans solver.py, la méthode _get_registry_metadata_view doit utiliser le champ 'type' stocké.
-    # Voici la version corrigée :
-
     def _get_registry_metadata_view(self) -> Dict[str, Any]:
         view = {}
         for key, info in self.variable_registry.items():
@@ -185,10 +178,6 @@ class Solver(Supervisor, Entity):
             return "object"
         return "unknown"
 
-    # =====================================================
-    # MÉTHODES EXISTANTES (inchangées)
-    # =====================================================
-
     def assign_signatures(self, signatures: List[MissionSignature]) -> None:
         self.signatures = signatures
         self.runtime_state.solver_registry[self.id] = {
@@ -201,7 +190,8 @@ class Solver(Supervisor, Entity):
         with self.runtime_state.execution_context.scope(
             solver_id=self.id,
             depth=self.depth,
-            parent_solver_id=self.parent.id if hasattr(self.parent, 'id') else None
+            parent_solver_id=self.parent.id if hasattr(self.parent, 'id') else None,
+            attempt_number=None,
         ):
             if self.runtime_state.cancel_requested:
                 return SolverResult(
@@ -307,11 +297,10 @@ class Solver(Supervisor, Entity):
                     Logger.warning(f"[Solver:{self.id}] 🛑 Objectif impossible. Raison : {decision.reason}")
                     self.execution_tree.ended_at = time.time()
                     self.execution_tree.status = "failed"
-                    # Enrichir le contexte avec la raison de l'échec
                     enriched_context = self.context + f"\n\n[RAISON DE L'ÉCHEC] {decision.reason}"
                     return SolverResult(
                         status=ExecutionStatus.FAILED,
-                        final_context=enriched_context,  # <-- on utilise le contexte enrichi
+                        final_context=enriched_context,
                         error_reason=decision.reason,
                         execution_tree=self.execution_tree
                     )
@@ -385,7 +374,6 @@ class Solver(Supervisor, Entity):
                                 "max_attempts": MAX_PREEXECUTION_FAILURES
                             })
 
-                            # --- CORRECTION : vérifier si proposed_plan existe ---
                             if proposed_plan is not None:
                                 rejected_plan_summary = self._summarize_plan(proposed_plan)
                             else:
@@ -405,7 +393,7 @@ class Solver(Supervisor, Entity):
                             continue
                         except ValueError as plan_error:
                             self.runtime_state.update_marker("plan_rejected", True)
-                            error_msg = str(plan_error)  # <-- Défini ici
+                            error_msg = str(plan_error)
                             Logger.warning(f"[Solver:{self.id}] ⚠️ Plan invalide (Validation personnalisée) : {plan_error}")
                             if hasattr(self, 'planner') and hasattr(self.planner, '_last_proposed_plan'):
                                 Logger.debug(f"[Solver:{self.id}] Plan rejeté : {self.planner._last_proposed_plan}")
@@ -446,19 +434,10 @@ class Solver(Supervisor, Entity):
                             self.current_attempt.failure_reason = _("Annulation demandée")
                             break
 
-                        # On exclut la tentative COURANTE (déjà ajoutée à l'arbre juste
-                        # au-dessus, ligne 346) : previous_attempts doit ne contenir que
-                        # les tentatives VRAIMENT antérieures, pour la détection de
-                        # motifs récursifs dans PlanValidator.
                         previous_attempts = self.execution_tree.attempts[:-1] if self.execution_tree else []
                         validation_outcome = await self.validate_plan(
                             proposed_plan, self.id, previous_attempts=previous_attempts
                         )
-                        # Compat : validate_plan pouvait historiquement renvoyer un bool
-                        # nu (avant l'introduction de PlanValidationOutcome). __bool__
-                        # est défini dessus, donc `not validation_outcome` fonctionne
-                        # dans les deux cas — mais on ne peut lire `.reason` que sur le
-                        # nouvel objet.
                         is_valid = bool(validation_outcome)
                         rejection_reason = getattr(
                             validation_outcome, "reason", _("Plan refusé par le superviseur")
@@ -476,12 +455,7 @@ class Solver(Supervisor, Entity):
                             self.current_attempt.outcome = "failed"
                             self.current_attempt.failure_class = FailureClass.PLAN_REJECTED_SUPERVISOR
                             self.current_attempt.failure_reason = rejection_reason
-                            self.current_attempt.target_entity = "Orchestrator"
-                            # Le Planner voit maintenant POURQUOI le plan a été refusé
-                            # (rules.md, pattern récursif détecté, confirmation humaine
-                            # refusée...) au lieu d'un message générique — condition
-                            # nécessaire pour qu'il puisse réellement adapter son
-                            # prochain essai plutôt que de le répéter à l'identique.
+                            self.current_attempt.target_entity = "Validator"
                             self.context += _("\n[Échec] Plan refusé par le Superviseur : {reason}").format(reason=rejection_reason)
                             self._preexecution_failures += 1
                             if self._preexecution_failures >= MAX_PREEXECUTION_FAILURES:
@@ -611,10 +585,6 @@ class Solver(Supervisor, Entity):
                     del self.runtime_state.solver_registry[self.id]
                     Logger.debug(f"[Solver:{self.id}] Entrée supprimée du registre.")
 
-    # =====================================================
-    # MÉTHODES UTILITAIRES (inchangées)
-    # =====================================================
-
     def _summarize_plan(self, plan: Plan) -> str:
         """Génère un résumé concis d'un plan pour le feedback."""
         lines = ["Structure du plan rejeté :"]
@@ -625,7 +595,6 @@ class Solver(Supervisor, Entity):
                 f"expected={step.expected_result}, "
                 f"tool={getattr(step, 'tool_name', 'None')}"
             )
-        # Variables utilisées dans les conditions et réponses
         used_vars = set()
         for step in plan.steps:
             for field in [step.execute_if, step.response_text, step.tool_args_json]:
@@ -650,11 +619,23 @@ class Solver(Supervisor, Entity):
         tools_view = await self.runtime_state.tools_manager.get_tools_view(goal_query=self.goal)
         formatted_tools = [f"- {t['name']} ({t['role']}): {t['description']}" for t in tools_view]
 
-        # --- NOUVEAU : construire la vue du registre ---
         registry_view = self._get_registry_metadata_view()
-        registry_text = self._format_registry_metadata(registry_view)  # méthode à ajouter
+        registry_text = self._format_registry_metadata(registry_view)
 
         loader = get_prompt_loader()
+        if hasattr(self, '_cached_advice') and self._cached_advice is not None:
+            advice = self._cached_advice
+        else:
+            advice = ""
+            if hasattr(self.runtime_state, 'learner') and self.runtime_state.learner:
+                try:
+                    advice = await self.runtime_state.learner.get_advice(
+                        entity_types=["Solver"], goal=self.goal
+                    )
+                    self._cached_advice = advice
+                except Exception as e:
+                    Logger.error(f"[Solver:{self.id}] Erreur récupération des conseils : {e}")
+
         prompt = loader.load(
             "feasibility.md",
             lang=self.runtime_state.language,
@@ -662,7 +643,8 @@ class Solver(Supervisor, Entity):
             context=self.context,
             tools="\n".join(formatted_tools),
             similar_missions=similar_missions_context,
-            registry=registry_text  # <-- NOUVEAU
+            registry=registry_text,
+            advice=advice
         )
 
         decision: FeasibilityDecision = await self.llm.generate_structured(
@@ -709,21 +691,35 @@ class Solver(Supervisor, Entity):
     async def validate_plan(
         self, plan: Plan, child_solver_id: str, previous_attempts: Optional[List] = None
     ):
-        ancestor_chain = self._build_ancestor_chain()
-        return await self.parent.validate_plan(
-            plan, child_solver_id, previous_attempts=previous_attempts, ancestor_chain=ancestor_chain
-        )
+        root_solver = self._get_root_solver()
+        mission_history_tree = root_solver.execution_tree if root_solver else self.execution_tree
+        try:
+            return await self.parent.validate_plan(
+                plan, child_solver_id, previous_attempts=previous_attempts,
+                mission_history_tree=mission_history_tree,
+            )
+        except TypeError as e:
+            if "mission_history_tree" not in str(e):
+                raise
+            Logger.error(
+                f"[Solver:{self.id}] validate_plan : incompatibilité de version détectée "
+                f"({e}) — repli sur l'appel sans mission_history_tree. Vérifier que "
+                f"orchestrator.py/solver.py/plan_validator.py sont bien synchronisés."
+            )
+            return await self.parent.validate_plan(
+                plan, child_solver_id, previous_attempts=previous_attempts
+            )
+
+    def _get_root_solver(self) -> 'Solver':
+        node = self
+        while hasattr(node, "goal") and hasattr(node, "depth") and hasattr(node, "id"):
+            parent = getattr(node, "parent", None)
+            if parent is None or not (hasattr(parent, "goal") and hasattr(parent, "depth") and hasattr(parent, "id")):
+                return node
+            node = parent
+        return self
 
     def _build_ancestor_chain(self) -> List[Dict[str, Any]]:
-        """
-        Chaîne d'ancêtres (racine -> ce Solver), utilisée à la fois par
-        validate_plan (détection de récursion dégénérée ENTRE niveaux
-        imbriqués — un cas que la comparaison aux seules previous_attempts
-        DE CE Solver ne peut pas voir, puisque chaque abstract_task crée un
-        Solver enfant flambant neuf) et par request_depth_extension.
-        S'arrête dès qu'on atteint un ancêtre qui n'a pas la forme d'un
-        Solver (typiquement l'Orchestrateur, qui n'a ni .depth ni .goal).
-        """
         chain = []
         node = self
         while hasattr(node, "goal") and hasattr(node, "depth") and hasattr(node, "id"):
@@ -735,7 +731,14 @@ class Solver(Supervisor, Entity):
         return chain
 
     async def request_depth_extension(self, ancestor_chain: List[Dict[str, Any]], child_solver_id: str) -> bool:
-        return await self.parent.request_depth_extension(ancestor_chain, child_solver_id)
+        try:
+            return await self.parent.request_depth_extension(ancestor_chain, child_solver_id)
+        except TypeError as e:
+            Logger.error(
+                f"[Solver:{self.id}] request_depth_extension : incompatibilité de version "
+                f"détectée ({e}) — extension refusée par prudence plutôt que de planter la mission."
+            )
+            return False
 
     def _format_registry_metadata(self, registry_view: dict) -> str:
         """Formate la vue des métadonnées du registre pour l'affichage dans un prompt."""
@@ -752,9 +755,6 @@ class Solver(Supervisor, Entity):
         await self.parent.report_critical_failure(error_context, child_solver_id)
 
     async def execute_tool(self, tool_name: str, arguments: dict) -> str:
-        """
-        Délègue l'exécution de l'outil au ToolsManager en passant le LLM du Solver.
-        """
         return await self.runtime_state.tools_manager.execute_tool(
             tool_name, arguments, llm=self.llm
         )

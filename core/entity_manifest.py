@@ -1,19 +1,7 @@
 """
-entity_manifest.py
+core/entity_manifest.py
 ===================
 Registre STATIQUE des entités connues du moteur et de leur rôle.
-
-Ce n'est pas de la connaissance apprise, c'est de la configuration déclarée
-par le développeur : le nombre d'entités est petit, fixe, et connu à la
-conception (en ajouter une = un changement de code, pas un événement
-runtime). Ça ne vit donc pas dans une table SQLite ni dans une classe
-mutable — un simple dict suffit et évite de faire passer pour "appris" ce
-qui est en réalité déclaré une fois pour toutes.
-
-Le Learner consulte ce manifeste pour donner au LLM d'analyse le contexte
-organisationnel qui lui manquait ("tu analyses un échec du Planner, dont le
-rôle est de...") au lieu de raisonner sur un failure_class nu, sans savoir
-qui a réellement fauté ni ce que cette entité est censée faire.
 """
 from typing import Optional, Dict
 
@@ -52,14 +40,17 @@ ENTITY_MANIFEST: Dict[str, str] = {
         "Erreurs typiques : échec de génération du rapport, ton ou niveau de "
         "détail inadapté au contexte (dev vs production)."
     ),
+    "Validator": (
+        "Juge de conformité des plans avant exécution (LLM Judge). Analyse les plans "
+        "proposés par les Solvers par rapport aux règles de conformité (rules.md), "
+        "évalue leur niveau de risque et valide la cohérence par rapport aux critères. "
+        "Erreurs typiques : validation d'un plan non conforme, rejet abusif d'un plan valide."
+    ),
 }
-
 
 def get_entity_role(entity_type: Optional[str]) -> str:
     """
-    Retourne la description du rôle d'une entité, ou une phrase neutre si
-    l'entité n'est pas (encore) répertoriée — ne jamais lever d'exception ici,
-    le manifeste est un enrichissement du prompt, pas une validation bloquante.
+    Retourne la description du rôle d'une entité.
     """
     if not entity_type:
         return "Entité non identifiée avec certitude."

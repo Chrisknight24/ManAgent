@@ -367,24 +367,6 @@ class Executor:
         from .solver import Solver, MAX_DEPTH
 
         if self.solver.depth >= MAX_DEPTH:
-            # Au lieu d'avorter systématiquement : on construit la chaîne
-            # d'ancêtres (racine -> Solver courant, uniquement des Solvers —
-            # on s'arrête dès qu'on atteint l'Orchestrateur, qui n'a ni
-            # .depth ni .goal de la même forme) et on demande au juge de
-            # l'Orchestrateur si cette profondeur reflète une décomposition
-            # légitime d'un problème complexe, ou un motif récursif dégénéré.
-            #
-            # Note de conception : on ne "réinitialise" PAS self.solver.depth
-            # (qui doit rester le reflet fidèle de la vraie profondeur de
-            # l'arbre, notamment pour l'observabilité). Une extension
-            # accordée permet seulement de franchir CE contrôle précis ; le
-            # Solver enfant créé aura quand même depth+1, donc si LUI aussi
-            # tente un abstract_task au-delà de MAX_DEPTH, une NOUVELLE
-            # extension sera redemandée — et Orchestrator.request_depth_
-            # extension plafonne le nombre total d'extensions accordées par
-            # mission, indépendamment de l'avis du juge à chaque fois. Sans
-            # ce plafond absolu, un juge trompé de façon répétée pourrait
-            # neutraliser complètement le garde-fou de profondeur.
             ancestor_chain = self.solver._build_ancestor_chain()
 
             try:
@@ -403,18 +385,6 @@ class Executor:
 
         Logger.info(f"[Executor] 🌀 Déploiement d'un sous-agent pour l'identifiant [{step.id}]")
 
-        # BUG CORRIGÉ (root cause d'une boucle infinie observée en test réel) :
-        # step.step_context et step.description peuvent contenir des références
-        # $@_nom (ex: "$@_data_target_apps") destinées à transmettre au Solver
-        # enfant des données déjà résolues par le PARENT. Elles n'étaient
-        # JAMAIS interpolées avant d'être transmises — le Planner enfant
-        # recevait donc littéralement la chaîne "$@_data_target_apps" au lieu
-        # de la vraie liste d'applications. Sans donnée concrète sur laquelle
-        # agir, il ne pouvait que re-déléguer à un nouvel abstract_task avec
-        # un objectif tout aussi vague — qui reproduisait le même placeholder
-        # non résolu, indéfiniment. L'interpolation utilise le registre du
-        # solver PARENT (self, ici) — c'est lui qui détient la valeur, pas
-        # l'enfant, qui n'a pas encore de registre à ce stade.
         interpolated_step_context = self._interpolate_text(step.step_context, for_json=False) if step.step_context else ""
         interpolated_goal = self._interpolate_text(step.description, for_json=False)
 
@@ -502,14 +472,12 @@ class Executor:
         if step.tool_name == "tool_manager":
             tool_args_raw = tool_args.copy()
             Logger.debug(f"[Executor] tool_manager appelé avec arguments bruts : {tool_args_raw}")
-            # PASSER LE REGISTRE DU SOLVER AU RUNTIME_STATE (via le solver)
             self.solver.runtime_state._solver_registry_for_tools = self.solver.variable_registry
         else:
             tool_args_raw = self._interpolate_dict(tool_args, for_json=True)
 
         hardware_result_str = await self.solver.execute_tool(step.tool_name, tool_args_raw)
 
-        # --- NETTOYER L'ATTRIBUT TEMPORAIRE ---
         if step.tool_name == "tool_manager":
             self.solver.runtime_state._solver_registry_for_tools = None
 
@@ -548,7 +516,7 @@ class Executor:
                     )
 
                 self.solver.variable_registry[data_var_name] = {
-                    "value": actual_data,  # peut être None
+                    "value": actual_data,
                     "description": data_description,
                     "source": self.solver.id,
                     "timestamp": datetime.now().isoformat()
@@ -616,7 +584,8 @@ class Executor:
                 prompt=prompt,
                 schema=ConvergenceDecision,
                 tag="ConvergenceDecision",
-                mission_id=mission_id
+                mission_id=mission_id,
+                with_discovery=False
             )
         except Exception as e:
             Logger.error(f"[Executor] 🔥 Panne de l'infrastructure de validation sémantique à l'étape [{step.id}] : {str(e)}")

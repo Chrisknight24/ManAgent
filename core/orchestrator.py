@@ -13,6 +13,7 @@ from core.runtime_state import RuntimeState
 from core.constants import Events, Actions, Providers, OrchestratorMode
 
 from memory.history import ConversationMemory
+from core.context_manager import ContextManager
 from providers.gemini_provider import GeminiProvider
 from providers.groq_provider import GroqProvider
 from providers.openai_provider import OpenAIProvider
@@ -88,6 +89,7 @@ class Orchestrator(Supervisor, Entity):
         self.event_bus = event_bus
         self.runtime_state = runtime_state
         self.memory = ConversationMemory()
+        self.context_manager = ContextManager()
 
         self.active_sessions = {}
         self.current_execution_context = {}
@@ -194,11 +196,17 @@ class Orchestrator(Supervisor, Entity):
                     "finished_at": ep.get("finished_at", "N/A")
                 })
 
-        # Enregistrer le DataProvider pour l'historique des missions de cette session
+        # Enregistrer le DataProvider pour l'historique des missions et les faits de cette session
         if self.runtime_state.discovery_engine:
             mission_history_provider = MissionHistoryProvider(session_id, self.mission_store)
             self.register_data_provider("missions", mission_history_provider)
             Logger.debug(f"[Orchestrator] MissionHistoryProvider enregistré pour la session {session_id}")
+
+            if self.runtime_state.learner and hasattr(self.runtime_state.learner, "lesson_store"):
+                from core.discovery.providers.facts_provider import FactsProvider
+                facts_provider = FactsProvider(self.runtime_state.learner.lesson_store)
+                self.register_data_provider("facts", facts_provider)
+                Logger.debug(f"[Orchestrator] FactsProvider enregistré pour la session {session_id}")
 
         # --- GESTION DU LLM DE L'ORCHESTRATEUR ---
         if self.llm is None:
@@ -238,8 +246,9 @@ class Orchestrator(Supervisor, Entity):
             self.llm.set_discovery_history(history)
             Logger.debug(f"[Orchestrator] Historique des signatures PD restauré : {len(history)} entrée(s).")
 
-        # 2. Réarmer le système
+        # 2. Réarmer le système avec un nouvel epoch de génération
         self.runtime_state.cancel_requested = False
+        self.runtime_state.generation_epoch = getattr(self.runtime_state, "generation_epoch", 0) + 1
         self.runtime_state.reset_execution_markers()
 
         if not forced_provider or not forced_model:
@@ -257,9 +266,15 @@ class Orchestrator(Supervisor, Entity):
             await self.propagate_event(Events.THINKING_STARTED, {})
 
             try:
-                # 5. Récupérer l'historique de conversation
-                context_list = self.memory.get_context_for_llm(session_id) or []
-                context_str = "\n".join([f"{msg['role']}: {msg['content']}" for msg in context_list]) if context_list else ""
+                # 5. Récupérer et assembler l'historique de conversation sous budget strict
+                context_bundle = self.context_manager.assemble_orchestrator_context(
+                    memory=self.memory,
+                    session_id=session_id,
+                    user_message=user_message,
+                    recent_turns_limit=6
+                )
+                context_str = context_bundle["history_str"]
+                context_list = context_bundle["recent_messages"]
 
                 # 6. Récupérer les conseils pour l'Orchestrateur (routage)
                 advice_orchestrator = await self._get_orchestrator_advice(user_message)
@@ -496,22 +511,20 @@ class Orchestrator(Supervisor, Entity):
         return outcome.approved
 
     async def _get_orchestrator_advice(self, user_message: str) -> str:
-        # Reranker désactivé pour l'instant.
-        # advice = ""
-        # if hasattr(self.runtime_state, 'learner') and self.runtime_state.learner:
-        #     try:
-        #         advice = await self.runtime_state.learner.get_advice(
-        #             entity_types=["Orchestrator"], goal=user_message
-        #         )
-        #     except Exception as e:
-        #         Logger.error(f"[Orchestrator] Erreur récupération conseils routage : {e}")
-        #         advice = ""
-        # if advice:
-        #     Logger.debug("[Orchestrator] Conseils reçus pour le routage.")
-        # else:
-        #     Logger.debug("[Orchestrator] Aucun conseil reçu pour le routage.")
-        # return advice
-        return ""  # <-- désactivé
+        advice = ""
+        if hasattr(self.runtime_state, 'learner') and self.runtime_state.learner:
+            try:
+                advice = await self.runtime_state.learner.get_advice(
+                    entity_types=["Orchestrator"], goal=user_message
+                )
+            except Exception as e:
+                Logger.error(f"[Orchestrator] Erreur récupération conseils routage : {e}")
+                advice = ""
+        if advice:
+            Logger.debug("[Orchestrator] Conseils reçus pour le routage.")
+        else:
+            Logger.debug("[Orchestrator] Aucun conseil reçu pour le routage.")
+        return advice
 
     async def _route_orchestrator(self, prompt: str, context_list: list, forced_provider: str, forced_model: str) -> OrchestratorDecision:
         if self.llm is None:
@@ -531,6 +544,31 @@ class Orchestrator(Supervisor, Entity):
                 if refined:
                     Logger.debug(f"[Orchestrator] PD effectuée : {len(refined.entries)} entrées.")
             
+            # --- NOUVEAU: Mémorisation sémantique à la volée ---
+            if hasattr(decision, "learned_facts") and decision.learned_facts:
+                if hasattr(self.runtime_state, "learner") and self.runtime_state.learner:
+                    from core.embedding_service import embed_text
+                    
+                    for fact in decision.learned_facts:
+                        try:
+                            # 1. On vectorise le fait sémantique
+                            fact_emb = await embed_text(fact)
+                            
+                            # 2. On l'enregistre en tant que "lesson" durable
+                            self.runtime_state.learner.lesson_store.upsert_lesson(
+                                entity_type="Orchestrator",
+                                scope="semantic_fact",
+                                recommendation=fact,
+                                environment=getattr(self.runtime_state, "environment", "simulated"),
+                                keywords=["user_preference", "semantic_fact"],
+                                mission_id=self.runtime_state.execution_context.get("session_id", "unknown"),
+                                polarity="prefer",
+                                embedding=fact_emb
+                            )
+                            Logger.info(f"[Orchestrator] Nouveau fait sémantique appris : {fact}")
+                        except Exception as e:
+                            Logger.error(f"[Orchestrator] Erreur mémorisation fait sémantique : {e}")
+
             # SUPPRESSION du doublon : l'événement est déjà émis par _call_llm_with_schema
             # On peut garder un log de debug si besoin, mais pas un événement llm_call.
             Logger.debug(f"[Orchestrator] Décision prise en {int((time.monotonic() - routing_started)*1000)} ms.")
@@ -920,7 +958,12 @@ class Orchestrator(Supervisor, Entity):
 
             if mission_cache:
                 mission_cache.summary = summary
-                mission_cache.presentator_result = {"status": "success", "error_reason": None}
+                mission_cache.presentator_result = {
+                    "status": "success",
+                    "user_response": final_response,
+                    "system_summary": summary,
+                    "error_reason": None
+                }
 
         except Exception as e:
             # CAS : ÉCHEC DU PRESENTATOR (fallback rigide)
@@ -1029,7 +1072,7 @@ class Orchestrator(Supervisor, Entity):
         plan: Plan,
         child_solver_id: str,
         previous_attempts: Optional[List[PlanAttempt]] = None,
-        ancestor_chain: Optional[List[Dict[str, Any]]] = None,
+        mission_history_tree: Optional[Any] = None,
     ) -> PlanValidationOutcome:
         """
         Validation finale d'un plan proposé par un Solver, avant exécution.
@@ -1044,12 +1087,8 @@ class Orchestrator(Supervisor, Entity):
         en conséquence pour réinjecter `reason` dans le feedback au Planner
         au lieu du message générique fixe d'avant.
 
-        `ancestor_chain` (NOUVEAU) : chaîne racine -> Solver courant, pour
-        détecter une récursion INTER-niveaux (chaîne d'abstract_task qui
-        redélègue le même objectif reformulé) — invisible à la seule
-        comparaison intra-solver de `previous_attempts`, puisque chaque
-        niveau imbriqué est un Solver flambant neuf. Confirmé nécessaire par
-        un cas réel observé en test (boucle de délégation sans fin).
+        `mission_history_tree` : l'historique complet de la mission
+        transmis par le Solver pour détecter les boucles infinies.
         """
         target_goal = self.current_execution_context.get("refined_goal") or plan.goal
         Logger.info(f"[Orchestrator] ⚖️ Validation du plan du Solver '{child_solver_id}' (objectif cible : '{target_goal}')")
@@ -1060,13 +1099,14 @@ class Orchestrator(Supervisor, Entity):
             rules_text=self._load_rules_md(),
             language=getattr(self.runtime_state, "language", "fr"),
             request_human_confirmation=self._request_human_confirmation,
+            learner=getattr(self.runtime_state, "learner", None),
         )
         outcome = await validator.validate(
             plan=plan,
             child_solver_id=child_solver_id,
             target_goal=target_goal,
             previous_attempts=previous_attempts,
-            ancestor_chain=ancestor_chain,
+            mission_history_tree=mission_history_tree,
         )
 
         Logger.event(
@@ -1161,6 +1201,7 @@ class Orchestrator(Supervisor, Entity):
     async def _handle_chat_stop(self):
         Logger.info("[Orchestrator] 🛑 ARRET D'URGENCE DEMANDE PAR L'UI")
         self.runtime_state.cancel_requested = True
+        self.runtime_state.generation_epoch = getattr(self.runtime_state, "generation_epoch", 0) + 1
         for call_id, future in self.pending_tool_calls.items():
             if not future.done():
                 future.set_result(_('{"result": false, "message": "Exécution interrompue par l\'utilisateur."}'))
@@ -1402,7 +1443,7 @@ class Orchestrator(Supervisor, Entity):
         else:
             Logger.debug("[Orchestrator] DiscoveryEngine déjà existant, réutilisation.")
 
-        # --- TOUJOURS enregistrer le MissionHistoryExplorer ---
+        # --- TOUJOURS enregistrer le MissionHistoryExplorer et FactsExplorer ---
         if self.runtime_state.discovery_engine:
             from core.discovery.explorers.mission_history_explorer import MissionHistoryExplorer
             missions_explorer = MissionHistoryExplorer(
@@ -1411,7 +1452,15 @@ class Orchestrator(Supervisor, Entity):
             )
             self.runtime_state.discovery_engine.register_explorer(missions_explorer)
             Logger.info("[Orchestrator] MissionHistoryExplorer enregistré.")
+
+            from core.discovery.explorers.facts_explorer import FactsExplorer
+            facts_explorer = FactsExplorer(
+                runtime_state=self.runtime_state,
+                entity=self
+            )
+            self.runtime_state.discovery_engine.register_explorer(facts_explorer)
+            Logger.info("[Orchestrator] FactsExplorer enregistré.")
         else:
-            Logger.warning("[Orchestrator] DiscoveryEngine non disponible, impossible d'enregistrer MissionHistoryExplorer.")        
+            Logger.warning("[Orchestrator] DiscoveryEngine non disponible, impossible d'enregistrer les Explorers.")        
         await self.propagate_event(Events.RUNTIME_CONFIGURED, {"available_models": validated_models})
         return ResponsePacket(type="response", status="success", payload={"models_count": len(validated_models)})

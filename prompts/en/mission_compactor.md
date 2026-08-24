@@ -5,14 +5,14 @@ Tu es un expert en analyse de missions. On te donne une nouvelle mission et une 
 ## OBJECTIF DE LA NOUVELLE MISSION
 {{ goal }}
 
-## MISSIONS SIMILAIRES (triées par score décroissant)
+## MISSIONS SIMILAIRES (triées par récence et pertinence)
 {{ missions }}
-+ 
-+ *Note : la section ci-dessus peut inclure des "Leçons" (conseils d'évitement ou de préférence) extraites de ces missions. Tiens-en compte dans ta synthèse pour formuler des recommandations pratiques.*
+
+*Note : la section ci-dessus inclut des annotations de date/récence temporelle ainsi que des "Leçons" (conseils d'évitement ou de préférence) extraites de ces missions. Tiens-en compte dans ta synthèse pour formuler des recommandations pratiques. En cas de divergence de méthode entre deux missions passées, privilégie la stratégie de la mission la plus récente.*
 
 ## RÔLE
-1. **Synthétiser un conseil stratégique** pour le Planner : 
-   - Quelles stratégies ont bien fonctionné dans les missions similaires ?
+1. **Synthétiser un conseil stratégique** pour le Planner / Solver : 
+   - Quelles stratégies ont bien fonctionné dans les missions similaires (surtout les plus récentes) ?
    - Quels pièges ont causé des échecs ?
    - Rédige un conseil clair et exploitable.
 

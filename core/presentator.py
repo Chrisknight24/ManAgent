@@ -8,6 +8,7 @@ vue normalisée avec affichage des booléens et masquage des données.
 
 import asyncio
 from typing import Optional, Dict, Any, List
+import json
 from pydantic import Field
 from core.entity import Entity
 from core.llm import Llm
@@ -15,6 +16,7 @@ from utils.logger import Logger
 from core.prompt_loader import get_prompt_loader
 from core.i18n import _
 from core.discovery.data_provider import DataProvider
+from core.discovery.data_asset import DataAsset
 from core.base_schema import BaseDiscoverySchema
 
 
@@ -23,6 +25,14 @@ class PresentatorOutput(BaseDiscoverySchema):
     user_report: str = Field(..., description="Message long et détaillé à destination de l'utilisateur.")
     summary: str = Field(..., description="Résumé court (1-2 phrases) de l'action clé menée et du résultat principal.")
 
+
+class PresentatorDataAsset(DataAsset):
+    value: Any
+    def dump_data(self) -> str:
+        try:
+            return json.dumps(self.value, ensure_ascii=False)
+        except Exception:
+            return str(self.value)
 
 # ============================================================
 # DataProvider dynamique pour le Presentator (basé sur le RUM ou un registre externe)
@@ -40,6 +50,17 @@ class PresentatorRegistryProvider(DataProvider):
 
     def get_targets(self) -> List[str]:
         return list(self._registry.keys()) if self._registry else []
+
+    def get_asset(self, target: str) -> DataAsset:
+        info = self._registry.get(target, {})
+        value = info.get("value")
+        metadata = {
+            "description": info.get("description", _("Pas de description")),
+            "source": info.get("source", _("Inconnu")),
+            "timestamp": info.get("timestamp", "N/A"),
+            "type": info.get("type", "unknown")
+        }
+        return PresentatorDataAsset(target_id=target, metadata=metadata, value=value)
 
     def get_data(self, target: str) -> Any:
         return self._registry.get(target, {}).get("value")
@@ -106,7 +127,7 @@ class Presentator(Entity):
         """Active la Progressive Disclosure une seule fois avec un DataProvider basé sur le registre."""
         if self._discovery_activated:
             return
-        if not self.runtime_state.discovery_engine:
+        if not getattr(self.runtime_state, "discovery_engine", None):
             return
         if self.llm._discovery_enabled:
             self._discovery_activated = True
@@ -168,7 +189,7 @@ class Presentator(Entity):
         loader = get_prompt_loader()
         prompt = loader.load(
             "presentator_output.md",
-            lang=self.runtime_state.language,
+            lang=getattr(self.runtime_state, "language", "en"),
             goal=goal,
             final_context=final_context,
             variable_registry=registry_metadata_view,  # Vue normalisée

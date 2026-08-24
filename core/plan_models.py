@@ -213,6 +213,12 @@ class OrchestratorDecision(BaseModel):
             "Pour les types 'direct' ou 'mission', mettez‑le à null."
         )
     )
+    learned_facts: List[str] = Field(
+        default_factory=list,
+        description=_("Faits durables et préférences de l'utilisateur déduits de sa demande. "
+                      "Utile pour construire la mémoire sémantique du système. "
+                      "Laissez vide s'il n'y a pas de nouvelle information stable.")
+    )
 
     @model_validator(mode='after')
     def validate_discovery_consistency(self) -> 'OrchestratorDecision':

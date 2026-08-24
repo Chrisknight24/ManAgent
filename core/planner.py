@@ -18,10 +18,6 @@ from core.i18n import _
 from typing import Tuple, List, Optional, Any, Dict
 from core.entity import Entity
 
-# Désactivation temporaire de la Progressive Disclosure pour le Planner
-# (demande explicite : jugée trop lourde pour l'instant sur cette entité).
-# N'affecte QUE le Planner — Orchestrator/Presentator/autres Explorers ne
-# sont pas concernés. Pour réactiver : remettre à True (un seul endroit).
 PLANNER_PD_ENABLED = False
 
 
@@ -80,13 +76,11 @@ class Planner(Entity):
         runtime_state,
         parent: Optional[Entity] = None
     ):
-        # Appel au parent (Entity)
         super().__init__(name=name, role="planner", llm=llm, parent=parent)
         self.runtime_state = runtime_state
         self._cached_advice: Optional[str] = None
         self._last_proposed_plan: Optional[Plan] = None
 
-        # --- Enregistrement du DataProvider pour le registre ---
         if self.runtime_state.discovery_engine:
             registry_provider = PlannerRegistryProvider(self)
             self.register_data_provider("registry", registry_provider)
@@ -95,7 +89,6 @@ class Planner(Entity):
                 .format(name=self.name)
             )
 
-            # --- Activation explicite de la Progressive Disclosure ---
             if PLANNER_PD_ENABLED:
                 if not self.llm._discovery_enabled:
                     self.llm.enable_discovery(self.runtime_state.discovery_engine, self)
@@ -119,16 +112,19 @@ class Planner(Entity):
     async def propose_plan(self, goal: str, context: str, strategy: str, variable_registry: dict) -> Plan:
         Logger.info("[Planner] 🧠 Traduction de la stratégie en plan d'action structuré...")
 
+        fallback_msg = "Aucun conseil historique ou sémantique pertinent disponible pour cette tâche."
         if self._cached_advice is None:
-            self._cached_advice = ""
+            self._cached_advice = fallback_msg
             if hasattr(self.runtime_state, 'learner') and self.runtime_state.learner:
                 try:
-                    self._cached_advice = await self.runtime_state.learner.get_advice(
+                    advice_result = await self.runtime_state.learner.get_advice(
                         entity_types=["Planner", "Executor"], goal=goal
                     )
+                    if advice_result:
+                        self._cached_advice = advice_result
                 except Exception as e:
                     Logger.error(f"[Planner] Erreur récupération des conseils : {e}")
-                    self._cached_advice = ""
+                    self._cached_advice = fallback_msg
         advice = self._cached_advice
         if advice:
             Logger.info(f"[Planner] 💡 Conseil injecté ({len(advice)} caractères).")
@@ -158,12 +154,8 @@ class Planner(Entity):
         proposed_plan: Plan = await self.llm.generate_structured(
             prompt=prompt,
             schema=Plan,
-            tag="Plan"
-            # mission_id n'est plus passé explicitement : _emit_llm_event
-            # (llm.py) le récupère désormais depuis le contexte d'exécution
-            # scopé ambiant, qui est correct par construction (contrairement
-            # à l'ancien `runtime_state.current_mission_id`, jamais remis à
-            # None après la fin d'une mission).
+            tag="Plan",
+            with_discovery=False
         )
 
         try:
@@ -196,7 +188,6 @@ class Planner(Entity):
         for step in plan.steps:
             if step.output_variable_name:
                 created_vars.add(step.output_variable_name)
-                # Convention : bool_xxx => data_xxx automatique
                 if step.output_variable_name.startswith("bool_"):
                     created_vars.add("data_" + step.output_variable_name[5:])
 
@@ -212,7 +203,6 @@ class Planner(Entity):
         for var in used_vars:
             if var in created_vars:
                 continue
-            # Si la variable est de type "data_*", on accepte si le "bool_*" correspondant existe
             if var.startswith("data_"):
                 bool_var = "bool_" + var[5:]
                 if bool_var in created_vars:
@@ -225,7 +215,6 @@ class Planner(Entity):
         # 4. Variables créées mais jamais utilisées (sauf héritées)
         inherited_vars = set(variable_registry.keys()) if variable_registry else set()
         unused_plan_vars = (created_vars - used_vars) - inherited_vars
-        # Filtrer les data_* qui ont leur bool_* utilisé
         filtered_unused = set()
         for var in unused_plan_vars:
             if var.startswith("data_"):
@@ -239,12 +228,10 @@ class Planner(Entity):
 
         # 5. Vérifications spécifiques aux étapes
         for step in plan.steps:
-            # 5a. expected_result="any" => output_variable_name obligatoire
             if step.type == StepType.TOOL_CALL and step.expected_result == "any":
                 if not step.output_variable_name:
                     errors.append(_("L'étape '{}' a expected_result='any' mais ne définit aucun output_variable_name.").format(step.id))
 
-            # 5b. INTERDICTION : définir un output_variable_name dans tool_args_json
             if step.type == StepType.TOOL_CALL and step.tool_args_json:
                 try:
                     args = json.loads(step.tool_args_json)

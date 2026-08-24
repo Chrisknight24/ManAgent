@@ -37,14 +37,9 @@ directement ou indirectement, correspond à l'un des cas suivants :
   déjà en échec pour ce Solver, SANS justification explicite dans sa
   description de ce qui a changé. (Le signal de détection de ce cas est
   fourni automatiquement dans le prompt — voir `pattern_warning`.)
-- **Un plan dont l'objectif (ou une étape `abstract_task`) reformule un
-  objectif déjà porté par un Solver ANCÊTRE, sans action concrète nouvelle**
-  (signal `ancestor_warning`, fourni automatiquement). C'est le cas le plus
-  important à surveiller : chaque niveau pris isolément peut sembler
-  parfaitement cohérent ("structure logique, gère bien succès/échec") — le
-  problème n'est visible qu'en comparant à la chaîne complète, pas au plan
-  seul. Ne validez JAMAIS un plan sur sa seule cohérence interne sans
-  vérifier ce signal.
+- Un plan qui, au vu de l'historique compact de la mission fourni plus bas,
+  répète un sous-objectif déjà tenté et déjà en échec au même niveau, sans
+  rien changer d'utile.
 - Un plan dont l'objectif déclaré (`goal`) diverge manifestement de
   l'objectif cible transmis (`{{ goal }}` dans ce prompt).
 
@@ -80,3 +75,14 @@ directement ou indirectement, correspond à l'un des cas suivants :
   entre étapes que si elles s'exécuteraient réellement EN MÊME TEMPS (aucune
   condition, ou conditions non exclusives) et se contrediraient alors
   vraiment.
+- **Ne jamais rejeter un plan pour "incomplétude" par rapport à un objectif
+  plus large que celui affiché ci-dessus dans `{{ goal }}`.** Un plan
+  proposé par un sous-Solver (issu d'un `abstract_task`) a un mandat
+  volontairement restreint — juger ce plan à l'aune de la mission globale
+  le fait paraître "incomplet" à tort. Jugez UNIQUEMENT si ce plan atteint
+  `{{ goal }}` tel qu'écrit.
+- Ne pas confondre une décomposition légitime (plusieurs sous-tâches qui se
+  ressemblent en surface mais progressent chacune vers un résultat concret)
+  avec une récursion dégénérée (le même sous-objectif réessayé sans rien
+  changer après un échec déjà constaté). L'historique compact fourni plus
+  bas donne les faits pour trancher — pas une similarité de surface.

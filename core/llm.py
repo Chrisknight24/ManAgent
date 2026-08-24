@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 import uuid
+import asyncio
 from contextlib import nullcontext
 from typing import (
     Type, AsyncGenerator, List, Dict, Optional, Union, Any,
@@ -73,14 +74,9 @@ class Llm:
         self._discovery_engine = engine
         self._entity = entity
         self._entity_id = entity.entity_id
-        # L'objet Entity porte déjà `name`/`role` (voir core/entity.py) — on
-        # les garde ici pour pouvoir les injecter explicitement dans le
-        # contexte d'exécution au moment d'une Discovery, plutôt que de ne
-        # transmettre qu'un ID brut que le rapport devrait ensuite deviner.
         self._entity_name = getattr(entity, "name", None)
         self._entity_role = getattr(entity, "role", None)
 
-        # Définir le contexte de données à partir de l'entité
         if hasattr(entity, 'get_data_context'):
             self.set_data_context(entity.get_data_context())
         else:
@@ -142,7 +138,6 @@ class Llm:
                 Logger.debug("[LLM] _build_discovery_section: aucun DataProvider exploitable trouvé.")
                 return ""
 
-            # Charger le template discovery_injection.md
             try:
                 schema_desc = self._get_schema_description(schema)
             except Exception as e:
@@ -167,7 +162,6 @@ class Llm:
             
     def update_discovery_providers(self, providers: Dict[str, 'DataProvider']) -> None:
         """Met à jour la liste des DataProviders (appelé après enregistrement)."""
-        # Conservé pour compatibilité
         pass
 
     def set_system_prompt(self, prompt: str):
@@ -207,7 +201,6 @@ class Llm:
         if not provider:
             raise RuntimeError(_("Provider {provider_id} introuvable.").format(provider_id=self.provider_id))
 
-        # Construire le contexte complet
         full_context = self._build_full_context()
         context_str = "\n".join([msg["content"] for msg in full_context]) if full_context else ""
         full_prompt = f"{context_str}\n\n{prompt}" if context_str else prompt
@@ -215,9 +208,12 @@ class Llm:
         provider.model_name = self.model_id
 
         start_time = time.monotonic()
+        call_epoch = getattr(self.runtime_state, "generation_epoch", 0) if self.runtime_state else 0
         try:
-            # Utiliser la méthode générique generate_response (existe dans tous les providers)
             response = await provider.generate_response(user_message=full_prompt)
+            if self.runtime_state and (self.runtime_state.cancel_requested or getattr(self.runtime_state, "generation_epoch", 0) != call_epoch):
+                Logger.warning(f"[LLM] Résultat generate_text ignoré car la session/génération a été annulée (epoch {call_epoch} vs actuel {getattr(self.runtime_state, 'generation_epoch', 0)}).")
+                raise asyncio.CancelledError("L'appel LLM a été annulé.")
             duration_ms = int((time.monotonic() - start_time) * 1000)
             event_fields = {
                 "tag": tag or "generate_text",
@@ -288,7 +284,8 @@ class Llm:
         prompt: str,
         schema: Type[BaseModel],
         tag: Optional[str] = None,
-        mission_id: Optional[str] = None
+        mission_id: Optional[str] = None,
+        with_discovery: bool = True
     ) -> BaseModel:
         """
         Génère une réponse structurée selon un schéma Pydantic.
@@ -302,16 +299,14 @@ class Llm:
         has_discovery_inheritance = issubclass(schema, BaseDiscoverySchema)
         has_discovery_field = hasattr(schema, "model_fields") and "discovery_request" in schema.model_fields
 
-        if not (has_discovery_inheritance or has_discovery_field):
-            Logger.debug(f"[LLM] Schéma {schema.__name__} ne supporte pas la Progressive Disclosure. Mode legacy.")
+        if not (with_discovery and (has_discovery_inheritance or has_discovery_field)):
+            Logger.debug(f"[LLM] Schéma {schema.__name__} (PD active: {with_discovery}) -> Mode legacy.")
             return await self._generate_structured_legacy(prompt, schema, tag, mission_id)
 
-        # --- État local pour détecter les boucles ---
-        discovery_history = self._discovery_history  # on utilise l'historique global
-        discovery_blocked = False       # True si on a détecté une redondance ou atteint max_iterations
-        prompt_modified = prompt        # prompt original, modifiable pour ajouter des messages système
+        discovery_history = self._discovery_history
+        discovery_blocked = False
+        prompt_modified = prompt
 
-        # Construction initiale de la section PD
         discovery_section = self._build_discovery_section(schema)
         full_prompt = (discovery_section + "\n\n" + prompt_modified) if discovery_section else prompt_modified
 
@@ -319,7 +314,6 @@ class Llm:
         while iteration < self._max_iterations:
             iteration += 1
 
-            # Si le blocage est actif, on force le masquage de la section PD
             if discovery_blocked:
                 full_prompt = self._build_prompt_without_pd(prompt_modified, discovery_blocked)
 
@@ -330,22 +324,19 @@ class Llm:
                 mission_id=mission_id
             )
 
-            # Vérifier si le LLM a demandé une découverte
             if hasattr(result, 'discovery_request') and result.discovery_request is not None:
                 discovery_req = result.discovery_request
 
-                # Construction d'une signature canonique multi‑cibles
                 targets_part = ",".join(discovery_req.targets)
                 goals_part = ",".join(discovery_req.technical_goals)
                 current_signature = f"{discovery_req.data_type}:{targets_part}:{goals_part}"
-                # --- Détection de redondance ---
+                
                 if current_signature in discovery_history:
                     Logger.warning(
                         f"[LLM] Boucle de découverte détectée : signature redondante '{current_signature}'. "
                         f"Activation du blocage de la PD."
                     )
                     discovery_blocked = True
-                    # On ajoute un message système dans le prompt
                     system_msg = (
                         "\n\n⚠️ L'information demandée a déjà été recherchée sans succès. "
                         "Vous ne pouvez plus utiliser `discovery_request`. "
@@ -353,10 +344,8 @@ class Llm:
                         "ou indiquer que l'information n'est pas disponible."
                     )
                     prompt_modified = prompt_modified + system_msg
-                    # On ne réexécute pas la découverte, on continue la boucle
                     continue
 
-                # Ajouter la signature à l'historique
                 discovery_history.append(current_signature)
 
                 Logger.debug(
@@ -368,7 +357,6 @@ class Llm:
                     )
                 )
 
-                # --- Exécution de la découverte (avec capture d'erreur) ---
                 try:
                     refined = await self._execute_discovery(discovery_req)
                     self._last_refined_context = refined
@@ -377,15 +365,11 @@ class Llm:
                     error_msg = f"⚠️ Erreur lors de l'investigation : {str(e)}. Veuillez répondre avec les données disponibles."
                     full_prompt = full_prompt + f"\n\n[ERREUR D'INVESTIGATION]\n{error_msg}"
                     Logger.error(f"[LLM] Erreur lors de l'exécution de la découverte : {e}")
-                    # On continue la boucle pour que le LLM puisse répondre malgré l'erreur
                 continue
 
-            # Si le LLM a répondu sans discovery_request, on a fini
             Logger.debug(_("[LLM] Réponse finale reçue (type: {schema})").format(schema=schema.__name__))
             return result
 
-        # --- Si on arrive ici, max_iterations a été atteint ---
-        # On applique le même mécanisme que la redondance : on bloque la PD et on relance une dernière itération
         if not discovery_blocked:
             Logger.warning(
                 f"[LLM] Nombre maximum d'itérations ({self._max_iterations}) atteint. "
@@ -399,7 +383,6 @@ class Llm:
                 "ou indiquer que l'information n'est pas disponible."
             )
             prompt_modified = prompt_modified + system_msg
-            # On fait une dernière itération avec le prompt modifié
             full_prompt = self._build_prompt_without_pd(prompt_modified, discovery_blocked)
             try:
                 final_result = await self._call_llm_with_schema(
@@ -408,16 +391,13 @@ class Llm:
                     tag=tag,
                     mission_id=mission_id
                 )
-                # On retourne le résultat, même s'il contient encore une discovery_request (on le laisse, mais on ne l'exécute pas)
                 return final_result
             except Exception as e:
-                # En cas d'erreur, on lève une exception explicite qui sera capturée par l'appelant
                 raise RuntimeError(
                     _("Nombre maximum d'itérations ({max_iterations}) atteint sans réponse finale, "
                     "et la dernière tentative a échoué.")
                     .format(max_iterations=self._max_iterations)
                 ) from e
-            
             
     def clear_discovery_history(self):
         self._discovery_history = []
@@ -429,25 +409,19 @@ class Llm:
         Logger.debug(f"[LLM] Historique des signatures défini : {len(self._discovery_history)} entrée(s).")
         
     def _build_prompt_without_pd(self, base_prompt: str, discovery_blocked: bool = True) -> str:
-        """
-        Construit un prompt sans la section Progressive Disclosure, en ajoutant un message d'avertissement.
-        """
         if not discovery_blocked:
-            # Si le blocage n'est pas actif, on peut éventuellement réinsérer la PD (normalement on n'appelle pas cette méthode)
             return base_prompt
-        # On retire toute mention de PD en ne l'incluant pas, et on ajoute un message system
         return base_prompt
 
     def get_last_refined_context(self) -> Optional[RefinedContext]:
         """Retourne le dernier RefinedContext généré par une Progressive Disclosure, puis le réinitialise."""
         ctx = self._last_refined_context
-        self._last_refined_context = None  # Consommation
+        self._last_refined_context = None
         return ctx
 
     # =====================================================
     # MÉTHODES INTERNES
     # =====================================================
-
 
     def _build_full_context(self) -> List[Dict[str, str]]:
         full_context = []
@@ -480,12 +454,6 @@ class Llm:
         if duration_ms is not None:
             event_fields["duration_ms"] = duration_ms
 
-        # --- Propager le mission_id depuis le contexte d'exécution SCOPÉ si non fourni ---
-        # (avant : `getattr(self.runtime_state, 'current_mission_id', None)`, un
-        # attribut global jamais remis à None après la fin d'une mission — donc
-        # collant sur tous les appels LLM structurés suivants, mission ou pas.
-        # `execution_context.get("mission_id")` retombe naturellement à None
-        # hors de tout `scope(mission_id=...)` actif.)
         if mission_id is None and self.runtime_state:
             exec_ctx = getattr(self.runtime_state, 'execution_context', None)
             if exec_ctx:
@@ -496,7 +464,6 @@ class Llm:
         if context is not None:
             event_fields["context"] = context
 
-        # Ajouter solver_id, attempt_number, step_id depuis le contexte d'exécution
         if self.runtime_state:
             exec_ctx = getattr(self.runtime_state, 'execution_context', {})
             if exec_ctx:
@@ -568,10 +535,6 @@ class Llm:
         tag: Optional[str] = None,
         mission_id: Optional[str] = None
     ) -> BaseModel:
-        """
-        Appelle le LLM avec un schéma Pydantic, avec un mécanisme de réessai
-        en cas d'erreur de validation (ValidationError).
-        """
         from pydantic import ValidationError
         max_attempts = 2
 
@@ -587,11 +550,15 @@ class Llm:
                 provider.model_name = self.model_id
 
                 start_time = time.monotonic()
+                call_epoch = getattr(self.runtime_state, "generation_epoch", 0) if self.runtime_state else 0
                 result = await provider.generate_structured_output(
                     prompt=prompt,
                     response_schema=schema,
                     context=ephemeral_context
                 )
+                if self.runtime_state and (self.runtime_state.cancel_requested or getattr(self.runtime_state, "generation_epoch", 0) != call_epoch):
+                    Logger.warning(f"[LLM] Résultat generate_structured ignoré car la session/génération a été annulée (epoch {call_epoch} vs actuel {getattr(self.runtime_state, 'generation_epoch', 0)}).")
+                    raise asyncio.CancelledError("L'appel LLM structuré a été annulé.")
                 duration_ms = int((time.monotonic() - start_time) * 1000)
                 self._emit_llm_event(
                     tag=tag or schema.__name__,
@@ -613,7 +580,6 @@ class Llm:
                 if attempt == max_attempts - 1:
                     raise
 
-                # Construire un message d'erreur détaillé
                 error_details = "\n".join([
                     f"- Champ '{'.'.join(str(loc) for loc in err['loc'])}' : {err['msg']}"
                     for err in e.errors()
@@ -643,7 +609,6 @@ class Llm:
                 data_type=discovery_req.data_type
             ))
 
-        # Vérifier que tous les technical_goals sont disponibles
         available_goals = explorer.get_available_goals()
         for goal in discovery_req.technical_goals:
             if goal not in available_goals:
@@ -658,14 +623,6 @@ class Llm:
 
         data_provider = self._entity.get_data_provider(discovery_req.data_type)
 
-        # Un seul identifiant unique pour TOUTE cette exécution de Discovery
-        # (génération du plan + session), distinct de la signature de cache
-        # (déterministe, donc partagée entre plusieurs invocations
-        # différentes). C'est ce `discovery_run_id`, posé ici dans le scope
-        # ambiant AVANT même d'appeler generate_plan, qui permet au rapport
-        # de rattacher l'appel LLM "explorer_plan_generation" (et tout le
-        # reste : steps, outils, analyze_registry...) à la bonne exécution,
-        # sans avoir à deviner par proximité temporelle.
         run_id = uuid.uuid4().hex
         exec_ctx = getattr(self.runtime_state, 'execution_context', None)
         scope_cm = (
@@ -680,7 +637,6 @@ class Llm:
         )
 
         with scope_cm:
-            # Appel à generate_plan avec les listes
             plan = await explorer.generate_plan(
                 goal=discovery_req.goal,
                 llm=self,
@@ -703,7 +659,6 @@ class Llm:
 
         return refined
 
-    
     def _get_schema_description(self, schema: Type[BaseModel]) -> str:
         json_schema = schema.model_json_schema()
         lines = []

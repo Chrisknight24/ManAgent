@@ -11,7 +11,7 @@ import types
 import pytest
 
 from core.plan_models import Plan, PlanStep, StepType, PlanValidationDecision, RiskLevel
-from core.execution_models import PlanAttempt
+from core.execution_models import PlanAttempt, ExecutionTree, ExecutionNode
 from core.plan_validator import PlanValidator, PlanValidationOutcome
 
 
@@ -313,122 +313,128 @@ def test_outcome_bool_protocol_matches_is_valid():
 
 
 # =====================================================
-# detect_ancestor_goal_recursion (nouveau — cas réel : boucle infinie de
-# délégation abstract_task -> abstract_task avec le même objectif reformulé)
+# summarize_mission_history (remplace detect_ancestor_goal_recursion, dont
+# l'heuristique de similarité de texte produisait des faux positifs
+# documentés sur des décompositions légitimes)
 # =====================================================
 
-def test_no_ancestor_warning_when_chain_empty():
+def _make_node(description, status="success", child_tree=None):
+    return ExecutionNode(
+        step_id="s1", description=description, step_type="tool_call",
+        status=status, child_execution_tree=child_tree,
+    )
+
+
+def test_summary_handles_missing_tree():
     v = make_validator()
-    plan = make_plan(goal="Fermer les fenêtres cibles")
-    assert v.detect_ancestor_goal_recursion(plan, None) is None
-    assert v.detect_ancestor_goal_recursion(plan, []) is None
+    assert "aucun historique" in v.summarize_mission_history(None).lower()
 
 
-def test_no_ancestor_warning_when_goals_are_genuinely_different():
+def test_summary_shows_goal_and_status_of_root():
     v = make_validator()
-    plan = make_plan(goal="Ouvrir l'explorateur de fichiers dans le dossier Téléchargements")
-    ancestor_chain = [
-        {"depth": 0, "goal": "Nettoyer le bureau de l'utilisateur", "solver_id": "root"},
-        {"depth": 1, "goal": "Identifier les fichiers temporaires à supprimer", "solver_id": "s1"},
-    ]
-    assert v.detect_ancestor_goal_recursion(plan, ancestor_chain) is None
+    tree = ExecutionTree(solver_id="root", goal="Créer un jeu Snake", status="running")
+    summary = v.summarize_mission_history(tree)
+    assert "Créer un jeu Snake" in summary
+    assert "running" in summary
 
 
-def test_known_limitation_genuine_paraphrase_not_reliably_caught():
-    # LIMITE CONNUE, documentée volontairement par un test plutôt que
-    # silencieusement : difflib compare la similarité de CARACTÈRES, pas le
-    # sens. Une vraie paraphrase sémantique (mêmes mots-clés, syntaxe très
-    # différente) peut passer sous le seuil, contrairement à une répétition
-    # quasi-verbatim (le cas réellement observé en production). Une
-    # amélioration future pourrait réutiliser le SentenceTransformerProvider
-    # déjà présent dans le stack (embeddings, cf. Retriever) pour une
-    # similarité sémantique au lieu d'une similarité de caractères — pas
-    # fait ici pour rester une dépendance stdlib-only, légère et testable
-    # sans mock d'un modèle d'embeddings.
+def test_summary_shows_failed_attempt_with_reason():
     v = make_validator()
-    plan = make_plan(goal="Fermer toutes les applications ouvertes de l'utilisateur")
-    ancestor_chain = [
-        {"depth": 0, "goal": "Fermer les fenêtres et processus des applications utilisateur cibles identifiées", "solver_id": "root"},
-    ]
-    warning = v.detect_ancestor_goal_recursion(plan, ancestor_chain)
-    # Ce test documente l'état actuel (None = non détecté) — s'il se met à
-    # détecter un jour (seuil ajusté, ou passage à une similarité
-    # sémantique), il faudra explicitement mettre ce test à jour plutôt que
-    # de le laisser échouer par surprise.
-    assert warning is None
+    attempt = PlanAttempt(
+        attempt_number=1, outcome="failed",
+        failure_reason="L'étape 'step_4' a expected_result='any' sans output_variable_name.",
+    )
+    tree = ExecutionTree(solver_id="root", goal="Ouvrir le navigateur", status="running", attempts=[attempt])
+    summary = v.summarize_mission_history(tree)
+    assert "ÉCHEC" in summary
+    assert "output_variable_name" in summary
 
 
-def test_ancestor_warning_on_near_identical_reformulated_goal():
-    # Reproduction directe du cas réel observé en test : chaque niveau
-    # reformule légèrement "fermer les applications/fenêtres cibles" sans
-    # jamais agir concrètement.
+def test_summary_recurses_into_child_execution_tree():
     v = make_validator()
-    plan = make_plan(goal="Fermer l'ensemble des fenêtres et processus applicatifs utilisateur cibles")
-    ancestor_chain = [
-        {"depth": 0, "goal": "Fermer toutes les applications ouvertes de l'utilisateur", "solver_id": "root"},
-        {"depth": 1, "goal": "Fermer les fenêtres et processus des applications cibles identifiées", "solver_id": "s1"},
-    ]
-    warning = v.detect_ancestor_goal_recursion(plan, ancestor_chain)
-    assert warning is not None
-    assert "récursif" in warning or "ANCÊTRE" in warning
+    child = ExecutionTree(solver_id="child", goal="Rechercher sur YouTube", status="success")
+    node = _make_node("Ouvrir le navigateur et chercher", child_tree=child)
+    attempt = PlanAttempt(attempt_number=1, outcome="success", nodes=[node])
+    root = ExecutionTree(solver_id="root", goal="Mission complète", status="running", attempts=[attempt])
+    summary = v.summarize_mission_history(root)
+    assert "Rechercher sur YouTube" in summary  # le sous-arbre enfant apparaît bien
 
 
-def test_ancestor_warning_triggers_on_abstract_task_step_not_just_plan_goal():
-    # Le plan lui-même peut avoir un goal différent (ex: nom de l'étape
-    # parente), mais contenir une étape abstract_task qui, elle, reformule
-    # PRESQUE À L'IDENTIQUE l'objectif d'un ancêtre — c'est CE pattern
-    # précis (quasi-verbatim, pas une vraie paraphrase sémantique) qui a
-    # produit la boucle infinie en test réel : difflib attrape bien le
-    # quasi-identique, pas une reformulation vraiment différente en surface
-    # (voir test_no_ancestor_warning_when_goals_are_genuinely_different et
-    # la limite documentée sur detect_ancestor_goal_recursion).
+def test_summary_caps_display_depth_gracefully():
     v = make_validator()
+    # Empile 6 niveaux d'imbrication pour dépasser max_display_depth (4 par défaut)
+    deepest = ExecutionTree(solver_id="d6", goal="Niveau 6", status="running")
+    current = deepest
+    for i in range(5, 0, -1):
+        node = _make_node(f"Étape niveau {i}", child_tree=current)
+        attempt = PlanAttempt(attempt_number=1, outcome="success", nodes=[node])
+        current = ExecutionTree(solver_id=f"d{i}", goal=f"Niveau {i}", status="running", attempts=[attempt])
+    summary = v.summarize_mission_history(current, max_display_depth=4)
+    assert "profondeur d'affichage atteinte" in summary
+
+
+def test_reproduction_of_reported_false_positive_scenario():
+    """
+    Reproduction directe du cas signalé comme faux positif : un Solver
+    racine dont le plan a UNE étape abstract_task qui ne délègue qu'UNE
+    PARTIE de l'objectif global (ouvrir le navigateur + chercher), le reste
+    (capture d'écran, lecture de fichier) restant à SON niveau. L'ancienne
+    détection par similarité de texte comparait le texte complet de
+    l'objectif racine à celui de l'étape déléguée et les trouvait
+    "similaires à 82 %", concluant à tort à une récursion dégénérée alors
+    qu'aucune tentative n'avait même encore échoué nulle part. Avec
+    l'historique de mission (fait, pas heuristique), rien ne doit indiquer
+    un échec ici puisqu'il n'y en a aucun dans l'arbre.
+    """
+    v = make_validator()
+    root_goal = (
+        "Ouvrir le navigateur, rechercher 'etoo fils' sur YouTube, fermer YouTube, "
+        "prendre une capture d'écran sauvegardée sous screen.png sur le bureau, "
+        "et analyser le fichier a.csv sur le bureau."
+    )
+    # Aucune tentative n'a encore été exécutée à ce stade (c'est la toute
+    # première proposition de plan) : previous_attempts serait vide, ET
+    # l'arbre de mission ne contient encore aucun échec.
+    root_tree = ExecutionTree(solver_id="root", goal=root_goal, status="running", attempts=[])
+    summary = v.summarize_mission_history(root_tree)
+    assert "ÉCHEC" not in summary  # rien n'a échoué, donc rien ne doit ressembler à un signal d'alerte
+
+    # Le plan qui a été refusé à tort dans le cas réel :
     plan = make_plan(
-        goal="Étape de nettoyage du bureau",
+        goal=root_goal,
         steps=[
             make_step("step_1", type_=StepType.ABSTRACT_TASK, tool_name=None),
+            make_step("step_2", tool_name="vision"),
+            make_step("step_3", tool_name="read_file"),
+            make_step("step_4", type_=StepType.DIRECT_ANSWER, tool_name=None),
         ],
     )
-    plan.steps[0].description = "Fermer les fenêtres et processus des applications cibles identifiées"
-    ancestor_chain = [
-        {"depth": 0, "goal": "Fermer les fenêtres et processus des applications utilisateur cibles identifiées", "solver_id": "root"},
-    ]
-    warning = v.detect_ancestor_goal_recursion(plan, ancestor_chain)
-    assert warning is not None
+    plan.steps[0].description = "Ouvrir le navigateur et effectuer la recherche 'etoo fils' sur YouTube."
+    assert plan.steps[0].type == StepType.ABSTRACT_TASK  # sanity check du montage du scénario
 
 
-def test_ancestor_warning_reports_the_best_matching_depth():
-    v = make_validator()
-    plan = make_plan(goal="Fermer les fenêtres et processus applicatifs cibles")
-    ancestor_chain = [
-        {"depth": 0, "goal": "Faire le ménage sur l'ordinateur", "solver_id": "root"},  # peu similaire
-        {"depth": 3, "goal": "Fermer les fenêtres et processus des applications cibles", "solver_id": "s3"},  # quasi identique
-    ]
-    warning = v.detect_ancestor_goal_recursion(plan, ancestor_chain)
-    assert warning is not None
-    assert "profondeur 3" in warning
+async def test_validate_end_to_end_with_real_mission_tree_no_false_positive():
+    root_goal = (
+        "Ouvrir le navigateur, rechercher 'etoo fils' sur YouTube, fermer YouTube, "
+        "prendre une capture d'écran sauvegardée sous screen.png sur le bureau, "
+        "et analyser le fichier a.csv sur le bureau."
+    )
+    root_tree = ExecutionTree(solver_id="root", goal=root_goal, status="running", attempts=[])
 
+    plan = make_plan(
+        goal=root_goal,
+        steps=[
+            make_step("step_1", type_=StepType.ABSTRACT_TASK, tool_name=None),
+            make_step("step_2", tool_name="vision"),
+        ],
+    )
+    plan.steps[0].description = "Ouvrir le navigateur et effectuer la recherche 'etoo fils' sur YouTube."
 
-async def test_validate_end_to_end_rejects_on_ancestor_recursion_signal():
-    # Bout-en-bout : même si le LLM (mocké ici) suit l'instruction du prompt
-    # de rejeter quand ancestor_warning est présent, on vérifie que le
-    # signal est bien PASSÉ AU PROMPT — condition nécessaire pour que le
-    # juge puisse s'en servir.
-    llm = ScriptedLlm(response=PlanValidationDecision(
-        is_conformant=False,
-        reason="Ce plan ne fait que redéléguer le même objectif que l'ancêtre à la profondeur 1, sans action concrète nouvelle.",
-        risk_level=RiskLevel.LOW,
-    ))
+    llm = ScriptedLlm(response=PlanValidationDecision(is_conformant=True, reason="ok"))
     v = make_validator(llm=llm)
-    plan = make_plan(goal="Fermer les fenêtres et processus applicatifs cibles")
-    ancestor_chain = [
-        {"depth": 1, "goal": "Fermer les fenêtres et processus des applications cibles identifiées", "solver_id": "s1"},
-    ]
 
-    outcome = await v.validate(plan, "solver-X", target_goal="Nettoyer le bureau", ancestor_chain=ancestor_chain)
+    outcome = await v.validate(plan, "root", target_goal=root_goal, mission_history_tree=root_tree)
 
-    assert outcome.is_valid is False
+    assert outcome.is_valid is True  # plus de faux positif : rien dans l'historique ne justifiait un refus
     prompt = llm.calls[0]["prompt"]
-    assert "récursion inter-niveaux" not in prompt  # ce texte est dans le TEMPLATE réel, pas le FakePromptLoader du test
-    # Le point qui compte vraiment : le signal calculé est bien remonté jusqu'au prompt.
-    assert "ancestor_warning=" in prompt
+    assert "mission_history_summary=" in prompt  # l'historique factuel est bien transmis au juge

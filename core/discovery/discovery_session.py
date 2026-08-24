@@ -231,17 +231,20 @@ class DiscoverySession:
             return {"success": False, "data": "Aucun LLM disponible pour les étapes sémantiques."}
         try:
             targets_str = ", ".join(self.plan.targets) if self.plan.targets else "inconnue"
+            workspace_context = self._generate_summary_from_workspace()
             prompt = self._prompt_loader.load(
                 "discovery_semantic.md",
                 lang=getattr(self.runtime_state, "language", "en"),
                 data_type=self.plan.data_type,
                 target=targets_str,
+                workspace_context=workspace_context,
                 question=step.question
             )
         except Exception as e:
             Logger.error(f"[DiscoverySession:{self.session_id}] Erreur chargement prompt : {e}")
             targets_str = ", ".join(self.plan.targets) if self.plan.targets else "inconnue"
-            prompt = f"Contexte : Exploration du type de données '{self.plan.data_type}' sur les cibles {targets_str}.\nQuestion : {step.question}\nRéponds de manière concise et factuelle."
+            workspace_context = self._generate_summary_from_workspace()
+            prompt = f"Contexte : Exploration du type de données '{self.plan.data_type}' sur les cibles {targets_str}.\nDonnées collectées :\n{workspace_context}\nQuestion : {step.question}\nRéponds de manière concise et factuelle."
         try:
             response = await self._llm.generate_text(prompt, tag="discovery_semantic")
             return {"success": True, "data": response}

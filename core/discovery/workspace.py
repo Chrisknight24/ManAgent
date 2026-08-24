@@ -17,7 +17,7 @@ import json
 # prompt de l'Orchestrateur — c'est la source du "gaspillage de tokens".
 # On borne donc la taille stockée ICI, à la source, pour protéger tous les
 # consommateurs en aval en un seul endroit.
-MAX_ENTRY_ANSWER_CHARS = 4000
+MAX_ENTRY_ANSWER_CHARS = 50000
 
 
 def _cap_answer(answer: str, max_chars: int = MAX_ENTRY_ANSWER_CHARS) -> str:

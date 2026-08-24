@@ -1,5 +1,5 @@
 """
-entity.py
+core/entity.py
 =========
 Définit le concept d'Entité (Employé) dans l'architecture d'Entreprise.
 Version corrigée : retrait de l'activation automatique de la Progressive Disclosure,

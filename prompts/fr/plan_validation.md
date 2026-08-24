@@ -7,9 +7,15 @@ aux critères ci-dessous, et tu évalues son niveau de risque.
 
 ---
 
-## 🎯 Objectif cible de la mission
+## 🎯 Objectif de CE plan (pas de la mission globale)
 
 {{ goal }}
+
+⚠️ Si ce plan a été proposé par un sous-Solver (délégation via
+`abstract_task`), cet objectif est volontairement RESTREINT à sa part du
+problème — ce n'est PAS l'objectif global de la mission. Ne jugez jamais un
+plan "incomplet" parce qu'il ne couvre pas plus que ce qui est écrit
+ci-dessus : c'est exactement son mandat, ni plus ni moins.
 
 ## 📋 Plan proposé
 
@@ -40,21 +46,21 @@ tentatives précédentes de ce Solver), pas par un jugement — traite-le comme
 un fait à prendre en compte, pas comme une simple suggestion.
 {% endif %}
 
-{% if ancestor_warning %}
-## 🔁 Signal automatique : récursion inter-niveaux détectée (chaîne d'abstract_task)
+## 🗺️ Historique de la mission (vue compacte, depuis la racine)
 
-{{ ancestor_warning }}
+{{ mission_history_summary }}
 
-Ce signal compare l'objectif de CE plan à ceux des Solvers ANCÊTRES (une
-chaîne d'abstract_task imbriqués qui redélègue niveau après niveau, chacun
-étant un Solver neuf, donc invisible au signal ci-dessus). C'est le motif
-concret qui a causé une boucle de délégation sans fin en test réel : à
-chaque niveau, le plan a l'air localement cohérent, mais la CHAÎNE ne
-progresse jamais vers une action concrète. Si ce plan se contente de
-redéléguer le même objectif à un niveau de plus SANS action nouvelle par
-rapport à ce que l'ancêtre visait déjà, rejette-le (is_conformant=false)
-même si, pris isolément, il semble bien structuré.
-{% endif %}
+Cette vue montre tout ce qui a déjà été tenté dans la mission, à tous les
+niveaux, avec le résultat de chaque tentative. Utilise-la pour juger si CE
+plan répète une approche qui a DÉJÀ ÉCHOUÉ plusieurs fois au même niveau
+(récursion dégénérée réelle) — pas simplement parce qu'un objectif "sonne
+comme" un autre. Une mission complexe qui décompose légitimement un
+problème en sous-tâches successives, chacune progressant vers un résultat
+concret, N'EST PAS une récursion à bloquer, même si plusieurs sous-tâches
+se ressemblent en surface (ex: "ouvrir puis configurer" appliqué à
+plusieurs applications différentes). Ne rejette pour récursion que si
+l'historique montre une VRAIE répétition sans progression : le même
+sous-objectif tenté et déjà en échec, réessayé sans rien changer.
 
 {% if declared_irreversible_steps %}
 ## ⚠️ Étapes déclarées irréversibles par le Planner

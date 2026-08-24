@@ -13,7 +13,7 @@ class Supervisor(ABC):
         plan: Plan,
         child_solver_id: str,
         previous_attempts: Optional[List[PlanAttempt]] = None,
-        ancestor_chain: Optional[List[Dict[str, Any]]] = None,
+        mission_history_tree: Optional[Any] = None,
     ):
         """
         Valide un plan avant exécution (le "LLM Judge", voir
@@ -22,9 +22,9 @@ class Supervisor(ABC):
         `reason`/`risk_level`/etc. — pas juste un bool nu comme auparavant,
         pour que l'appelant (Solver) puisse réinjecter une vraie justification
         dans le feedback au Planner plutôt qu'un message générique fixe.
-        `ancestor_chain` : chaîne racine -> Solver courant ({depth, goal,
-        solver_id} par niveau), pour détecter une récursion inter-niveaux
-        invisible à la seule comparaison avec previous_attempts.
+        `mission_history_tree` : racine de l'ExecutionTree de la mission
+        entière (pas seulement ce Solver), pour une vue globale factuelle
+        plutôt qu'une comparaison heuristique de texte entre objectifs.
         """
         pass
 

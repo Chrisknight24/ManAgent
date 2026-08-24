@@ -1,16 +1,33 @@
 """
 core/discovery/providers/mission_history_provider.py
 =====================================================
+
 DataProvider pour l'historique des missions d'une session.
 Expose les missions avec leurs mission_id et la cible spéciale "last_mission".
 """
 
 from typing import List, Any, Dict, Optional
+import json
 from core.discovery.data_provider import DataProvider
+from core.discovery.data_asset import DataAsset
 from core.i18n import _
 from memory.mission_store import MissionStore
 from utils.logger import Logger
 
+class MissionDataAsset(DataAsset):
+    """Asset représentant une mission dans l'historique."""
+    data: Dict[str, Any]
+
+    def dump_data(self) -> str:
+        """
+        Génère une représentation textuelle des données de la mission.
+        Ici, on peut formater l'arbre d'exécution, etc.
+        """
+        # Pour faire simple, on dump en JSON.
+        try:
+            return json.dumps(self.data, indent=2, ensure_ascii=False)
+        except Exception as e:
+            return f"[Erreur de sérialisation: {e}]"
 
 class MissionHistoryProvider(DataProvider):
     """
@@ -30,11 +47,6 @@ class MissionHistoryProvider(DataProvider):
         return "missions"
 
     def get_targets(self) -> List[str]:
-        """
-        Retourne la liste des cibles disponibles.
-        - "last_mission" en premier (si au moins une mission existe).
-        - Puis les mission_id de toutes les missions (du plus récent au plus ancien).
-        """
         if self._cached_targets is None:
             episodes = self._get_episodes()
             targets = []
@@ -44,15 +56,12 @@ class MissionHistoryProvider(DataProvider):
             self._cached_targets = targets
         return self._cached_targets
 
-    def get_metadata(self, target: str) -> Dict[str, Any]:
-        """
-        Retourne les métadonnées d'une mission (goal, status, summary, etc.).
-        """
+    def get_asset(self, target: str) -> DataAsset:
         episode = self._resolve_target(target)
         if not episode:
-            return {}
-
-        return {
+            return MissionDataAsset(target_id=target, metadata={}, data={})
+        
+        metadata = {
             "mission_id": episode.get("mission_id"),
             "goal": episode.get("goal", ""),
             "status": episode.get("status", ""),
@@ -62,12 +71,7 @@ class MissionHistoryProvider(DataProvider):
             "environment": episode.get("environment", ""),
             "refined_goal": episode.get("refined_goal", ""),
         }
-
-    def get_data(self, target: str) -> Any:
-        """
-        Retourne l'épisode complet (arbre d'exécution, registre résolu, etc.).
-        """
-        return self._resolve_target(target)
+        return MissionDataAsset(target_id=target, metadata=metadata, data=episode)
 
     # =====================================================
     # MÉTHODES INTERNES
@@ -77,7 +81,6 @@ class MissionHistoryProvider(DataProvider):
         """Récupère les épisodes de la session, triés du plus récent au plus ancien."""
         if self._cache is None:
             episodes = self.mission_store.get_episodes_by_session(self.session_id)
-            # Trier par date décroissante (les plus récentes en premier)
             episodes.sort(key=lambda e: e.get("created_at", ""), reverse=True)
             self._cache = episodes
         return self._cache
@@ -96,8 +99,6 @@ class MissionHistoryProvider(DataProvider):
             episodes = self._get_episodes()
             if not episodes:
                 return None
-            # Récupère l'épisode parsé via get_episode
             return self.mission_store.get_episode(episodes[0].get("mission_id"))
         else:
-            # mission_id direct
             return self.mission_store.get_episode(target)

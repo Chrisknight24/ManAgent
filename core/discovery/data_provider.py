@@ -1,14 +1,15 @@
 """
 core/discovery/data_provider.py
 ===============================
+
 Définit l'interface DataProvider pour la Progressive Disclosure.
 Un DataProvider expose un type de données, ses cibles, et permet d'accéder
-aux données brutes et métadonnées de manière dynamique (sans copie).
+aux données sous forme de DataAsset.
 """
 
 from abc import ABC, abstractmethod
 from typing import List, Any, Dict
-
+from .data_asset import DataAsset
 
 class DataProvider(ABC):
     """
@@ -18,33 +19,25 @@ class DataProvider(ABC):
 
     @abstractmethod
     def get_data_type(self) -> str:
-        """
-        Retourne le type logique de la donnée (ex: 'registry', 'execution_tree', 'tools_view').
-        Ce type doit correspondre à un Explorer enregistré dans le DiscoveryEngine.
-        """
         pass
 
     @abstractmethod
     def get_targets(self) -> List[str]:
-        """
-        Retourne la liste des cibles disponibles pour ce type de données.
-        Ex: pour 'registry' → ['img_data', 'notepad_status', ...]
-        Ex: pour 'execution_tree' → ['mission_18', 'mission_42', ...]
-        """
         pass
 
     @abstractmethod
+    def get_asset(self, target: str) -> DataAsset:
+        pass
+
+    # Rétrocompatibilité pour les Explorers existants
     def get_data(self, target: str) -> Any:
-        """
-        Retourne la donnée brute pour une cible donnée.
-        Ex: pour 'registry' et 'img_data' → le contenu de la variable.
-        """
-        pass
+        asset = self.get_asset(target)
+        if hasattr(asset, 'data'):
+            return asset.data
+        if hasattr(asset, 'value'):
+            return asset.value
+        return None
 
-    @abstractmethod
     def get_metadata(self, target: str) -> Dict[str, Any]:
-        """
-        Retourne les métadonnées de la cible (description, source, taille, etc.).
-        Utilisé pour enrichir le prompt sans exposer les données brutes.
-        """
-        pass
+        asset = self.get_asset(target)
+        return asset.metadata
