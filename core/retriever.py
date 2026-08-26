@@ -167,21 +167,16 @@ class Retriever:
         results.sort(key=lambda x: x["score"], reverse=True)
         Logger.info(f"[Retriever] {len(results)} mission(s) retournée(s) avec résumé.")
 
-        for result in results:
-            Logger.event(
-                "retriever_results",
-                query_mission_id=query_mission_id,
-                solver_id=solver_id,
-                mission_id=mission_id,
-                found_mission_id=result["mission_id"],
-                goal=result.get("goal"),
-                summary=result.get("summary"),
-                score=result["score"],
-                matched_signature=result.get("matched_signature"),
-                top_k=self.top_k,
-                threshold=self.threshold,
-                embedding_model=active_model
-            )
+        Logger.event(
+            "retriever_search_completed",
+            query_mission_id=query_mission_id,
+            solver_id=solver_id,
+            mission_id=query_mission_id or mission_id,
+            results=results,
+            top_k=self.top_k,
+            threshold=self.threshold,
+            embedding_model=active_model
+        )
 
         if results:
             await self.cache_manager.set(

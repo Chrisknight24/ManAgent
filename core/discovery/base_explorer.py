@@ -24,6 +24,26 @@ class BaseExplorer(ABC):
     def __init__(self, runtime_state: RuntimeState):
         self.runtime_state = runtime_state
         self._name = self.__class__.__name__
+        self._current_data_context: Optional[Any] = None
+
+    def set_data_context(self, data_context: Any) -> None:
+        """Définit le contexte de données courant pour les outils de l'Explorer."""
+        self._current_data_context = data_context
+        
+    def allow_successive_calls(self) -> bool:
+        """
+        Indique si cet Explorer peut être appelé plusieurs fois successivement 
+        dans une même session de Progressive Disclosure.
+        Par défaut, False pour éviter les boucles (l'outil sera masqué après son premier appel).
+        À surcharger pour True sur les outils de pagination ou d'analyse complexe.
+        """
+        return False
+
+    def get_scope_description(self) -> str:
+        """
+        Retourne la mission régalienne et le périmètre métier de cet Explorer pour le LLM.
+        """
+        return ""
 
     @abstractmethod
     def get_data_type(self) -> str:

@@ -1,6 +1,11 @@
+from __future__ import annotations
+
 import asyncio
 import json
-from typing import List, Optional, Tuple
+import os
+import base64
+import mimetypes
+from typing import List, Optional, Tuple, Any, Dict
 from .plan_models import Plan, PlanStep, SolverResult, ExecutionStatus, StepType, ConvergenceDecision
 from core.constants import Events
 from utils.logger import Logger
@@ -13,6 +18,7 @@ from core.execution_models import (
     PlanAttempt,
     FailureClass
 )
+from core.discovery.data_asset import ToolOutputDataAsset
 import time
 
 class Executor:
@@ -130,6 +136,44 @@ class Executor:
                     if step.type == StepType.TOOL_CALL and success and execution_output is not None:
                         node.raw_tool_success = str(execution_output).strip().lower() == "true"
 
+                    if step.type == StepType.DIRECT_ANSWER and success:
+                        step_bool_id = f"bool_{step.id}"
+                        step_data_id = f"data_{step.id}"
+                        base_step_id = re.sub(r'-\d+$', '', step.id)
+                        base_bool_id = f"bool_{base_step_id}"
+                        base_data_id = f"data_{base_step_id}"
+
+                        bool_entry = {
+                            "value": "true",
+                            "description": step.output_variable_desc or _("Statut de l'étape {}").format(step.id),
+                            "source": self.solver.id,
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        data_entry = {
+                            "value": execution_output,
+                            "description": step.output_variable_desc or _("Résultat de l'étape {}").format(step.id),
+                            "source": self.solver.id,
+                            "timestamp": datetime.now().isoformat()
+                        }
+
+                        self.solver.variable_registry[step_bool_id] = bool_entry
+                        self.solver.variable_registry[step_data_id] = data_entry
+                        if base_bool_id != step_bool_id:
+                            self.solver.variable_registry[base_bool_id] = bool_entry
+                        if base_data_id != step_data_id:
+                            self.solver.variable_registry[base_data_id] = data_entry
+
+                        if step.output_variable_name:
+                            base_name = step.output_variable_name
+                            self.solver.variable_registry[base_name] = bool_entry
+                            if base_name.startswith("bool_"):
+                                data_var_name = "data_" + base_name[5:]
+                            else:
+                                data_var_name = base_name + "_data"
+                            self.solver.variable_registry[data_var_name] = data_entry
+                            if step.is_crucial:
+                                self._propagate_crucial_variable(base_name)
+
                     if self.solver.runtime_state.cancel_requested:
                         Logger.warning(f"[Executor] 🛑 Interruption après action de l'étape [{step.id}].")
                         node.status = ExecutionStatus.FAILED
@@ -167,7 +211,7 @@ class Executor:
                             target_entity="Executor"
                         )
 
-                    convergence = await self._check_convergence(step, execution_output)
+                    convergence = await self._check_convergence(step, execution_output, supplemental_data)
 
                     if self.solver.runtime_state.cancel_requested:
                         Logger.warning(f"[Executor] 🛑 Interruption après convergence de l'étape [{step.id}].")
@@ -304,45 +348,129 @@ class Executor:
     # INTERPOLATION (MÉTHODE CENTRALE AMÉLIORÉE)
     # =====================================================
 
+    def _resolve_and_hydrate_asset(self, var_name: str, entry: dict) -> Tuple[str, Any]:
+        """
+        Résout un asset virtuel à partir de son entrée dans variable_registry.
+        Retourne (payload_type, payload) où:
+        - payload_type = "text" ou "binary"
+        - payload = str (pour text) ou {"mime_type": str, "base64": str} (pour binary)
+        """
+        value = entry.get("value")
+        uri = str(value) if value is not None else entry.get("source_uri", "")
+
+        # 1. Chercher dans l'AssetRegistry de la session
+        asset_registry = getattr(self.solver.runtime_state, "current_asset_registry", None)
+        if not asset_registry and hasattr(self.solver, "parent") and hasattr(self.solver.parent, "asset_registries"):
+            session_id = self.solver.runtime_state.execution_context.get("session_id")
+            if session_id and session_id in self.solver.parent.asset_registries:
+                asset_registry = self.solver.parent.asset_registries[session_id]
+
+        asset = asset_registry.resolve_asset(uri) if asset_registry else None
+
+        # 2. Si trouvé dans l'AssetRegistry
+        if asset:
+            mime_type = asset.asset_meta.mime_type if asset.asset_meta else "text/plain"
+
+            raw_data = asset.dump_data()
+            is_text_type = (
+                mime_type.startswith("text/") or
+                mime_type in ("application/json", "application/xml", "application/x-yaml", "text/csv", "generic")
+            )
+            if is_text_type:
+                return "text", raw_data
+            else:
+                b64 = base64.b64encode(raw_data.encode("utf-8", errors="ignore")).decode("utf-8")
+                return "binary", {"mime_type": mime_type, "base64": b64}
+
+        # 3. Fallback ultime
+        return "text", str(value)
+
+    def _find_var_in_registry(self, var_name: str) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+        if not var_name or not hasattr(self.solver, "variable_registry"):
+            return None, None
+        reg = self.solver.variable_registry
+        if var_name in reg:
+            return var_name, reg[var_name]
+        base_var = re.sub(r'-\d+$', '', var_name)
+        if base_var in reg:
+            return base_var, reg[base_var]
+        for k, v in reg.items():
+            if re.sub(r'-\d+$', '', k) == var_name or re.sub(r'-\d+$', '', k) == base_var:
+                return k, v
+        return None, None
+
     def _interpolate_text(self, text: str, for_json: bool = False) -> str:
         """
-        Remplace les références $@_nom dans le texte par la valeur de la variable.
-        Si for_json=True, les valeurs complexes (dict, list) sont sérialisées en JSON.
-        Si for_json=False, on utilise str() pour un affichage lisible.
+        Remplace les références $@_nom et @$_nom dans le texte par la valeur de la variable.
+        Pour les virtual_assets, hydrate l'asset en texte brut ou JSON base64 agnostique.
         """
         if not text:
             return text
         def replace_var(match):
-            var_name = match.group(1)
-            if var_name in self.solver.variable_registry:
-                value = self.solver.variable_registry[var_name]["value"]
+            var_name = match.group(2)
+            matched_key, entry = self._find_var_in_registry(var_name)
+            if entry is not None:
+                value = entry.get("value")
+                var_type = entry.get("type")
+
+                # Virtual Asset (URI, input, file, output, etc.)
+                if var_type == "virtual_asset" or (isinstance(value, str) and ("://" in value or value.startswith("turn_"))):
+                    payload_type, payload = self._resolve_and_hydrate_asset(matched_key or var_name, entry)
+                    if payload_type == "text":
+                        if for_json:
+                            return json.dumps(payload, ensure_ascii=False)
+                        return str(payload)
+                    else: # binary
+                        if for_json:
+                            return json.dumps(payload, ensure_ascii=False)
+                        return f"[Binary Data ({payload.get('mime_type')}): Base64 length {len(payload.get('base64', ''))}]"
+
+                # Cas où la variable est encapsulée dans un DataAsset
+                if isinstance(value, ToolOutputDataAsset) or (isinstance(entry, dict) and entry.get("type") == "asset"):
+                    asset = value if isinstance(value, ToolOutputDataAsset) else entry.get("asset")
+                    uri = asset.get_uri() if asset else f"outputs://{matched_key or var_name}"
+                    if for_json:
+                        return json.dumps(uri, ensure_ascii=False)
+                    return f"[DataAsset URI: {uri}]"
+
                 if for_json:
-                    # Contexte JSON : on sérialise en JSON si possible
                     try:
                         return json.dumps(value, ensure_ascii=False)
                     except TypeError:
                         Logger.warning(f"[Executor] Impossible de sérialiser '{var_name}' en JSON. Utilisation de str().")
                         return str(value)
                 else:
-                    # Contexte textuel : affichage lisible
                     if isinstance(value, (dict, list)):
-                        # Pour les structures, on peut afficher un JSON compact mais lisible
                         return json.dumps(value, ensure_ascii=False)
                     else:
                         return str(value)
             return f"__UNKNOWN_VAR_{var_name}__"
-        return re.sub(r'\$@_([a-zA-Z0-9_]+)', replace_var, text)
+
+        return re.sub(r'(\$@_|@\$_)([a-zA-Z0-9_-]+)', replace_var, text)
 
     def _interpolate_dict(self, obj, for_json: bool = True):
         """
         Parcourt récursivement un objet et interpole les chaînes.
-        Par défaut, on utilise le mode JSON (for_json=True) car appelé pour tool_args_json.
+        Si une valeur correspond exactement à $@_var_name ou @$_var_name et pointe sur un virtual_asset,
+        retourne directement la structure hydratée (brute textuelle ou dictionnaire binaire avec base64).
         """
         if isinstance(obj, dict):
             return {k: self._interpolate_dict(v, for_json) for k, v in obj.items()}
         elif isinstance(obj, list):
             return [self._interpolate_dict(item, for_json) for item in obj]
         elif isinstance(obj, str):
+            match_exact = re.fullmatch(r'(\$@_|@\$_)([a-zA-Z0-9_-]+)', obj.strip())
+            if match_exact:
+                var_name = match_exact.group(2)
+                matched_key, entry = self._find_var_in_registry(var_name)
+                if entry is not None:
+                    var_type = entry.get("type")
+                    val = entry.get("value")
+
+                    if var_type == "virtual_asset" or (isinstance(val, str) and ("://" in val or val.startswith("turn_"))):
+                        payload_type, payload = self._resolve_and_hydrate_asset(matched_key or var_name, entry)
+                        return payload
+
             return self._interpolate_text(obj, for_json)
         else:
             return obj
@@ -417,40 +545,105 @@ class Executor:
             base_name = step.output_variable_name
             status_value = "true" if child_result.status == ExecutionStatus.SUCCESS else "false"
 
-            # --- 1. Création du booléen (inchangé) ---
+        # --- 1. Enregistrement universel par ID d'étape (step_X) ---
+        step_bool_id = f"bool_{step.id}"
+        step_data_id = f"data_{step.id}"
+        base_step_id = re.sub(r'-\d+$', '', step.id)
+        base_bool_id = f"bool_{base_step_id}"
+        base_data_id = f"data_{base_step_id}"
+        status_value = "true" if child_result.status == ExecutionStatus.SUCCESS else "false"
+
+        bool_entry = {
+            "value": status_value,
+            "description": _("Statut de l'étape abstraite {}").format(step.id),
+            "source": child_solver.id,
+            "timestamp": datetime.now().isoformat()
+        }
+        self.solver.variable_registry[step_bool_id] = bool_entry
+        if base_bool_id != step_bool_id:
+            self.solver.variable_registry[base_bool_id] = bool_entry
+
+        # --- 2. Détermination de la valeur et de la description de données ---
+        if child_result.status == ExecutionStatus.SUCCESS:
+            data_value = child_result.response or _("Succès de l'étape abstraite {}").format(step.id)
+            data_description = (
+                step.output_variable_desc or _("Réponse de l'étape abstraite {}").format(step.id)
+            ) + _(" (statut: {})").format(status_value)
+        else:
+            data_value = child_result.error_reason or _("Échec de l'étape abstraite {}").format(step.id)
+            data_description = (
+                step.output_variable_desc or _("Erreur de l'étape abstraite {}").format(step.id)
+            ) + _(" (statut: {})").format(status_value)
+
+        target_data_var_names = [step_data_id]
+        if base_data_id != step_data_id and base_data_id not in target_data_var_names:
+            target_data_var_names.append(base_data_id)
+
+        if step.output_variable_name:
+            base_name = step.output_variable_name
             self.solver.variable_registry[base_name] = {
                 "value": status_value,
                 "description": step.output_variable_desc or _("Statut de l'étape abstraite {}").format(step.id),
                 "source": child_solver.id,
                 "timestamp": datetime.now().isoformat()
             }
+            custom_data_name = "data_" + base_name[5:] if base_name.startswith("bool_") else (
+                base_name if base_name.startswith("data_") else base_name + "_data"
+            )
+            if custom_data_name not in target_data_var_names:
+                target_data_var_names.append(custom_data_name)
 
-            # --- 2. Création de la variable data_* (améliorée) ---
-            if base_name.startswith("bool_"):
-                data_var_name = "data_" + base_name[5:]
+        INLINE_LIMIT = 3000
+        data_val_str = str(data_value) if data_value is not None else ""
+
+        if data_value is not None and len(data_val_str) > INLINE_LIMIT:
+            session_id = getattr(self.solver.runtime_state, "session_id", "default_session")
+            
+            if isinstance(data_value, (dict, list)):
+                asset_raw_output = json.dumps(data_value, ensure_ascii=False)
             else:
-                data_var_name = base_name + "_data"
+                asset_raw_output = data_val_str
 
-            if child_result.status == ExecutionStatus.SUCCESS:
-                data_value = child_result.response or _("Succès de l'étape abstraite {}").format(step.id)
-                data_description = (
-                    step.output_variable_desc or _("Réponse de l'étape abstraite {}").format(step.id)
-                ) + _(" (statut: {})").format(status_value)
-            else:
-                data_value = child_result.error_reason or _("Échec de l'étape abstraite {}").format(step.id)
-                data_description = (
-                    step.output_variable_desc or _("Erreur de l'étape abstraite {}").format(step.id)
-                ) + _(" (statut: {})").format(status_value)
+            subtask_asset = ToolOutputDataAsset.create(
+                step_id=step.id,
+                tool_name="abstract_subtask",
+                raw_output=asset_raw_output,
+                session_id=session_id,
+                custom_attrs={
+                    "child_solver_id": child_solver.id,
+                    "variable_name": step_data_id,
+                    "status": status_value
+                }
+            )
+            if hasattr(self.solver.runtime_state, "discovery_engine") and self.solver.runtime_state.discovery_engine:
+                explorer = self.solver.runtime_state.discovery_engine.get_explorer("files")
+                if explorer and hasattr(explorer, "registry") and explorer.registry:
+                    explorer.registry.register_asset(subtask_asset, scheme="outputs")
 
-            self.solver.variable_registry[data_var_name] = {
+            asset_entry = {
+                "value": subtask_asset.get_uri(),
+                "asset": subtask_asset,
+                "type": "asset",
+                "description": data_description + _(" [Encapsulé en DataAsset : {} caractères]").format(len(data_val_str)),
+                "source": child_solver.id,
+                "timestamp": datetime.now().isoformat()
+            }
+            for vname in target_data_var_names:
+                self.solver.variable_registry[vname] = asset_entry
+            Logger.info(f"[Executor] 📦 Réponse sous-tâche '{step.id}' ({len(data_val_str)} car.) encapsulée dans '{subtask_asset.get_uri()}'.")
+        else:
+            data_entry = {
                 "value": data_value,
                 "description": data_description,
                 "source": child_solver.id,
                 "timestamp": datetime.now().isoformat()
             }
+            for vname in target_data_var_names:
+                self.solver.variable_registry[vname] = data_entry
 
-            if step.is_crucial:
-                self._propagate_crucial_variable(base_name)
+        if step.is_crucial:
+            crucial_target = step.output_variable_name or step_bool_id
+            self._propagate_crucial_variable(crucial_target)
 
         if child_result.status == ExecutionStatus.SUCCESS:
             final_response = child_result.response or _("Objectif de la sous-tâche [{}] atteint.").format(step.id)
@@ -488,44 +681,130 @@ class Executor:
             parsed_result = json.loads(hardware_result_str)
             is_success_flag = str(parsed_result.get("result", "")).strip().lower()
             actual_data = parsed_result.get("data", None)
+            tool_error_reason = parsed_result.get("error_reason", None)
+            
+            error_reason_msg = None
+            if tool_error_reason:
+                if len(tool_error_reason) >= 800:
+                    session_id = getattr(self.solver.runtime_state, "session_id", "default_session")
+                    error_asset = ToolOutputDataAsset.create(
+                        step_id=step.id,
+                        tool_name=step.tool_name,
+                        raw_output=tool_error_reason,
+                        session_id=session_id,
+                        custom_attrs={
+                            "mission_id": self.solver.id,
+                            "type": "error_log"
+                        }
+                    )
+                    if hasattr(self.solver.runtime_state, "discovery_engine") and self.solver.runtime_state.discovery_engine:
+                        explorer = self.solver.runtime_state.discovery_engine.get_explorer("files")
+                        if explorer and hasattr(explorer, "registry") and explorer.registry:
+                            explorer.registry.register_asset(error_asset, scheme="outputs")
+                    error_reason_msg = tool_error_reason[:150] + f"... (Erreur complète tronquée et sauvegardée dans l'asset '{error_asset.get_uri()}'. Utilisez 'read_asset_slice' si besoin)."
+                else:
+                    error_reason_msg = tool_error_reason
+
+            # --- 1. Enregistrement universel par ID d'étape (step_X) ---
+            step_bool_id = f"bool_{step.id}"
+            step_data_id = f"data_{step.id}"
+            base_step_id = re.sub(r'-\d+$', '', step.id)
+            base_bool_id = f"bool_{base_step_id}"
+            base_data_id = f"data_{base_step_id}"
+
+            bool_entry = {
+                "value": is_success_flag,
+                "description": _("Statut d'exécution de l'étape {} ({})").format(step.id, step.tool_name),
+                "source": self.solver.id,
+                "timestamp": datetime.now().isoformat()
+            }
+            self.solver.variable_registry[step_bool_id] = bool_entry
+            if base_bool_id != step_bool_id:
+                self.solver.variable_registry[base_bool_id] = bool_entry
+
+            # --- 2. Détermination de la description de données ---
+            if actual_data is not None:
+                data_description = (
+                    step.output_variable_desc or _("Données retournées par {}").format(step.tool_name)
+                ) + _(" (statut: {})").format(is_success_flag)
+            else:
+                data_description = _("Aucune donnée retournée par {} (statut: {})").format(
+                    step.tool_name, is_success_flag
+                )
+
+            target_data_var_names = [step_data_id]
+            if base_data_id != step_data_id and base_data_id not in target_data_var_names:
+                target_data_var_names.append(base_data_id)
 
             if step.output_variable_name:
                 base_name = step.output_variable_name
-
-                # --- 1. Création du booléen (inchangé) ---
                 self.solver.variable_registry[base_name] = {
                     "value": is_success_flag,
                     "description": step.output_variable_desc or _("Statut de l'opération {}").format(step.tool_name),
                     "source": self.solver.id,
                     "timestamp": datetime.now().isoformat()
                 }
+                custom_data_name = "data_" + base_name[5:] if base_name.startswith("bool_") else (
+                    base_name if base_name.startswith("data_") else base_name + "_data"
+                )
+                if custom_data_name not in target_data_var_names:
+                    target_data_var_names.append(custom_data_name)
 
-                # --- 2. Création de la variable data_* (améliorée) ---
-                if base_name.startswith("bool_"):
-                    data_var_name = "data_" + base_name[5:]
+            # Seuil de volumétrie pour encapsulation en DataAsset (~3000 chars)
+            INLINE_LIMIT = 3000
+            data_str_len = len(str(actual_data)) if actual_data is not None else 0
+
+            if actual_data is not None and data_str_len > INLINE_LIMIT:
+                session_id = getattr(self.solver.runtime_state, "session_id", "default_session")
+                
+                if isinstance(actual_data, (dict, list)):
+                    asset_raw_output = json.dumps(actual_data, ensure_ascii=False)
                 else:
-                    data_var_name = base_name + "_data"
+                    asset_raw_output = str(actual_data)
 
-                if actual_data is not None:
-                    data_description = (
-                        step.output_variable_desc or _("Données retournées par {}").format(step.tool_name)
-                    ) + _(" (statut: {})").format(is_success_flag)
-                else:
-                    data_description = _("Aucune donnée retournée par {} (statut: {})").format(
-                        step.tool_name, is_success_flag
-                    )
+                tool_asset = ToolOutputDataAsset.create(
+                    step_id=step.id,
+                    tool_name=step.tool_name,
+                    raw_output=asset_raw_output,
+                    session_id=session_id,
+                    custom_attrs={
+                        "mission_id": self.solver.id,
+                        "variable_name": step_data_id,
+                        "status": is_success_flag
+                    }
+                )
+                # Enregistrer dans l'AssetRegistry de session si disponible
+                if hasattr(self.solver.runtime_state, "discovery_engine") and self.solver.runtime_state.discovery_engine:
+                    explorer = self.solver.runtime_state.discovery_engine.get_explorer("files")
+                    if explorer and hasattr(explorer, "registry") and explorer.registry:
+                        explorer.registry.register_asset(tool_asset, scheme="outputs")
 
-                self.solver.variable_registry[data_var_name] = {
+                asset_entry = {
+                    "value": tool_asset.get_uri(),
+                    "asset": tool_asset,
+                    "type": "asset",
+                    "description": data_description + _(" [Encapsulé en DataAsset : {} caractères]").format(data_str_len),
+                    "source": self.solver.id,
+                    "timestamp": datetime.now().isoformat()
+                }
+                for vname in target_data_var_names:
+                    self.solver.variable_registry[vname] = asset_entry
+                Logger.info(f"[Executor] 📦 Donnée de l'outil '{step.tool_name}' ({data_str_len} car.) encapsulée dans '{tool_asset.get_uri()}' (variables: {target_data_var_names}).")
+            else:
+                data_entry = {
                     "value": actual_data,
                     "description": data_description,
                     "source": self.solver.id,
                     "timestamp": datetime.now().isoformat()
                 }
+                for vname in target_data_var_names:
+                    self.solver.variable_registry[vname] = data_entry
 
-                if step.is_crucial:
-                    self._propagate_crucial_variable(base_name)
+            if step.is_crucial:
+                crucial_target = step.output_variable_name or step_bool_id
+                self._propagate_crucial_variable(crucial_target)
 
-            return True, is_success_flag, None
+            return True, is_success_flag, error_reason_msg
 
         except json.JSONDecodeError:
             Logger.warning(f"[Executor] Échec de parsing JSON pour l'outil {step.tool_name}. Contenu reçu : {hardware_result_str[:200]}")
@@ -535,7 +814,7 @@ class Executor:
     # CONVERGENCE ET VALIDATION
     # =====================================================
 
-    async def _check_convergence(self, step: PlanStep, actual_result: str) -> ConvergenceDecision:
+    async def _check_convergence(self, step: PlanStep, actual_result: str, supplemental_data: Optional[str] = None) -> ConvergenceDecision:
         if not step.expected_result:
             Logger.info(f"[Executor] Aucun critère défini pour [{step.id}]. Convergence implicite acceptée.")
             return ConvergenceDecision(is_convergent=True, reason=_("Aucun critère d'output spécifié."))
@@ -545,13 +824,13 @@ class Executor:
 
         if step.type == StepType.TOOL_CALL:
             Logger.info(f"[Executor] [Analyse Rigide] Évaluation déterministe pour l'outil '{step.tool_name}'...")
-            is_valid, rigid_reason = self._verify_rigid_outcome(step.expected_result, actual_result)
+            is_valid, rigid_reason = self._verify_rigid_outcome(step.expected_result, actual_result, supplemental_data)
             return ConvergenceDecision(is_convergent=is_valid, reason=rigid_reason)
 
         Logger.info(f"[Executor] [Analyse Sémantique] Invocation du LLM pour l'étape abstraite [{step.id}]...")
         return await self._evaluate_semantic_convergence(step, actual_result)
 
-    def _verify_rigid_outcome(self, expected: str, actual: str) -> Tuple[bool, str]:
+    def _verify_rigid_outcome(self, expected: str, actual: str, supplemental_data: Optional[str] = None) -> Tuple[bool, str]:
         expected_clean = expected.strip().lower()
         actual_clean = actual.strip().lower()
 
@@ -563,8 +842,12 @@ class Executor:
 
         if expected_clean == actual_clean:
             return True, _("Validation stricte réussie.")
-
-        return False, _("Rejet matériel : L'outil a renvoyé '{}', mais le plan exigeait expressément '{}'.").format(actual_clean, expected_clean)
+        
+        reason = _("Rejet matériel : L'outil a renvoyé '{}', mais le plan exigeait expressément '{}'.").format(actual_clean, expected_clean)
+        if supplemental_data:
+            reason += f" Raison de l'outil : {supplemental_data}"
+            
+        return False, reason
 
     async def _evaluate_semantic_convergence(self, step: PlanStep, actual_result: str) -> ConvergenceDecision:
         mission_id = None

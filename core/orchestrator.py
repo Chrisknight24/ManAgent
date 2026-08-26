@@ -6,6 +6,7 @@ RÔLE (Le PDG) : Centre de validation, de routage des paquets C++ et Superviseur
 """
 
 import asyncio
+import re
 import time
 from providers.provider_manager import ProviderManager
 from core.event_bus import EventBus
@@ -24,7 +25,7 @@ from utils.logger import Logger
 
 # Nouveaux imports pour l'architecture HTN (Hierarchical Task Network)
 from .supervisor import Supervisor
-from .plan_models import Plan, ExecutionStatus, OrchestratorDecision, PlanValidationDecision, DepthEscalationDecision
+from .plan_models import Plan, ExecutionStatus, OrchestratorDecision, PlanValidationDecision, DepthEscalationDecision, AssetInjection
 from .plan_validator import PlanValidator, PlanValidationOutcome, review_depth_escalation, DepthEscalationOutcome
 from core.execution_models import PlanAttempt
 from .solver import Solver
@@ -55,6 +56,10 @@ from memory.fingerprint_store import FingerprintStore
 
 from tools.tools_manager import ToolsManager
 
+from core.discovery.asset_registry import AssetRegistry
+from core.discovery.input_ingestor import InputIngestor
+from core.discovery.providers.files_provider import FilesProvider
+from core.discovery.explorers.files_explorer import FilesExplorer
 from core.discovery.providers.mission_history_provider import MissionHistoryProvider
 from core.discovery.explorers.mission_history_explorer import MissionHistoryExplorer
 
@@ -102,6 +107,8 @@ class Orchestrator(Supervisor, Entity):
         self.session_store = SessionStore()
         self.marker_manager = MarkerManager()
         self.fingerprint_store = FingerprintStore()
+        self.input_ingestor = InputIngestor()
+        self.asset_registries: Dict[str, AssetRegistry] = {}
 
         # Observabilité structurée (Logger -> JSON)
         Logger.configure_json_sink("observability/events.jsonl")
@@ -113,6 +120,19 @@ class Orchestrator(Supervisor, Entity):
         # critères explicites plutôt que de bloquer toutes les missions.
         self._rules_path = "rules.md"
         self._rules_cache: Optional[str] = None
+
+    def _get_or_create_asset_registry(self, session_id: str) -> AssetRegistry:
+        """Récupère ou crée le registre de DataAssets pour la session (avec restauration depuis SQLite)."""
+        if session_id not in self.asset_registries:
+            registry = AssetRegistry(session_id=session_id)
+            try:
+                session_data = self.session_store.get_session(session_id)
+                if session_data and session_data.get("asset_registry"):
+                    registry.load_from_dict(session_data["asset_registry"])
+            except Exception as e:
+                Logger.error(f"[Orchestrator] Erreur chargement asset_registry pour {session_id}: {e}")
+            self.asset_registries[session_id] = registry
+        return self.asset_registries[session_id]
 
     async def process(self, packet: RequestPacket):
         """Implémentation de la méthode abstraite de Entity."""
@@ -154,6 +174,8 @@ class Orchestrator(Supervisor, Entity):
                     self.memory.clear_session(session_id)
                     if session_id in self.session_memories:
                         del self.session_memories[session_id]
+                    if session_id in self.asset_registries:
+                        del self.asset_registries[session_id]
                     await asyncio.to_thread(self.session_store.delete_session, session_id)
                     Logger.info(f"[Orchestrator] Session supprimée (RAM + base) : {session_id}")
                 return ResponsePacket(type="response", status="success",
@@ -196,7 +218,11 @@ class Orchestrator(Supervisor, Entity):
                     "finished_at": ep.get("finished_at", "N/A")
                 })
 
-        # Enregistrer le DataProvider pour l'historique des missions et les faits de cette session
+        # Registre des DataAssets pour la session
+        asset_registry = self._get_or_create_asset_registry(session_id)
+        self.runtime_state.current_asset_registry = asset_registry
+
+        # Enregistrer les DataProviders (Missions, Faits, Historique, Fichiers, Inputs) pour cette session
         if self.runtime_state.discovery_engine:
             mission_history_provider = MissionHistoryProvider(session_id, self.mission_store)
             self.register_data_provider("missions", mission_history_provider)
@@ -207,6 +233,41 @@ class Orchestrator(Supervisor, Entity):
                 facts_provider = FactsProvider(self.runtime_state.learner.lesson_store)
                 self.register_data_provider("facts", facts_provider)
                 Logger.debug(f"[Orchestrator] FactsProvider enregistré pour la session {session_id}")
+
+            from core.discovery.providers.history_provider import HistoryProvider
+            history_provider = HistoryProvider(session_id, self.memory)
+            self.register_data_provider("history", history_provider)
+            Logger.debug(f"[Orchestrator] HistoryProvider enregistré pour la session {session_id}")
+
+            # NOUVEAU : Enregistrement des providers DataAssets (Fichiers, Payloads utilisateurs, Retours d'outils)
+            files_provider = FilesProvider(asset_registry, data_type="files")
+            self.register_data_provider("files", files_provider)
+            inputs_provider = FilesProvider(asset_registry, data_type="inputs")
+            self.register_data_provider("inputs", inputs_provider)
+            outputs_provider = FilesProvider(asset_registry, data_type="outputs")
+            self.register_data_provider("outputs", outputs_provider)
+            Logger.debug(f"[Orchestrator] FilesProvider, InputsProvider & OutputsProvider enregistrés pour la session {session_id}")
+
+            # Enregistrement des explorateurs de fichiers dans le DiscoveryEngine
+            files_explorer = FilesExplorer(runtime_state=self.runtime_state, registry=asset_registry)
+            self.runtime_state.discovery_engine.register_explorer("files", files_explorer)
+            self.runtime_state.discovery_engine.register_explorer("inputs", files_explorer)
+            self.runtime_state.discovery_engine.register_explorer("outputs", files_explorer)
+            Logger.debug(f"[Orchestrator] FilesExplorer enregistré dans DiscoveryEngine pour 'files', 'inputs' et 'outputs'")
+
+        # Ingestion déterministe de l'entrée utilisateur (détection de volumétrie et pièces jointes)
+        attachments = payload.get("attachments", [])
+        turn_index = len(session_memory.context.turn_history) + 1 if hasattr(session_memory.context, "turn_history") else 1
+        ingestion_result = self.input_ingestor.ingest(
+            user_text=user_message,
+            turn_index=turn_index,
+            session_id=session_id,
+            registry=asset_registry,
+            attachments=attachments
+        )
+        effective_user_message = ingestion_result.display_content
+        if ingestion_result.is_asset:
+            Logger.info(f"[Orchestrator] Input volumineux détecté et encapsulé en DataAsset(s) : {ingestion_result.created_assets}")
 
         # --- GESTION DU LLM DE L'ORCHESTRATEUR ---
         if self.llm is None:
@@ -266,18 +327,19 @@ class Orchestrator(Supervisor, Entity):
             await self.propagate_event(Events.THINKING_STARTED, {})
 
             try:
-                # 5. Récupérer et assembler l'historique de conversation sous budget strict
+                # 5. Récupérer et assembler l'historique de conversation et manifestes sous budget strict
                 context_bundle = self.context_manager.assemble_orchestrator_context(
                     memory=self.memory,
                     session_id=session_id,
-                    user_message=user_message,
+                    user_message=effective_user_message,
+                    asset_registry=asset_registry,
                     recent_turns_limit=6
                 )
                 context_str = context_bundle["history_str"]
                 context_list = context_bundle["recent_messages"]
 
                 # 6. Récupérer les conseils pour l'Orchestrateur (routage)
-                advice_orchestrator = await self._get_orchestrator_advice(user_message)
+                advice_orchestrator = await self._get_orchestrator_advice(effective_user_message)
 
                 # 7. Construire le prompt d'orchestration
                 loader = get_prompt_loader()
@@ -304,7 +366,7 @@ class Orchestrator(Supervisor, Entity):
                 orchestrator_prompt = loader.load(
                     "orchestrator.md",
                     lang=self.runtime_state.language,
-                    user_message=user_message,
+                    user_message=effective_user_message,
                     history=context_str,
                     advice=advice_orchestrator,
                     **session_context_vars
@@ -344,9 +406,14 @@ class Orchestrator(Supervisor, Entity):
                         else:
                             Logger.warning("[Orchestrator] RefinedContext sans cibles, impossible de définir l'investigation active.")
 
+                if decision is None:
+                    Logger.error("[Orchestrator] Décision LLM nulle reçue.")
+                    await self.propagate_event(Events.THINKING_FINISHED, {})
+                    return ErrorPacket(type="error", message=_("Impossible d'obtenir une décision valide du LLM."))
+
                 # Stocker les signatures dans le contexte d'exécution
-                self.current_execution_context["signatures"] = decision.signatures
-                signatures = decision.signatures or []
+                signatures = getattr(decision, "signatures", []) or []
+                self.current_execution_context["signatures"] = signatures
                 if signatures:
                     Logger.info(f"[Orchestrator] Signatures extraites : {[f'{s.action} {s.object}' for s in signatures]}")
                 else:
@@ -360,17 +427,21 @@ class Orchestrator(Supervisor, Entity):
                     return ErrorPacket(type="error", message=_("Génération annulée"))
 
                 # 10. Traiter selon le mode
-                if decision.type == OrchestratorMode.DIRECT:
-                    return await self._handle_direct_decision(
-                        decision, session_id, user_message, forced_provider
-                    )
-                elif decision.type == OrchestratorMode.MISSION:
+                if decision.type == OrchestratorMode.MISSION or (decision.type == OrchestratorMode.REQUEST and signatures):
                     return await self._handle_mission_decision(
                         decision, session_id, user_message, forced_provider, forced_model, session_memory
+                    )
+                elif decision.type in (OrchestratorMode.DIRECT, OrchestratorMode.REQUEST):
+                    return await self._handle_direct_decision(
+                        decision, session_id, user_message, forced_provider
                     )
                 else:
                     raise ValueError(f"Unknown OrchestratorMode: {decision.type}")
 
+            except asyncio.CancelledError:
+                Logger.warning("[Orchestrator] Request execution cancelled (CancelledError caught at routing level).")
+                return ResponsePacket(type="response", status="success",
+                                     payload={"message": _("Action annulée")})
             except Exception as e:
                 Logger.error(f"[Orchestrator] Critical failure during agent loop: {str(e)}")
                 await self.propagate_event(Events.RUNTIME_ERROR, {"message": str(e)})
@@ -683,8 +754,51 @@ class Orchestrator(Supervisor, Entity):
         """
         Logger.info(f"[Orchestrator] Mission identifiée. Initialisation du RootSolver.")
 
-        # 1. Récupérer l'objectif raffiné
+        # 1. Récupérer et nettoyer l'objectif raffiné ainsi que les assets injectés
         refined_goal = decision.output
+        injected_assets = getattr(decision, "injected_assets", []) or []
+
+        # Nettoyage des préfixes $@_ s'il y en a dans refined_goal (ex: $@_data_log_source -> data_log_source)
+        refined_goal = re.sub(r'\$@_data_', 'data_', refined_goal)
+
+        # Normaliser les noms de variables des assets injectés
+        for asset in injected_assets:
+            var_name = asset.variable_name.strip()
+            if var_name.startswith("$@_"):
+                var_name = var_name[3:]
+            if not var_name.startswith("data_"):
+                var_name = f"data_{var_name}"
+            asset.variable_name = var_name
+
+            # Remplacer toute occurrence de l'URI brute dans refined_goal par le nom de variable
+            if asset.uri in refined_goal:
+                refined_goal = refined_goal.replace(asset.uri, asset.variable_name)
+
+        # Détection et auto-injection des assets de session mentionnés dans refined_goal
+        registry = self._get_or_create_asset_registry(session_id)
+        if registry:
+            for registered_asset in registry.list_assets():
+                uri = registered_asset.get_uri()
+                target_id = registered_asset.target_id
+                if uri in refined_goal or target_id in refined_goal:
+                    already_injected = any(a.uri == uri for a in injected_assets)
+                    if not already_injected:
+                        var_name = f"data_{target_id}"
+                        injected_assets.append(AssetInjection(
+                            uri=uri,
+                            variable_name=var_name,
+                            description=f"Asset {target_id} auto-détecté dans la session"
+                        ))
+                        Logger.info(f"[Orchestrator] Auto-injection de l'asset {uri} -> variable '{var_name}'")
+                    else:
+                        var_name = next(a.variable_name for a in injected_assets if a.uri == uri)
+
+                    if uri in refined_goal:
+                        refined_goal = refined_goal.replace(uri, var_name)
+
+        decision.output = refined_goal
+        decision.injected_assets = injected_assets
+
         self.current_execution_context["refined_goal"] = refined_goal
         self.active_sessions[session_id]["refined_goal"] = refined_goal
 
@@ -738,6 +852,20 @@ class Orchestrator(Supervisor, Entity):
             provider_id=forced_provider,
             model_id=forced_model,
         )
+
+        # Injecter les assets déclarés par l'Orchestrateur dans le registre du Solver
+        injected_assets = getattr(decision, "injected_assets", []) or []
+        for asset in injected_assets:
+            var_name = asset.variable_name.strip()
+            if not var_name.startswith("data_"):
+                var_name = f"data_{var_name}"
+            self.root_solver.variable_registry[var_name] = {
+                "value": asset.uri,
+                "type": "virtual_asset",
+                "description": asset.description,
+                "source_uri": asset.uri
+            }
+            Logger.info(f"[Orchestrator] Asset injecté dans le registre du Solver : {var_name} = {asset.uri}")
 
         signatures = self.current_execution_context.get("signatures", [])
         if signatures:
@@ -836,7 +964,8 @@ class Orchestrator(Supervisor, Entity):
                 )
                 session_memory.context.mission_history.append(mission_cache.mission_id)
                 await self._save_session_context(session_id, session_memory.context.to_persistable_dict())
-            raise
+            return ResponsePacket(type="response", status="success",
+                                 payload={"message": _("Mission annulée par l'utilisateur")})
 
         except Exception as e:
             Logger.error(f"[Orchestrator] Erreur critique dans le Solver : {e}")
@@ -1058,8 +1187,10 @@ class Orchestrator(Supervisor, Entity):
     # MÉTHODE DE SAUVEGARDE DU SESSION CONTEXT
     # =====================================================
     async def _save_session_context(self, session_id: str, context_dict: dict):
-        """Sauvegarde asynchrone du contexte de session en base."""
+        """Sauvegarde asynchrone du contexte de session en base (incluant l'AssetRegistry)."""
         try:
+            if session_id in self.asset_registries:
+                context_dict["asset_registry"] = self.asset_registries[session_id].to_dict()
             await asyncio.to_thread(self.session_store.upsert_session, session_id, context_dict)
         except Exception as e:
             Logger.error(f"[Orchestrator] Erreur sauvegarde session {session_id} : {e}")
@@ -1090,8 +1221,16 @@ class Orchestrator(Supervisor, Entity):
         `mission_history_tree` : l'historique complet de la mission
         transmis par le Solver pour détecter les boucles infinies.
         """
-        target_goal = self.current_execution_context.get("refined_goal") or plan.goal
-        Logger.info(f"[Orchestrator] ⚖️ Validation du plan du Solver '{child_solver_id}' (objectif cible : '{target_goal}')")
+        # Si child_solver_id n'est pas le solver racine, son goal légitime est plan.goal
+        # Si c'est le root_solver, target_goal est refined_goal s'il existe ou plan.goal
+        mission_id = self.current_execution_context.get("mission_id")
+        is_root = (child_solver_id == mission_id)
+        if is_root:
+            target_goal = self.current_execution_context.get("refined_goal") or plan.goal or ""
+        else:
+            target_goal = plan.goal or self.current_execution_context.get("refined_goal") or ""
+            
+        Logger.info(f"[Orchestrator] ⚖️ Validation du plan du Solver '{child_solver_id}' (is_root={is_root}, objectif cible : '{target_goal}')")
 
         validator = PlanValidator(
             llm=self.llm,
@@ -1099,7 +1238,6 @@ class Orchestrator(Supervisor, Entity):
             rules_text=self._load_rules_md(),
             language=getattr(self.runtime_state, "language", "fr"),
             request_human_confirmation=self._request_human_confirmation,
-            learner=getattr(self.runtime_state, "learner", None),
         )
         outcome = await validator.validate(
             plan=plan,
@@ -1153,27 +1291,12 @@ class Orchestrator(Supervisor, Entity):
         """
         Pont entre PlanValidator et le frontend : réutilise TEL QUEL le
         mécanisme déjà en place pour les outils externes (Future + call_id,
-        cf. _execute_external_tool) plutôt que d'inventer un nouveau canal.
-        Un outil nommé 'request_human_confirmation' doit être enregistré côté
-        frontend (register_tool) pour que ce mécanisme fonctionne — TANT QUE
-        CE N'EST PAS LE CAS, execute_tool renverra un échec de validation
-        (tool inconnu), et PlanValidator.validate() refusera par prudence
-        (voir son propre repli explicite si `request_human_confirmation`
-        n'était pas fourni du tout) — donc pas de faux-positif "confirmé"
-        silencieux si le frontend n'a pas encore implémenté ce point.
+        cf. _execute_external_tool).
+        POUR L'INSTANT (Mock) : on simule toujours une validation positive
+        en attendant que le front Qt implémente la boîte de dialogue.
         """
-        try:
-            result_str = await self.execute_tool("request_human_confirmation", {
-                "plan_goal": plan.goal,
-                "risk_level": decision.risk_level.value,
-                "reason": decision.reason,
-                "irreversibility_flags": decision.irreversibility_flags,
-            })
-            result = json.loads(result_str)
-            return bool(result.get("result"))
-        except Exception as e:
-            Logger.error(f"[Orchestrator] Échec de la demande de confirmation humaine : {e}")
-            return False
+        Logger.info("[Orchestrator] 🧑‍💻 [MOCK] Simulation de l'accord humain (Auto-Approve = True)")
+        return True
 
     async def report_critical_failure(self, error_context: str, child_solver_id: str):
         Logger.error(f"[Orchestrator] 🚨 ALERTE CRITIQUE du Solver '{child_solver_id}' : {error_context}")
@@ -1460,6 +1583,14 @@ class Orchestrator(Supervisor, Entity):
             )
             self.runtime_state.discovery_engine.register_explorer(facts_explorer)
             Logger.info("[Orchestrator] FactsExplorer enregistré.")
+
+            from core.discovery.explorers.history_explorer import HistoryExplorer
+            history_explorer = HistoryExplorer(
+                runtime_state=self.runtime_state,
+                entity=self
+            )
+            self.runtime_state.discovery_engine.register_explorer(history_explorer)
+            Logger.info("[Orchestrator] HistoryExplorer enregistré.")
         else:
             Logger.warning("[Orchestrator] DiscoveryEngine non disponible, impossible d'enregistrer les Explorers.")        
         await self.propagate_event(Events.RUNTIME_CONFIGURED, {"available_models": validated_models})

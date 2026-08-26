@@ -7,7 +7,7 @@ Support multi‑cibles : plus de référence à target unique.
 """
 
 import uuid
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 from core.runtime_state import RuntimeState
 from core.discovery.base_explorer import BaseExplorer
 from core.discovery.discovery_session import DiscoverySession
@@ -29,21 +29,36 @@ class DiscoveryEngine:
         self._cache_manager = runtime_state.cache_manager or CacheManager()
         self._cache_type = "refined_context"
 
-    def register_explorer(self, explorer: BaseExplorer, llm: Optional[Llm] = None) -> None:
-        data_type = explorer.get_data_type()
-        if data_type in self._explorers:
-            Logger.warning(f"[DiscoveryEngine] {_('Explorer déjà enregistré pour')} {data_type}")
+    def register_explorer(self, explorer_or_type: Union[BaseExplorer, str], explorer: Optional[BaseExplorer] = None, llm: Optional[Llm] = None) -> None:
+        """
+        Enregistre un Explorer dans le DiscoveryEngine.
+        Supporte deux signatures :
+          - register_explorer(explorer, llm=...) -> utilise explorer.get_data_type()
+          - register_explorer(data_type, explorer, llm=...) -> enregistre l'explorer sous data_type
+        """
+        if isinstance(explorer_or_type, str):
+            data_type = explorer_or_type
+            target_explorer = explorer
+        else:
+            target_explorer = explorer_or_type
+            data_type = target_explorer.get_data_type() if target_explorer else ""
+
+        if not target_explorer:
+            Logger.warning(f"[DiscoveryEngine] Tentative d'enregistrement d'un Explorer None pour '{data_type}'")
             return
+
+        if data_type in self._explorers:
+            Logger.debug(f"[DiscoveryEngine] Ré-enregistrement/Mise à jour de l'Explorer pour {data_type}")
         
         # Assigner le LLM à l'Explorer
         if llm is not None:
-            explorer.llm = llm
+            target_explorer.llm = llm
         elif self.runtime_state.discovery_llm is not None:
-            explorer.llm = self.runtime_state.discovery_llm
-        else:
+            target_explorer.llm = self.runtime_state.discovery_llm
+        elif not hasattr(target_explorer, "llm") or target_explorer.llm is None:
             Logger.warning(f"[DiscoveryEngine] Aucun LLM fourni pour l'Explorer '{data_type}'. generate_plan échouera.")
 
-        self._explorers[data_type] = explorer
+        self._explorers[data_type] = target_explorer
 
         # On n'enregistre PAS les outils de l'Explorer dans le ToolsManager
         # pour éviter que le Planner puisse les appeler directement.
@@ -119,7 +134,7 @@ class DiscoveryEngine:
         # silencieusement. Chaque Explorer déclare donc lui-même quels
         # goals ne sont jamais sûrs à mettre en cache (get_non_cacheable_goals).
         should_cache = True
-        if "last_mission" in plan.targets:
+        if plan.data_type == "registry" or "last_mission" in plan.targets:
             should_cache = False
         non_cacheable_goals = set(explorer.get_non_cacheable_goals()) if hasattr(explorer, "get_non_cacheable_goals") else set()
         if non_cacheable_goals.intersection(plan.technical_goals):
@@ -190,10 +205,18 @@ class DiscoveryEngine:
 
             refined = await session.run(data_context=data_context)
 
+            # Ne pas mettre en cache si l'une des étapes a échoué (ex: success est False)
+            has_failed_step = False
+            for entry in getattr(refined, "entries", []):
+                if entry.tool_result and isinstance(entry.tool_result, dict):
+                    if entry.tool_result.get("success") is False:
+                        has_failed_step = True
+                        break
+
             # should_cache déjà calculé plus haut (last_mission + goals non
             # cacheables déclarés par l'Explorer) — on ne le recalcule pas
             # ici pour éviter que ce côté et le côté lecture ne redivergent.
-            if refined.exit_policy not in (ExitPolicy.TOOL_FAILED, ExitPolicy.INVALID_PLAN) and should_cache:
+            if refined.exit_policy not in (ExitPolicy.TOOL_FAILED, ExitPolicy.INVALID_PLAN) and should_cache and not has_failed_step:
                 await self.store_refined_context(refined)
 
             return refined

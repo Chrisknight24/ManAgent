@@ -47,6 +47,9 @@ class MissionHistoryExplorer(BaseExplorer):
     def get_data_type(self) -> str:
         return "missions"
 
+    def get_scope_description(self) -> str:
+        return "Examine l'arbre d'exécution, le statut des étapes et l'historique des missions enregistrées."
+
     def get_available_goals(self) -> List[str]:
         return [
             "list_missions",

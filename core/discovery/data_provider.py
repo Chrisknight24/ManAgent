@@ -21,6 +21,10 @@ class DataProvider(ABC):
     def get_data_type(self) -> str:
         pass
 
+    def get_scope_description(self) -> str:
+        """Périmètre métier et rôle régalien du DataProvider pour guider le LLM."""
+        return ""
+
     @abstractmethod
     def get_targets(self) -> List[str]:
         pass

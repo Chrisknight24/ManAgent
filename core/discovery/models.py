@@ -60,8 +60,71 @@ class DiscoveryRequest(BaseModel):
     discovery_needed: bool = Field(default=True, description="True si tu souhaites obtenir des informations sur des données")
     goal: str = Field(..., description="Objectif de la découverte")
     data_type: str = Field(..., description="Type de données")
-    targets: List[str] = Field(..., description="Liste des cibles (au moins une)")
-    technical_goals: List[str] = Field(..., description="Liste des goals techniques (même longueur)")
+    targets: List[str] = Field(default_factory=lambda: ["recent"], description="Liste des cibles (au moins une)")
+    technical_goals: List[str] = Field(default_factory=lambda: ["get_recent_history"], description="Liste des goals techniques (même longueur)")
+
+    @model_validator(mode='before')
+    @classmethod
+    def sanitize_and_autofill(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # Normaliser target / targets
+            if "target" in data and ("targets" not in data or not data["targets"]):
+                t_val = data.get("target")
+                data["targets"] = [t_val] if isinstance(t_val, str) else (list(t_val) if t_val else [])
+            elif "targets" in data and isinstance(data["targets"], str):
+                data["targets"] = [data["targets"]]
+
+            # Normaliser technical_goal / technical_goals
+            if "technical_goal" in data and ("technical_goals" not in data or not data["technical_goals"]):
+                tg_val = data.get("technical_goal")
+                data["technical_goals"] = [tg_val] if isinstance(tg_val, str) else (list(tg_val) if tg_val else [])
+            elif "technical_goals" in data and isinstance(data["technical_goals"], str):
+                data["technical_goals"] = [data["technical_goals"]]
+
+            dt = str(data.get("data_type", "")).lower()
+            
+            # Auto-complétion des cibles si manquantes
+            targets = data.get("targets")
+            if not targets:
+                if dt == "history":
+                    targets = ["recent"]
+                elif dt == "facts":
+                    targets = ["all_facts"]
+                elif dt == "missions":
+                    targets = ["last_mission"]
+                elif dt == "registry":
+                    targets = ["all_keys"]
+                else:
+                    targets = ["recent"]
+                data["targets"] = targets
+
+            # Auto-complétion des goals techniques si manquants
+            technical_goals = data.get("technical_goals")
+            if not technical_goals:
+                if dt == "history":
+                    technical_goals = ["get_recent_history"]
+                elif dt == "facts":
+                    technical_goals = ["list_facts"]
+                elif dt == "missions":
+                    technical_goals = ["get_mission_details"]
+                elif dt == "registry":
+                    technical_goals = ["list_keys"]
+                else:
+                    technical_goals = ["get_recent_history"]
+                data["technical_goals"] = technical_goals
+
+            # Harmonisation des longueurs
+            if isinstance(targets, list) and isinstance(technical_goals, list):
+                if len(targets) > len(technical_goals) and len(technical_goals) == 1:
+                    data["technical_goals"] = technical_goals * len(targets)
+                elif len(technical_goals) > len(targets) and len(targets) == 1:
+                    data["targets"] = targets * len(technical_goals)
+                elif len(targets) != len(technical_goals):
+                    min_len = min(len(targets), len(technical_goals))
+                    data["targets"] = targets[:min_len]
+                    data["technical_goals"] = technical_goals[:min_len]
+
+        return data
 
     @model_validator(mode='after')
     def validate_targets_consistency(self) -> 'DiscoveryRequest':

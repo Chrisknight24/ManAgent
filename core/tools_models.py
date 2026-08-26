@@ -27,6 +27,14 @@ class ToolDecision(BaseDiscoverySchema):
         default="{}",
         description=_("Chaîne JSON contenant les arguments pour l'outil (si success=True).")
     )
+    rejection_reason: Optional[str] = Field(
+        None,
+        description=_("Texte explicatif si success=False (ex: Raison du refus, paramètre manquant, variable introuvable).")
+    )
+    message: Optional[str] = Field(
+        None,
+        description=_("Alias pour rejection_reason si disponible.")
+    )
 
 
 class AnalysisResult(BaseModel):
@@ -42,7 +50,11 @@ class AnalysisResult(BaseModel):
         None,
         description=_("La réponse de l'analyse (peut être une chaîne, un nombre, une liste, etc.).")
     )
-    message: Optional[str] = Field(
+    error_reason: Optional[str] = Field(
         None,
         description=_("Message complémentaire (ex: raison de l'échec).")
+    )
+    message: Optional[str] = Field(
+        None,
+        description=_("Explication complémentaire ou raison de l'échec (compatible avec les deux dénominations).")
     )

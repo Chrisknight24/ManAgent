@@ -101,6 +101,11 @@ class DiscoverySession:
         elif self._llm and hasattr(self._llm, 'get_data_context'):
             self._data_context = self._llm.get_data_context()
 
+        if hasattr(self.explorer, "set_data_context"):
+            self.explorer.set_data_context(self._data_context)
+        else:
+            self.explorer._current_data_context = self._data_context
+
         self._is_running = True
         Logger.info(f"[DiscoverySession:{self.session_id}] Démarrage de la session.")
 

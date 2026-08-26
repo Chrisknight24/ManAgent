@@ -1,0 +1,138 @@
+================================================================================
+MANAGEMENT / POINT 8 : FEUILLE DE ROUTE D'IMPLÉMENTATION "DATA ASSET CENTRIC"
+================================================================================
+
+Date de création : Août 2026
+Objectif : Transformer MANAGENT en architecture "DataAsset-Centric" unifiée.
+Toute donnée (fichiers, longs messages, retours d'outils, mémoire, entités, arbres d'exécution)
+est désormais une ressource adressable par URI (DataAsset), forable via Progressive Disclosure.
+
+État global d'avancement : [✅] 100% Terminé – Phases 1 à 6 entièrement implémentées et validées
+
+--------------------------------------------------------------------------------
+LÉGENDE DU STATUT :
+[ ] Non démarré
+[⏳] En cours de développement
+[✅] Terminé et validé (Tests + Lint + Typecheck réussis)
+--------------------------------------------------------------------------------
+
+================================================================================
+PHASE 1 : SOCLE UNIFIÉ "DATA ASSET" & ASSET REGISTRY
+================================================================================
+Objectif : Poser les structures de données fondamentales, le schéma d'URI universel,
+les métadonnées déterministes, et le registre centralisé d'Assets par session.
+
+- [✅] 1.1 Modèle de base `DataAsset` & `AssetMetadata` (`core/discovery/data_asset.py`) :
+      - Identifiant unique & URI (`scheme://path` ou `data_type://target`)
+      - Métadonnées techniques déterministes : taille (bytes/chars), tokens estimés,
+        hash SHA-256, mime_type, encoding, line_count
+      - Déclaration des `capabilities` supportées (ex: `['search', 'read_slice', 'get_head', 'get_tail', 'schema', 'summarize']`)
+      - Système de prévisualisation déterministe (`preview`) sans appel LLM
+      - Méthode abstraite/générique `dump_data()`, `get_head()`, `get_tail()`, `read_slice()`
+- [✅] 1.2 Registre Universel `AssetRegistry` (`core/discovery/asset_registry.py`) :
+      - Gestion du cycle de vie des assets par session (`session_id`)
+      - Indexation et résolution rapide par URI (`resolve_asset(uri)`)
+      - Stockage immuable des contenus bruts en mémoire/disque local de session
+      - Génération du Manifeste global pour l'Orchestrateur
+- [✅] 1.3 Validation & Tests unitaires du Socle Phase 1
+
+================================================================================
+PHASE 2 : INGESTION INTELLIGENTE & CLASSIFICATION VOLUMÉTRIQUE (INPUT INGESTOR)
+================================================================================
+Objectif : Remplacer l'injection aveugle du message utilisateur par un pipeline
+d'ingestion déterministe ultra-rapide.
+
+- [✅] 2.1 Moteur `InputIngestor` (`core/discovery/input_ingestor.py`) :
+      - Politiques de volumétrie configurables (`INLINE_LIMIT`, `SOFT_ASSET_LIMIT`, `HARD_ASSET_LIMIT`)
+      - Classification instantanée : `INLINE` vs `ASSET`
+      - Gestion transparente des pièces jointes (fichiers glissés-déposés, logs, documents)
+- [✅] 2.2 Classes d'Assets Spécialisées :
+      - `UserPayloadDataAsset` (`inputs://turn_N/payload`)
+      - `FileDataAsset` (`files://filename.ext`)
+- [✅] 2.3 Intégration dans le flux d'entrée de l'Orchestrateur & SessionMemory (Enregistrement effectif de FilesProvider, InputsProvider, FilesExplorer et ingestion automatique)
+- [✅] 2.4 Validation & Tests d'ingestion (messages géants, fichiers attachés, messages courts)
+
+================================================================================
+PHASE 3 : PROJECTION DU CONTEXTE & INTÉGRATION DE L'ORCHESTRATEUR
+================================================================================
+Objectif : Permettre à l'Orchestrateur de voir les Manifestes d'Assets sans déborder son budget.
+
+- [✅] 3.1 Adaptation de `ContextManager` (`core/context_manager.py`) :
+      - Construction de la section `### [RESSOURCES & DATA ASSETS DISPONIBLES]`
+      - Gestion du budget de tokens pour les manifestes et previews d'assets
+- [✅] 3.2 Adaptation des prompts Orchestrateur (`prompts/fr/orchestrator.md` & `prompts/base/orchestrator.md`) :
+      - Apprentissage du routage basé sur les URI et les Assets déclarés
+- [✅] 3.3 Validation & Tests du routage cognitif Orchestrateur avec Manifestes
+
+================================================================================
+PHASE 4 : DISCOVERY ENGINE & FORAGE MULTI-FORMATS (FILES & PAYLOADS EXPLORER)
+================================================================================
+Objectif : Fournir au DiscoveryEngine les outils pour forer précisément dans les DataAssets.
+
+- [✅] 4.1 Implémentation de `FilesProvider` / `InputsProvider` (`core/discovery/providers/files_provider.py`)
+- [✅] 4.2 Implémentation de `FilesExplorer` (`core/discovery/explorers/files_explorer.py`) :
+      - Outils exposés au LLM : `read_asset_head`, `read_asset_tail`, `read_asset_slice`,
+        `search_asset` (recherche textuelle / regex), `inspect_asset`
+      - Protection stricte anti-débordement sur chaque tranche retournée (`MAX_SLICE_CHARS = 4000`)
+- [✅] 4.3 Enregistrement dans `DiscoveryEngine` et support du drill-down progressif
+- [✅] 4.4 Validation & Tests de forage sur fichiers volumineux (logs, codes, textes)
+
+================================================================================
+PHASE 5 : GROS RETOURS D'OUTILS, INTERPOLATION DES VARIABLES & PROTECTION DES LLMS PROFONDS
+================================================================================
+Objectif : Éviter que les sorties d'outils massives, les variables volumineuses ($@_)
+ou les interpolations ne saturent l'arbre d'exécution, le ToolsManager, ou les LLMs profonds.
+
+- [✅] 5.1 Modèle `ToolOutputDataAsset` (`core/discovery/data_asset.py` ou `tool_output_asset.py`) :
+      - URI format : `outputs://step_{step_id}_{tool_name}`
+      - Stockage immuable du retour brut intégral (stdout, stderr, dump JSON, logs)
+      - Calcul déterministe en O(1) de l'AssetMetadata (taille, lignes, tokens, aperçu head/tail)
+      - Enregistrement automatique dans l'AssetRegistry de session
+
+- [✅] 5.2 Interception & Stockage dans `Executor` (`core/executor.py`) :
+      - Détection de volumétrie à la fin de chaque étape d'exécution d'outil :
+        * Si retour <= `INLINE_LIMIT` (~3 000 chars) : stocké directement dans le registre de variables.
+        * Si retour > `INLINE_LIMIT` : encapsulé dans un `ToolOutputDataAsset`. La variable dans le registre
+          stocke la référence URI, les métadonnées et un aperçu compact.
+      - Sécurisation de l'évaluation de convergence sémantique (`_evaluate_semantic_convergence`) :
+        reçoit uniquement l'aperçu synthétique de l'Asset, évitant l'explosion du juge LLM.
+
+- [✅] 5.3 Sécurisation de l'Interpolation des Variables (`_interpolate_text` & `_handle_abstract_task`) :
+      - Protection des sous-tâches abstraites : si une variable `$@_` volumineuse est interpolée
+        dans le prompt d'un Solver enfant (`step_context`, `goal`), injection de la référence URI
+        et du manifeste de l'Asset plutôt que 50 Mo de texte brut.
+      - Le Solver enfant explore la donnée via le `DiscoveryEngine` (`outputs://...`).
+
+- [✅] 5.4 Protection du `ToolsManager` & des Outils Internes d'Analyse (`tools/tools_manager.py` & `tools/internal_tools.py`) :
+      - Le premier LLM de décision voit déjà les métadonnées (`$@_name` : type + desc).
+      - Sécurisation des handlers profonds (`llm_analyze_data`, `extract_json_value`) :
+        protection contre le débordement de tokens avec budget maximal garanti et drill-down sans saturation de prompt.
+
+- [✅] 5.5 Intégration du Provider `outputs://` dans `Orchestrator` et `FilesExplorer` :
+      - Enregistrement effectif de `OutputsProvider` et mapping dans `FilesExplorer` pour le forage des résultats d'outils.
+
+- [✅] 5.6 Validation & Tests d'exécution avec gros retours d'outils (stdout massif, JSON géant).
+
+================================================================================
+PHASE 6 : EXTENSION DU REGISTRY & COMMUNICATION DES ENTITÉS EN MODE "DATA ASSET"
+================================================================================
+Objectif : Faire respirer le `SolverRegistry`, l'arbre de variables d'exécution
+et les échanges entre Entités au format `DataAsset`.
+
+- [✅] 6.1 Unification de `RegistryDataAsset` et des variables d'exécution (`registry://var_name`) :
+      - Création déterministe avec calcul en O(1) de l'AssetMetadata (taille, lignes, sha256, tokens).
+      - Support transparent des objets JSON, primitives, et DataAssets encapsulés.
+      - `SolverRegistryProvider` et `PresentatorRegistryProvider` harmonisés.
+
+- [✅] 6.2 Communication inter-entités par URI de données (`EntityManifest` & `EntityLearner`) :
+      - Échanges normalisés par schémas d'URI (`registry://`, `files://`, `inputs://`, `outputs://`).
+      - Exploration et drill-down par les entités enfants et le Presentator sans duplication de payload.
+
+- [✅] 6.3 Audit de compatibilité et non-régression sur l'ensemble de MANAGENT :
+      - Compilation TypeScript, linting, gestion des schémas et validation des contrats sans erreur.
+
+- [✅] 6.4 Rapport de validation complet Phase 1 à 6.
+
+================================================================================
+FIN DE LA FEUILLE DE ROUTE – ARCHITECTURE DATA ASSET 100% OPÉRATIONNELLE
+================================================================================

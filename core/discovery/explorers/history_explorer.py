@@ -1,8 +1,8 @@
 """
-core/discovery/explorers/facts_explorer.py
+core/discovery/explorers/history_explorer.py
 ======================================================
-Explorer pour inspecter les faits mémorisés (profils, préférences, contraintes).
-Implémente intégralement l'interface BaseExplorer (outils, exécution, génération de plan, signatures).
+Explorer pour interroger l'historique conversationnel de la session.
+Permet d'extraire des verbatim de tours, de rechercher des mots-clés ou de relire les derniers échanges.
 """
 
 import json
@@ -30,15 +30,14 @@ class ExplorerPlanOutput(BaseModel):
     )
 
 
-class FactsExplorer(BaseExplorer):
+class HistoryExplorer(BaseExplorer):
     """
-    Explorer pour les faits sémantiques mémorisés.
-    Permet à l'Orchestrateur d'explorer le profil utilisateur, les préférences et les faits globaux.
+    Explorer pour l'historique de chat de la session courante.
     """
 
     def __init__(self, runtime_state: RuntimeState, entity=None, llm: Optional[Llm] = None):
         super().__init__(runtime_state)
-        self._data_type = "facts"
+        self._data_type = "history"
         self.entity = entity
         self.llm = llm
         self._prompt_loader = get_prompt_loader()
@@ -47,66 +46,65 @@ class FactsExplorer(BaseExplorer):
         return self._data_type
 
     def get_scope_description(self) -> str:
-        return "Accède aux faits durables, aux préférences mémorisées et aux éléments de contexte de l'utilisateur."
+        return "Consulte l'historique conversationnel textuel et les échanges de messages des tours précédents."
 
     def get_available_goals(self) -> List[str]:
         return [
-            "list_facts",
-            "get_user_profile",
-            "get_preferences",
-            "search_facts"
+            "get_recent_history",
+            "get_history_by_turns",
+            "search_history",
+            "list_history",
+            "get_history"
         ]
 
     def get_non_cacheable_goals(self) -> List[str]:
-        """Les recherches libres par mot-clé ne doivent pas masquer d'autres requêtes."""
-        return ["search_facts"]
+        """Les recherches sémantiques libres ne sont pas cacheables."""
+        return ["search_history"]
+
+    def _normalize_technical_goal(self, tg: str) -> str:
+        tg_clean = tg.strip().lower()
+        if tg_clean in ("list_history", "get_history", "recent", "recent_history"):
+            return "get_recent_history"
+        if tg_clean in ("by_turns", "history_by_turns", "turns"):
+            return "get_history_by_turns"
+        if tg_clean in ("search", "find_history"):
+            return "search_history"
+        return tg
 
     def get_tools_description(self) -> List[Dict[str, Any]]:
         return [
             {
-                "name": "list_facts",
+                "name": "get_recent_history",
                 "description": _(
-                    "Retourne la liste des faits mémorisés pour une cible donnée. "
-                    "Paramètre requis : 'target' ('user_profile', 'preferences' ou 'all_facts')."
+                    "Retourne les 10 derniers messages échangés de la session."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "get_history_by_turns",
+                "description": _(
+                    "Retourne l'intégralité d'une tranche d'échanges spécifiée par les tours. "
+                    "Paramètre requis : 'target' (ex: 'turns_1_4' ou 'turn_3')."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "target": {
                             "type": "string",
-                            "enum": ["user_profile", "preferences", "all_facts"],
-                            "description": "La catégorie de faits à inspecter"
+                            "description": "La tranche de tours (ex: 'turns_1_4' ou 'turn_3')"
                         }
                     },
                     "required": ["target"]
                 }
             },
             {
-                "name": "get_user_profile",
+                "name": "search_history",
                 "description": _(
-                    "Extrait spécifiquement les informations d'identité, nom, prénom, langue ou métier de l'utilisateur."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            },
-            {
-                "name": "get_preferences",
-                "description": _(
-                    "Extrait les préférences d'interaction, directives de style et souhaits de l'utilisateur."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            },
-            {
-                "name": "search_facts",
-                "description": _(
-                    "Recherche textuelle parmi tous les faits mémorisés contenant un mot-clé précis. "
+                    "Recherche par mot-clé parmi les messages de l'historique. "
                     "Paramètre requis : 'keyword'."
                 ),
                 "parameters": {
@@ -114,7 +112,7 @@ class FactsExplorer(BaseExplorer):
                     "properties": {
                         "keyword": {
                             "type": "string",
-                            "description": "Le mot-clé à rechercher dans les faits"
+                            "description": "Le mot-clé à rechercher"
                         }
                     },
                     "required": ["keyword"]
@@ -126,79 +124,41 @@ class FactsExplorer(BaseExplorer):
         try:
             provider = None
             if self.entity and hasattr(self.entity, "get_data_provider"):
-                provider = self.entity.get_data_provider("facts")
+                provider = self.entity.get_data_provider("history")
 
-            if tool_name == "list_facts":
-                target = args.get("target", "all_facts")
-                return await self._list_facts(provider, target)
-            elif tool_name == "get_user_profile":
-                return await self._list_facts(provider, "user_profile")
-            elif tool_name == "get_preferences":
-                return await self._list_facts(provider, "preferences")
-            elif tool_name == "search_facts":
+            if tool_name == "get_recent_history":
+                return await self._get_history(provider, "recent")
+            elif tool_name == "get_history_by_turns":
+                target = args.get("target", "recent")
+                return await self._get_history(provider, target)
+            elif tool_name == "search_history":
                 keyword = args.get("keyword", "")
-                return await self._search_facts(provider, keyword)
+                return await self._get_history(provider, f"search:{keyword}")
             else:
                 return {"success": False, "data": None, "message": _("Outil inconnu : {}").format(tool_name)}
         except Exception as e:
-            Logger.error(f"[FactsExplorer] Erreur lors de l'exécution de '{tool_name}' : {e}")
+            Logger.error(f"[HistoryExplorer] Erreur lors de l'exécution de '{tool_name}' : {e}")
             return {"success": False, "data": None, "message": str(e)}
 
-    async def _list_facts(self, provider, target: str) -> Dict[str, Any]:
+    async def _get_history(self, provider, target: str) -> Dict[str, Any]:
         if not provider:
-            return {"success": False, "data": None, "message": _("Aucun DataProvider 'facts' disponible.")}
-        
+            return {"success": False, "data": None, "message": _("Aucun DataProvider 'history' disponible.")}
+
         asset = provider.get_asset(target)
         if not asset:
             return {"success": False, "data": None, "message": f"Cible '{target}' non trouvée."}
-        
-        raw_data = getattr(asset, "data", {})
-        facts = raw_data.get("facts", [])
+
+        # dump_data ou renvoyer les données structurées
+        text_verbatim = asset.dump_data()
         return {
             "success": True,
             "data": {
                 "target": target,
-                "count": len(facts),
-                "facts": [f.get("fact") for f in facts if f.get("fact")]
+                "description": asset.metadata.get("description", ""),
+                "verbatim": text_verbatim,
+                "messages": asset.data.get("messages", [])
             }
         }
-
-    async def _search_facts(self, provider, keyword: str) -> Dict[str, Any]:
-        if not provider:
-            return {"success": False, "data": None, "message": _("Aucun DataProvider 'facts' disponible.")}
-        
-        if not keyword:
-            return {"success": False, "data": None, "message": _("Le paramètre 'keyword' est requis.")}
-
-        asset = provider.get_asset("all_facts")
-        raw_data = getattr(asset, "data", {})
-        facts = raw_data.get("facts", [])
-        
-        kw_lower = keyword.lower()
-        matched = [f.get("fact") for f in facts if kw_lower in str(f.get("fact", "")).lower()]
-        
-        return {
-            "success": True,
-            "data": {
-                "keyword": keyword,
-                "count": len(matched),
-                "results": matched
-            }
-        }
-
-    def validate_target(self, target: str, provider: Optional['DataProvider'] = None) -> bool:
-        if provider:
-            return target in provider.get_targets()
-        return target in ["user_profile", "preferences", "all_facts"]
-
-    def create_signature(self, targets: List[str], technical_goals: List[str]) -> str:
-        if not targets or not technical_goals:
-            return f"{self._data_type}://unknown"
-        if len(targets) == 1:
-            return f"{self._data_type}://{targets[0]}/{technical_goals[0]}"
-        targets_str = "_".join(targets)
-        goals_str = "_".join(technical_goals)
-        return f"{self._data_type}://multi/{targets_str}/{goals_str}"
 
     async def generate_plan(
         self,
@@ -213,23 +173,37 @@ class FactsExplorer(BaseExplorer):
     ) -> DiscoveryPlan:
         effective_llm = llm or self.llm
         if not effective_llm:
-            raise RuntimeError(_("FactsExplorer n'a pas de LLM pour générer un plan."))
+            raise RuntimeError(_("HistoryExplorer n'a pas de LLM pour générer un plan."))
 
         if targets is None and target is not None:
             targets = [target]
         if technical_goals is None and technical_goal is not None:
             technical_goals = [technical_goal]
 
-        if not targets or not technical_goals:
-            raise ValueError(_("Au moins une cible et un goal technique doivent être spécifiés."))
+        if not targets:
+            targets = ["recent"]
+        if not technical_goals:
+            technical_goals = ["get_recent_history"]
+
+        # Normaliser les goals techniques
+        technical_goals = [self._normalize_technical_goal(tg) for tg in technical_goals]
+
+        # Ajuster les longueurs si nécessaire
         if len(targets) != len(technical_goals):
-            raise ValueError(_("Les listes 'targets' et 'technical_goals' doivent avoir la même longueur."))
+            if len(technical_goals) == 1:
+                technical_goals = technical_goals * len(targets)
+            elif len(targets) == 1:
+                targets = targets * len(technical_goals)
+            else:
+                min_len = min(len(targets), len(technical_goals))
+                targets = targets[:min_len]
+                technical_goals = technical_goals[:min_len]
 
         available_goals = self.get_available_goals()
         for tg in technical_goals:
             if tg not in available_goals:
                 raise ValueError(
-                    _("Le goal technique '{tg}' n'est pas supporté par FactsExplorer. Goals disponibles : {goals}")
+                    _("Le goal technique '{tg}' n'est pas supporté par HistoryExplorer. Goals disponibles : {goals}")
                     .format(tg=tg, goals=", ".join(available_goals))
                 )
 
@@ -295,7 +269,8 @@ class FactsExplorer(BaseExplorer):
                     raise ValueError(_("Étape {idx} de type 'tool' sans tool_name").format(idx=idx))
                 if step.tool_name not in tool_names:
                     raise ValueError(
-                        _("L'outil '{tool_name}' demandé n'existe pas pour FactsExplorer. Outils disponibles : {tools}")
+                        _("L'outil '{tool_name}' demandé n'existe pas pour HistoryExplorer. "
+                          "Outils disponibles : {tools}")
                         .format(tool_name=step.tool_name, tools=", ".join(tool_names))
                     )
                 try:
@@ -345,3 +320,15 @@ class FactsExplorer(BaseExplorer):
             technical_goals=technical_goals,
             signature=signature
         )
+
+    def validate_target(self, target: str, provider: Optional['DataProvider'] = None) -> bool:
+        return True
+
+    def create_signature(self, targets: List[str], technical_goals: List[str]) -> str:
+        if not targets or not technical_goals:
+            return f"{self._data_type}://unknown"
+        if len(targets) == 1:
+            return f"{self._data_type}://{targets[0]}/{technical_goals[0]}"
+        targets_str = "_".join(targets)
+        goals_str = "_".join(technical_goals)
+        return f"{self._data_type}://multi/{targets_str}/{goals_str}"

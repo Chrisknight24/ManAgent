@@ -187,6 +187,10 @@ class MissionSignature(BaseModel):
     object: str = Field(..., description="L'objet de l'action (ex: chrome, excel, notepad)")
     desired_state: Optional[str] = Field(None, description="État final souhaité (optionnel, ex: ouvert, fermé)")
 
+class AssetInjection(BaseModel):
+    uri: str = Field(..., description="L'URI exact de la ressource (ex: inputs://turn_1, files://photo.jpg)")
+    variable_name: str = Field(..., description="Le nom de la variable à créer (doit commencer par data_, ex: data_target_image)")
+    description: str = Field(..., description="Description de ce que contient cet asset pour aider le Planner")
 
 class OrchestratorDecision(BaseModel):
     """
@@ -203,6 +207,10 @@ class OrchestratorDecision(BaseModel):
     signatures: List[MissionSignature] = Field(
         default_factory=list,
         description=_("Liste des missions simples extraites de la demande, si applicable (obligatoire si type='mission').")
+    )
+    injected_assets: List[AssetInjection] = Field(
+        default_factory=list,
+        description=_("Liste des assets à injecter dans la mémoire du Solver sous forme de variables (obligatoire s'il y a des fichiers/inputs nécessaires à la mission).")
     )
     discovery_request: Optional[DiscoveryRequest] = Field(
         ...,  # OBLIGATOIRE dans le JSON, mais peut être null
@@ -225,9 +233,11 @@ class OrchestratorDecision(BaseModel):
         if self.type == OrchestratorMode.REQUEST:
             if self.discovery_request is None:
                 raise ValueError(_("Le champ 'discovery_request' est obligatoire lorsque type='request'."))
+            if not getattr(self.discovery_request, 'data_type', None) or not getattr(self.discovery_request, 'targets', None):
+                raise ValueError(_("Le champ 'discovery_request' doit spécifier un 'data_type' et au moins une cible."))
         else:
             if self.discovery_request is not None:
-                raise ValueError(_("Le champ 'discovery_request' doit être null pour les types 'direct' et 'mission'."))
+                self.discovery_request = None
         return self
     
 

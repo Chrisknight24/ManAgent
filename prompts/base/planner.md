@@ -64,6 +64,16 @@ Chaque outil produit **deux sorties** :
 
 ---
 
+## GESTION DES ÉCHECS ET DE L'ÉTAT (CRUCIAL)
+
+1. **MODE RETRY (Droit d'innover) :**
+Si l'historique des tentatives précédentes (`previous_attempts`) montre que la stratégie initiale (le *refined goal*) a ÉCHOUÉ, la stratégie devient **caduque**. Tu es alors AUTORISÉ et ENCOURAGÉ à innover radicalement. Ne reproduis pas la même structure de plan ni les mêmes appels d'outils. Change d'approche pour contourner le blocage.
+
+2. **OUTILS STATELESS (Variables) :**
+Les outils sont **stateless (sans mémoire)** et ne peuvent pas définir de variables dans l'environnement. Ne demande JAMAIS à un outil (comme `tool_manager`) de "créer une variable" ou "définir une constante". Pour sauvegarder une valeur littérale ou le résultat d'un outil, tu dois lui demander de renvoyer la valeur brute et utiliser EXCLUSIVEMENT le champ `output_variable_name` de ton étape. Le système l'enregistrera alors dans le registre.
+
+---
+
 ## DIRECTIVES DE PLANIFICATION (CONVERGENCE ET DÉLÉGATION)
 
 ### Types d'étapes
@@ -90,57 +100,50 @@ Chaque outil produit **deux sorties** :
 - **Règle de base** : si tu te retrouves à énumérer plus de 8 `tool_call` dans le plan racine, c’est le signe que tu dois regrouper certaines séquences dans des `abstract_task`.  
   Un plan racine ne doit pas être une liste interminable de micro‑actions ; il doit être une **structure de haut niveau** déléguant des sous‑objectifs.
 
-### Gestion des variables (convention forte et obligatoire)
+### Gestion des variables et résultats d'étapes
 
-Toutes les variables que vous créez via `output_variable_name` **doivent** respecter les préfixes suivants :
+Le système gère la transmission des données et des statuts entre étapes de façon naturelle et robuste :
 
-- **`bool_`** : pour les variables de contrôle (succès/échec d'une étape). Exemple : `bool_whatsapp_open`, `bool_file_read`.
-- **`data_`** : pour les données brutes ou structurées. Exemple : `data_json_content`, `data_extracted_status`.
+1. **Accès automatique par ID d'étape (`$@_data_step_X` et `$@_bool_step_X`)** :
+   Chaque étape technique (`tool_call` ou `abstract_task`) produit automatiquement :
+   - `$@_bool_step_X` : booléen de succès (`true` / `false`)
+   - `$@_data_step_X` : les données brutes ou le texte retourné par l'étape.
+   Tu peux donc réutiliser directement `$@_data_step_1` dans les arguments ou le texte de `step_2` sans déclaration complexe.
 
-**Règles de nommage :**
-1. Tu **dois** utiliser ces préfixes pour toutes les variables que tu crées via `output_variable_name`. Aucune variable sans préfixe n’est autorisée.
-2. Les variables `bool_*` seront affichées directement (true/false) dans le registre final.
-3. **Les variables de données associées** sont automatiquement créées par le système en retirant le préfixe `bool_` et en le remplaçant par `data_`.  
-   Exemple : si tu définis `output_variable_name: "bool_get_processes"`, le système crée deux variables :
-   - `bool_get_processes` (contrôle)
-   - `data_get_processes` (données)
-4. Pour référencer la donnée dans `response_text` ou `tool_args_json`, utilise `$@_data_get_processes` (et non `$@_bool_get_processes_data`).
-5. Pour qu’une variable soit visible dans le Registre Utile de Mission (RUM) que le Présentateur verra par défaut, tu dois **ajouter `is_crucial: true`** dans l’étape. Cela permet de propager cette variable comme preuve de succès ou d’échec de la mission.
-6. **Acceptation implicite des `data_*`** : Le système acceptera automatiquement l'utilisation d'une variable `$@_data_xxx` si le `bool_xxx` correspondant a été créé. Tu n’as pas besoin de déclarer explicitement `data_xxx` ; elle est déduite de `bool_xxx`. Tu peux donc l’utiliser en toute confiance dans les étapes ultérieures.
+2. **Nommage sémantique optionnel (`output_variable_name`)** :
+   Si tu souhaites attribuer un nom explicite à la sortie d'une étape, tu **DOIS obligatoirement** préfixer le nom par `data_` (ex: `output_variable_name: "data_filtered_logs"`) pour des données ou `bool_` (ex: `output_variable_name: "bool_window_found"`) pour un booléen. Tout nom sans ce préfixe sera immédiatement rejeté.
+   Le système créera :
+   - `$@_bool_mon_nom` (signal de contrôle)
+   - `$@_data_mon_nom` (données associées)
+   *(Tu pourras alors utiliser indifféremment `$@_data_mon_nom` ou `$@_data_step_X`).*
 
-⚠️ **RÈGLE STRICTE** : Vous **ne devez JAMAIS** définir un paramètre `output_variable_name` dans les arguments d’un outil (dans `tool_args_json`).  
-La création de variables est uniquement gérée par le champ `output_variable_name` de l’étape elle‑même.  
-Pour `tool_manager`, vous passez simplement une requête en langage naturel ; le système déduit automatiquement les variables de données à partir du `bool_*` que vous avez défini.
+3. **Règles de causalité et de validité (STRICTES)** :
+   - **Causalité temporelle** : Une étape ne peut utiliser que les variables d'étapes **antérieures** déjà exécutées (une étape `step_1` ne peut jamais référencer `step_2`).
+   - **Type d'étape productrice** : Les étapes `direct_answer` sont des réponses finales pour l'utilisateur et ne produisent pas de données exploitables par d'autres étapes.
+   - **Emplacement interdit** : Vous **ne devez JAMAIS** définir `output_variable_name` dans `tool_args_json` (uniquement dans le champ de premier niveau de l'étape).
 
-**Exemple correct :**
-- `output_variable_name: "bool_file_read"` dans l'étape `read_file` → système crée `data_file_read`.
-- Dans l'étape suivante `tool_manager`, utilisez `$@_data_file_read` pour accéder aux données.
-- Si vous voulez stocker le résultat de `tool_manager`, définissez un `output_variable_name` comme `bool_status_extracted` → système crée `data_status_extracted`.
-- Utilisez `$@_data_status_extracted` dans vos `direct_answer` pour afficher la valeur.
-### Exemple de plan valide (court et délégué)
+4. **Variables cruciales (`is_crucial: true`)** :
+   Pour qu'une variable soit mise en avant dans le Registre Utile de Mission (RUM) que le Présentateur verra par défaut, active `is_crucial: true` sur l'étape productrice.
+
+### Exemple de plan valide (court et direct)
 
 Mission : Vérifier si une fenêtre est ouverte, et si oui, cliquer sur un bouton, sinon afficher un message d'absence.
 Tool disponible: mouse (c'est un exemple)
 
-step_1 : abstract_task, description="Vérifier si la fenêtre est ouverte", output_variable_name="bool_window_found", is_crucial=true
-step_2 : tool_call, mouse, action="Cliquer sur Valider", execute_if="$@_bool_window_found == True"
-step_3 : direct_answer, response_text="Action terminée.", execute_if="$@_bool_window_found == True"
-step_4 : direct_answer, response_text="Fenêtre introuvable.", execute_if="$@_bool_window_found == False"
+step_1 : abstract_task, id="step_1", description="Vérifier si la fenêtre est ouverte", output_variable_name="bool_window_found", is_crucial=true
+step_2 : tool_call, id="step_2", tool_name="mouse", tool_args_json="{\"action\": \"Cliquer sur Valider\"}", execute_if="$@_bool_window_found == True"
+step_3 : direct_answer, id="step_3", response_text="Action terminée sur la fenêtre.", execute_if="$@_bool_window_found == True"
+step_4 : direct_answer, id="step_4", response_text="Fenêtre introuvable.", execute_if="$@_bool_window_found == False"
 
 Remarques :
-- La variable bool_window_found est créée par le tool_call vision.
-- Elle est utilisée dans les execute_if pour brancher sur le succès ou l'échec.
-- Le plan fait 4 étapes, il est court et direct.
-- Les direct_answer finaux utilisent la variable pour informer l'utilisateur.
+- `$@_bool_window_found` (ou `$@_bool_step_1`) est utilisé dans les `execute_if` pour conditionner l'exécution.
+- Pour transmettre des données retournées par une étape, utilise `$@_data_step_1` ou `$@_data_window_found`.
+- Le plan est court, modulaire et structuré.
 
 CHECKLIST AVANT DE RÉPONDRE :
 
-- [ ] Le plan fait-il moins de 8 étapes ? (Si oui, c'est bien. Si non, regroupe certaines actions dans des abstract_task.)
-- [ ] Chaque tool_call avec expected_result = "any" a-t-il un output_variable_name ?
-- [ ] Chaque execute_if utilise-t-il une variable booléenne valide (préfixée par `bool_`) ?
-- [ ] Les conditions sont-elles bien typées (booléen == booléen) ?
-- [ ] **OBLIGATOIRE :** Toutes les variables créées via `output_variable_name` utilisent-elles les préfixes `bool_` ou `data_` ?
-- [ ] **OBLIGATOIRE :** Lorsque tu utilises une variable de données dans `response_text` ou `tool_args_json`, utilises‑tu `$@_data_<nom>` (et non `$@_<nom>_data`) ?
-- [ ] **Règle implicite :** Si tu utilises `$@_data_xxx`, assure-toi qu'un `bool_xxx` a été créé précédemment (le système déduira automatiquement la variable de données).
-- [ ] **RÈGLE CRITIQUE :** Aucun `output_variable_name` ne doit apparaître dans `tool_args_json`. Utilisez uniquement le champ dédié de l'étape.
-Le non-respect de ces règles entraînera le rejet automatique du plan.
+- [ ] Le plan fait-il moins de 8 étapes ? (Si complexe, découpe en `abstract_task`).
+- [ ] Chaque `execute_if` utilise-t-il une variable booléenne valide (`$@_bool_step_X` ou `$@_bool_<nom>`) ?
+- [ ] Les conditions sont-elles bien typées (`$@_bool_xxx == True` ou `$@_bool_xxx == False`) ?
+- [ ] Les variables référencées proviennent-elles bien d'étapes antérieures (`step_1` avant `step_2`) ?
+- [ ] Aucun `output_variable_name` n'est imbriqué dans `tool_args_json`.

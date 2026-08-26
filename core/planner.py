@@ -179,76 +179,117 @@ class Planner(Entity):
         return proposed_plan
 
     def _validate_plan(self, plan: Plan, variable_registry: dict = None) -> Tuple[bool, List[str]]:
-        created_vars = set(variable_registry.keys()) if variable_registry else set()
-        used_vars = set()
+        known_vars = set(variable_registry.keys()) if variable_registry else set()
+        # Normalisation symétrique pour les variables héritées
+        for var in list(known_vars):
+            if var.startswith("bool_"):
+                known_vars.add("data_" + var[5:])
+            elif var.startswith("data_"):
+                known_vars.add("bool_" + var[5:])
+
         errors = []
         warnings = []
+        all_steps_by_id = {step.id: step for step in plan.steps}
+        steps_seen_so_far = set()
 
-        # 1. Ajouter les variables créées par output_variable_name des étapes
-        for step in plan.steps:
-            if step.output_variable_name:
-                created_vars.add(step.output_variable_name)
-                if step.output_variable_name.startswith("bool_"):
-                    created_vars.add("data_" + step.output_variable_name[5:])
-
-        # 2. Collecter toutes les utilisations de variables
-        for step in plan.steps:
-            for field in [step.execute_if, step.response_text, step.tool_args_json]:
+        for step_idx, step in enumerate(plan.steps):
+            # 1. Collecter les variables utilisées dans cette étape
+            used_in_this_step = set()
+            for field in [step.execute_if, step.response_text, step.tool_args_json, step.step_context, step.description]:
                 if field:
-                    matches = re.findall(r'\$@_([a-zA-Z0-9_]+)', field)
-                    used_vars.update(matches)
+                    matches = re.findall(r'(?:\$@_|@\$_)([a-zA-Z0-9_]+)', str(field))
+                    used_in_this_step.update(matches)
 
-        # 3. Vérifier les variables utilisées mais jamais créées
-        unknown = set()
-        for var in used_vars:
-            if var in created_vars:
-                continue
-            if var.startswith("data_"):
-                bool_var = "bool_" + var[5:]
-                if bool_var in created_vars:
-                    continue
-            unknown.add(var)
+            # 2. Vérification de disponibilité / causalité
+            for var in used_in_this_step:
+                is_available = False
+                if var in known_vars:
+                    is_available = True
+                elif var.startswith("data_") and ("bool_" + var[5:]) in known_vars:
+                    is_available = True
+                elif var.startswith("bool_") and ("data_" + var[5:]) in known_vars:
+                    is_available = True
 
-        if unknown:
-            errors.append(_("Variables utilisées mais jamais créées : {}").format(', '.join(unknown)))
+                if not is_available:
+                    # Vérifier si la variable fait référence à une étape connue
+                    matched_step_id = None
+                    if var.startswith("data_") or var.startswith("bool_"):
+                        cand_id = var[5:]
+                        if cand_id in all_steps_by_id:
+                            matched_step_id = cand_id
 
-        # 4. Variables créées mais jamais utilisées (sauf héritées)
-        inherited_vars = set(variable_registry.keys()) if variable_registry else set()
-        unused_plan_vars = (created_vars - used_vars) - inherited_vars
-        filtered_unused = set()
-        for var in unused_plan_vars:
-            if var.startswith("data_"):
-                bool_var = "bool_" + var[5:]
-                if bool_var in used_vars or bool_var in inherited_vars:
-                    continue
-            filtered_unused.add(var)
+                    # Vérifier si elle correspond à l'output_variable_name d'une étape future
+                    future_step = None
+                    for future_idx in range(step_idx + 1, len(plan.steps)):
+                        cand_step = plan.steps[future_idx]
+                        if cand_step.output_variable_name:
+                            out_name = cand_step.output_variable_name
+                            if var == out_name or (out_name.startswith("bool_") and var == "data_" + out_name[5:]) or (out_name.startswith("data_") and var == "bool_" + out_name[5:]):
+                                future_step = cand_step
+                                break
 
-        if filtered_unused:
-            warnings.append(_("Variables créées dans le plan mais jamais utilisées : {}").format(', '.join(filtered_unused)))
+                    if matched_step_id:
+                        target_step = all_steps_by_id[matched_step_id]
+                        if target_step.type == StepType.DIRECT_ANSWER:
+                            errors.append(
+                                _("L'étape '{}' tente d'utiliser la variable '{}' associée à l'étape '{}' de type 'direct_answer' (les réponses directes ne produisent pas de données pour d'autres étapes).")
+                                .format(step.id, var, matched_step_id)
+                            )
+                        elif matched_step_id not in steps_seen_so_far:
+                            errors.append(
+                                _("L'étape '{}' tente d'utiliser la variable '{}' provenant de l'étape future '{}' (erreur de causalité : l'étape n'a pas encore été exécutée).")
+                                .format(step.id, var, matched_step_id)
+                            )
+                        else:
+                            errors.append(
+                                _("L'étape '{}' tente d'utiliser la variable '{}' issue de l'étape '{}' qui n'a pas produit de données valides.")
+                                .format(step.id, var, matched_step_id)
+                            )
+                    elif future_step:
+                        errors.append(
+                            _("L'étape '{}' tente d'utiliser la variable '{}' issue de l'étape future '{}' (erreur de causalité temporelle).")
+                            .format(step.id, var, future_step.id)
+                        )
+                    else:
+                        errors.append(
+                            _("L'étape '{}' tente d'utiliser la variable inconnue '{}' qui n'a été produite par aucune étape antérieure ni par le contexte.")
+                            .format(step.id, var)
+                        )
 
-        # 5. Vérifications spécifiques aux étapes
-        for step in plan.steps:
-            if step.type == StepType.TOOL_CALL and step.expected_result == "any":
-                if not step.output_variable_name:
-                    errors.append(_("L'étape '{}' a expected_result='any' mais ne définit aucun output_variable_name.").format(step.id))
+            # 3. Enregistrer les variables produites par cette étape
+            steps_seen_so_far.add(step.id)
 
+            if step.type in [StepType.TOOL_CALL, StepType.ABSTRACT_TASK]:
+                known_vars.add(f"bool_{step.id}")
+                known_vars.add(f"data_{step.id}")
+
+            if step.output_variable_name:
+                out_name = step.output_variable_name
+                known_vars.add(out_name)
+                if out_name.startswith("bool_"):
+                    known_vars.add("data_" + out_name[5:])
+                elif out_name.startswith("data_"):
+                    known_vars.add("bool_" + out_name[5:])
+                else:
+                    known_vars.add("data_" + out_name)
+
+            # 4. Vérifications d'intégrité tool_args_json
             if step.type == StepType.TOOL_CALL and step.tool_args_json:
                 try:
                     args = json.loads(step.tool_args_json)
-                    forbidden_keys = ["output_variable_name", "output_var", "var_name", "variable_name"]
-                    for key in forbidden_keys:
-                        if key in args:
-                            errors.append(
-                                _("L'étape '{}' définit '{}' dans tool_args_json, ce qui est interdit. "
-                                "Utilisez uniquement le champ output_variable_name de l'étape pour créer des variables.")
-                                .format(step.id, key)
-                            )
-                            break
+                    if isinstance(args, dict):
+                        forbidden_keys = ["output_variable_name", "output_var", "var_name", "variable_name"]
+                        for key in forbidden_keys:
+                            if key in args:
+                                errors.append(
+                                    _("L'étape '{}' définit '{}' dans tool_args_json, ce qui est interdit. "
+                                    "Utilisez uniquement le champ output_variable_name de l'étape pour nommer des variables.")
+                                    .format(step.id, key)
+                                )
+                                break
                 except (json.JSONDecodeError, TypeError):
                     pass
 
-        if not errors and not warnings:
-            return True, []
         if not errors:
             return True, warnings
         return False, errors

@@ -8,6 +8,7 @@ mémorisées (`semantic_fact`, préférences utilisateur, profils).
 
 from typing import List, Dict, Any, Optional
 import json
+from pydantic import Field
 from core.discovery.data_provider import DataProvider
 from core.discovery.data_asset import DataAsset
 from utils.logger import Logger
@@ -15,7 +16,7 @@ from utils.logger import Logger
 
 class FactsDataAsset(DataAsset):
     """Asset représentant une collection de faits mémorisés."""
-    data: Dict[str, Any]
+    data: Dict[str, Any] = Field(default_factory=dict)
 
     def dump_data(self) -> str:
         try:

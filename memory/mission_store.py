@@ -7,6 +7,16 @@ from utils.logger import Logger
 from memory.session_memory import MissionCache
 
 
+def _safe_json_default(obj: Any) -> Any:
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump(mode="json")
+    if hasattr(obj, "to_dict"):
+        return obj.to_dict()
+    if hasattr(obj, "isoformat"):
+        return obj.isoformat()
+    return str(obj)
+
+
 class MissionStore:
 
     def __init__(self, db_path: str = "memory.db"):
@@ -60,10 +70,11 @@ class MissionStore:
                 mission_cache.execution_tree.model_dump(mode='json') if mission_cache.execution_tree else {},
                 indent=2, ensure_ascii=False
             )
-            resolved_json = json.dumps(mission_cache.resolved_data, indent=2, ensure_ascii=False)
+            resolved_json = json.dumps(mission_cache.resolved_data, indent=2, ensure_ascii=False, default=_safe_json_default)
             presentator_json = json.dumps(
                 mission_cache.presentator_result if mission_cache.presentator_result else {},
-                ensure_ascii=False
+                ensure_ascii=False,
+                default=_safe_json_default
             )
             finished_at_iso = mission_cache.finished_at.isoformat() if mission_cache.finished_at else None
             summary = mission_cache.summary or ""
@@ -160,21 +171,18 @@ class MissionStore:
                 row = cursor.fetchone()
                 if row:
                     d = dict(row)
-                    # Parser execution_tree
                     try:
                         raw_tree = d.pop("execution_tree_json", "{}") or "{}"
                         d["execution_tree"] = json.loads(raw_tree) if raw_tree and raw_tree != "{}" else None
                     except Exception as e:
                         Logger.warning(f"[MissionStore] Échec du parsing execution_tree pour {mission_id} : {e}")
                         d["execution_tree"] = None
-                    # Parser resolved_data : toujours un dict (même vide)
                     try:
                         raw_data = d.pop("resolved_data_json", "{}") or "{}"
                         d["resolved_data"] = json.loads(raw_data) if raw_data and raw_data != "{}" else {}
                     except Exception as e:
                         Logger.warning(f"[MissionStore] Échec du parsing resolved_data pour {mission_id} : {e}")
                         d["resolved_data"] = {}
-                    # Parser presentator_result si présent
                     try:
                         raw_pres = d.pop("presentator_result_json", "{}") or "{}"
                         d["presentator_result"] = json.loads(raw_pres) if raw_pres and raw_pres != "{}" else None

@@ -28,7 +28,7 @@ Trois responsabilités, dans cet ordre :
 from __future__ import annotations
 
 from typing import List, Optional, Callable, Awaitable, Any, Dict
-from core.plan_models import Plan, PlanValidationDecision, RiskLevel, DepthEscalationDecision
+from core.plan_models import Plan, PlanValidationDecision, RiskLevel, DepthEscalationDecision, StepType
 from core.execution_models import PlanAttempt
 from core.i18n import _
 from utils.logger import Logger
@@ -79,7 +79,6 @@ class PlanValidator:
         request_human_confirmation: Optional[
             Callable[[Plan, PlanValidationDecision], Awaitable[bool]]
         ] = None,
-        learner: Optional[Any] = None,
     ):
         """
         llm : objet exposant `generate_structured(prompt, schema, tag=...)`.
@@ -90,14 +89,12 @@ class PlanValidator:
         request_human_confirmation : callback optionnel appelé quand le LLM
             juge qu'une confirmation humaine est requise. None = pas de canal
             disponible (refus par prudence systématique dans ce cas).
-        learner : instance du Learner pour récupérer les leçons apprises par le Validator.
         """
         self._llm = llm
         self._prompt_loader = prompt_loader
         self._rules_text = rules_text
         self._language = language
         self._request_human_confirmation = request_human_confirmation
-        self._learner = learner
 
     # =====================================================
     # 1. Détection de motifs récursifs (déterministe, sans LLM)
@@ -203,6 +200,8 @@ class PlanValidator:
             attempts = getattr(tree, "attempts", None) or []
             for attempt in attempts:
                 outcome = getattr(attempt, "outcome", "?")
+                if outcome in ("in_progress", "pending"):
+                    continue
                 failure_reason = getattr(attempt, "failure_reason", None)
                 suffix = f" — ÉCHEC : {failure_reason}" if outcome == "failed" and failure_reason else ""
                 lines.append(f"{prefix}    tentative {getattr(attempt, 'attempt_number', '?')} : {outcome}{suffix}")
@@ -241,7 +240,15 @@ class PlanValidator:
             # exécutées inconditionnellement l'une après l'autre, ce qui
             # provoquait des refus de plans parfaitement valides.
             condition = f" [SI {step.execute_if}]" if getattr(step, "execute_if", None) else ""
-            lines.append(f"- {step.id} [{step.type.value}]{tool}{condition} : {step.description}{marker}{reason}")
+            if getattr(step, "output_variable_name", None):
+                out_var = f" [sortie: {step.output_variable_name} / $@_data_{step.output_variable_name}]"
+            elif step.type in (StepType.TOOL_CALL, StepType.ABSTRACT_TASK):
+                out_var = f" [sortie auto: $@_data_{step.id}]"
+            else:
+                out_var = ""
+            args = f" | args: {step.tool_args_json}" if getattr(step, "tool_args_json", None) and step.tool_args_json != "{}" else ""
+            resp = f" | réponse: {step.response_text}" if getattr(step, "response_text", None) else ""
+            lines.append(f"- {step.id} [{step.type.value}]{tool}{condition}{out_var} : {step.description}{args}{resp}{marker}{reason}")
         return "\n".join(lines)
 
     async def validate(
@@ -256,17 +263,6 @@ class PlanValidator:
         mission_history_summary = self.summarize_mission_history(mission_history_tree)
         declared_irreversible = [s.id for s in plan.steps if getattr(s, "is_irreversible", False)]
 
-        # Récupérer les conseils spécifiques au Validator (Learner)
-        advice = ""
-        if hasattr(self, "_learner") and self._learner:
-            try:
-                advice = await self._learner.get_advice(
-                    entity_types=["Validator"],
-                    goal=target_goal
-                )
-            except Exception as e:
-                Logger.warning(f"[PlanValidator] Erreur récupération conseils Validator : {e}")
-
         prompt = self._prompt_loader.load(
             "plan_validation.md",
             lang=self._language,
@@ -276,7 +272,6 @@ class PlanValidator:
             pattern_warning=pattern_warning,
             mission_history_summary=mission_history_summary,
             declared_irreversible_steps=declared_irreversible,
-            advice=advice,
         )
 
         try:

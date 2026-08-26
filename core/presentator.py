@@ -27,8 +27,10 @@ class PresentatorOutput(BaseDiscoverySchema):
 
 
 class PresentatorDataAsset(DataAsset):
-    value: Any
+    value: Any = None
     def dump_data(self) -> str:
+        if isinstance(self.value, DataAsset):
+            return self.value.dump_data()
         try:
             return json.dumps(self.value, ensure_ascii=False)
         except Exception:
@@ -53,7 +55,11 @@ class PresentatorRegistryProvider(DataProvider):
 
     def get_asset(self, target: str) -> DataAsset:
         info = self._registry.get(target, {})
+        if "asset" in info and isinstance(info["asset"], DataAsset):
+            return info["asset"]
         value = info.get("value")
+        if isinstance(value, DataAsset):
+            return value
         metadata = {
             "description": info.get("description", _("Pas de description")),
             "source": info.get("source", _("Inconnu")),
@@ -124,27 +130,39 @@ class Presentator(Entity):
     # ============================================================
 
     def _ensure_discovery_activated(self, registry: dict) -> None:
-        """Active la Progressive Disclosure une seule fois avec un DataProvider basé sur le registre."""
-        if self._discovery_activated:
-            return
+        """Active ou rafraîchit la Progressive Disclosure avec un DataProvider basé sur le registre."""
         if not getattr(self.runtime_state, "discovery_engine", None):
-            return
-        if self.llm._discovery_enabled:
-            self._discovery_activated = True
             return
 
         registry_provider = PresentatorRegistryProvider(registry)
         self.register_data_provider("registry", registry_provider)
-        self.llm.enable_discovery(self.runtime_state.discovery_engine, self)
         
-        # --- NOUVEAU : définir le data_context pour que les Explorers accèdent directement au registre ---
-        if registry:
+        # Mettre à jour data_context pour que les Explorers accèdent directement au registre source
+        if hasattr(self.llm, "set_data_context"):
             self.llm.set_data_context(registry)
             Logger.debug("[Presentator] data_context défini avec le registre source.")
-        
+
+        # Mettre à jour l'explorer 'registry' directement s'il existe
+        explorer = self.runtime_state.discovery_engine.get_explorer("registry")
+        if explorer:
+            if hasattr(explorer, "set_data_context"):
+                explorer.set_data_context(registry)
+            else:
+                explorer._current_data_context = registry
+
+        # Mettre à jour les attributs de repli sur runtime_state
+        self.runtime_state._solver_registry_for_tools = registry
+        if hasattr(self.runtime_state, "variable_registry"):
+            self.runtime_state.variable_registry = registry
+
+        if self.llm._discovery_enabled:
+            self._discovery_activated = True
+            return
+
+        self.llm.enable_discovery(self.runtime_state.discovery_engine, self)
         self._discovery_activated = True
         Logger.info("[Presentator] Progressive Disclosure activée avec DataProvider dynamique.")
-        
+
     # ============================================================
     # MÉTHODE STRUCTURÉE – AVEC VUE NORMALISÉE ET RUM
     # ============================================================
@@ -162,24 +180,19 @@ class Presentator(Entity):
         Logger.info(f"[Presentator] 📝 Génération structurée (rapport + résumé) pour statut: {mission_status}")
 
         # --- Utiliser le RUM si disponible, sinon le registre passé ---
-        # Le RUM est stocké dans runtime_state.mission_rum par l'Orchestrateur et les Solvers.
         rum = getattr(self.runtime_state, 'mission_rum', None)
         if rum:
-            # On utilise le RUM comme source principale
             source_registry = rum
             Logger.debug("[Presentator] Utilisation du Registre Utile de Mission (RUM).")
         else:
-            # Fallback : utiliser le registre passé (comportement legacy)
             source_registry = variable_registry
             Logger.debug("[Presentator] Aucun RUM trouvé, utilisation du registre legacy.")
 
         # --- Activation de la PD (avec le registre source) ---
         self._ensure_discovery_activated(source_registry)
 
-        # Construire la vue normalisée du registre (métadonnées uniquement)
         registry_metadata_view = self._build_registry_metadata_view(source_registry)
 
-        # Récupération du mood
         mood = None
         if hasattr(self.runtime_state, 'session_memory') and self.runtime_state.session_memory:
             mood = self.runtime_state.session_memory.context.mood
@@ -192,7 +205,7 @@ class Presentator(Entity):
             lang=getattr(self.runtime_state, "language", "en"),
             goal=goal,
             final_context=final_context,
-            variable_registry=registry_metadata_view,  # Vue normalisée
+            variable_registry=registry_metadata_view,
             accumulated_response=accumulated_response,
             mission_status=mission_status,
             error_reason=error_reason or "",

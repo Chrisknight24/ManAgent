@@ -150,40 +150,59 @@ class ToolsManager(Entity):
 
     def _get_internal_tools_view(self) -> List[Dict]:
         """
-        Retourne la vue unifiée des outils internes : uniquement tool_manager,
-        avec une description dynamique basée sur les capacités des sous-outils.
+        Retourne la vue unifiée des outils internes : tool_manager et load_literal_data,
+        avec une description compilée dynamiquement à partir des sous-outils gérés et de leurs capacités.
         """
-        # Collecter toutes les capacités
-        all_caps = set()
-        for meta in self._internal_tools_metadata.values():
+        tool_summaries = []
+        all_caps = []
+        for tool_name, meta in self._internal_tools_metadata.items():
+            desc = meta.get("description", "")
             caps = meta.get("capabilities", [])
-            all_caps.update(caps)
+            for c in caps:
+                if c not in all_caps:
+                    all_caps.append(c)
+            caps_str = f" [{', '.join(caps)}]" if caps else ""
+            tool_summaries.append(f"  • {tool_name}{caps_str} : {desc}")
 
-        if all_caps:
-            caps_text = ", ".join(sorted(all_caps))
-            description = _(
-                "Outil représentant les capacités internes d'analyse et de manipulation de données. "
-                "Il peut répondre à des requêtes en langage naturel pour : {caps}. "
-                "Pour l'utiliser, décrivez votre besoin via le paramètre 'request'."
-            ).format(caps=caps_text)
-        else:
-            description = _(
-                "Outil d'analyse de données interne. Décrivez votre besoin en langage naturel via le paramètre 'request'."
-            )
+        compiled_tools_str = "\n".join(tool_summaries) if tool_summaries else "  • Aucun sous-outil"
+        compiled_caps_str = ", ".join(all_caps) if all_caps else _("traitement et analyse de données")
 
-        return [{
-            "name": "tool_manager",
-            "role": "Analyse de données (interne)",
-            "description": description,
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "request": {"type": "string", "description": "Requête en langage naturel"}
+        description = _(
+            "Outil de délégation et chef d'orchestre d'analyse de données. "
+            "Il permet d'exécuter des traitements et des analyses avancées via ses sous-outils internes gérés.\n"
+            "Capacités dynamiques supportées : {caps}.\n"
+            "Sous-outils actuellement gérés :\n{tools}\n"
+            "Formulez simplement le besoin dans le paramètre 'request'."
+        ).format(caps=compiled_caps_str, tools=compiled_tools_str)
+
+        return [
+            {
+                "name": "tool_manager",
+                "role": "Analyse de données (interne)",
+                "description": description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "request": {"type": "string", "description": "Requête en langage naturel limitées aux capacités de l'outil"}
+                    },
+                    "required": ["request"]
                 },
-                "required": ["request"]
+                "source": "internal"
             },
-            "source": "internal"
-        }]
+            {
+                "name": "load_literal_data",
+                "role": "Injection de données",
+                "description": _("Permet d'injecter une valeur littérale brute (texte, JSON, liste, chiffre) dans le registre en la retournant telle quelle. Utilisez impérativement 'output_variable_name' dans l'étape du plan pour la sauvegarder."),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string", "description": "La valeur littérale brute à injecter (texte brut ou JSON sérialisé)"}
+                    },
+                    "required": ["value"]
+                },
+                "source": "internal"
+            }
+        ]
 
     def _get_internal_tools_description(self) -> str:
         """Utilisé pour le prompt interne du ToolsManager (pour lui-même)."""
@@ -252,6 +271,11 @@ class ToolsManager(Entity):
                 return json.dumps({"result": False, "data": None, "message": "Requête vide."})
             result = await self.analyze_request(request, arguments, llm=llm)
             return json.dumps(result)
+            
+        # 1.5 Outil spécial "load_literal_data" : injection brute
+        if tool_name == "load_literal_data":
+            value = arguments.get("value", "")
+            return json.dumps({"result": True, "data": value, "message": "Données chargées avec succès."})
 
         # 2. Outil interne (handler Python) – en principe, seul tool_manager les appelle, mais on laisse au cas où
         if tool_name in self._internal_tool_handlers:
@@ -345,14 +369,14 @@ class ToolsManager(Entity):
                         return {
                             "result": False,
                             "data": None,
-                            "message": _("La décision a indiqué un succès mais tool_args_json est vide.")
+                            "error_reason": _("La décision a indiqué un succès mais tool_args_json est vide.")
                         }
                 except json.JSONDecodeError as e:
                     Logger.error(f"[ToolsManager] JSON invalide dans tool_args_json : {decision.tool_args_json} ({e})")
                     return {
                         "result": False,
                         "data": None,
-                        "message": _("tool_args_json n'est pas un JSON valide.")
+                        "error_reason": _("tool_args_json n'est pas un JSON valide.")
                     }
 
             # Émission de l'événement de décision
@@ -362,6 +386,7 @@ class ToolsManager(Entity):
                 decision_success=decision.success,
                 tool_name=decision.tool_name if decision.success else None,
                 tool_args=tool_args if decision.success else {},
+                rejection_reason=decision.rejection_reason if not decision.success else None,
                 mission_id=mission_id,
                 span_id=span_id,
                 solver_id=solver_id,
@@ -373,14 +398,14 @@ class ToolsManager(Entity):
                 return {
                     "result": False,
                     "data": None,
-                    "message": _("Aucun outil ne correspond.")
+                    "error_reason": decision.rejection_reason or _("Aucun outil interne ne correspond à la requête.")
                 }
 
             if decision.tool_name not in self._internal_tool_handlers:
                 return {
                     "result": False,
                     "data": None,
-                    "message": _("L'outil '{tool_name}' n'existe pas.").format(tool_name=decision.tool_name)
+                    "error_reason": _("L'outil '{tool_name}' n'existe pas.").format(tool_name=decision.tool_name)
                 }
 
             handler = self._internal_tool_handlers[decision.tool_name]
@@ -416,7 +441,7 @@ class ToolsManager(Entity):
                 attempt_number=attempt_number,
                 step_id=step_id
             )
-            result["message"] = result.get('message', '')
+            result["error_reason"] = result.get('error_reason', '') or result.get('message', '')
             return result
 
         except Exception as e:
@@ -424,7 +449,7 @@ class ToolsManager(Entity):
             return {
                 "result": False,
                 "data": None,
-                "message": _("Échec de l'analyse : {error}").format(error=str(e))
+                "error_reason": _("Échec de l'analyse : {error}").format(error=str(e))
             }
 
     # =====================================================

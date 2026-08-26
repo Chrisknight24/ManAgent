@@ -6,8 +6,11 @@ Génère un plan d'investigation en utilisant un LLM dédié.
 Support multi‑cibles (listes de cibles et de goals techniques).
 """
 
+from __future__ import annotations
+
 import json
-from typing import Dict, Any, List, Optional
+import re
+from typing import Dict, Any, List, Optional, Tuple
 from core.discovery.base_explorer import BaseExplorer
 from core.discovery.models import DiscoveryPlan, DiscoveryStep, StepType, ExplorerStep
 from core.runtime_state import RuntimeState
@@ -18,6 +21,7 @@ from core.constants import Events
 from utils.logger import Logger
 from pydantic import BaseModel, Field
 from core.discovery.data_provider import DataProvider
+from core.discovery.data_asset import DataAsset
 
 
 class ExplorerPlanOutput(BaseModel):
@@ -39,6 +43,9 @@ class RegistryExplorer(BaseExplorer):
 
     def get_data_type(self) -> str:
         return self._data_type
+
+    def get_scope_description(self) -> str:
+        return "Inspecte et analyse les variables temporaires et leurs valeurs stockées en mémoire vive pour la mission en cours."
 
     def get_available_goals(self) -> List[str]:
         return ["list_keys", "describe_type", "check_value", "summarize"]
@@ -148,10 +155,15 @@ class RegistryExplorer(BaseExplorer):
         # Validation des cibles (vérifier qu'elles existent dans le registre)
         for t in targets:
             if data_provider:
-                if t not in data_provider.get_targets():
+                valid = t in data_provider.get_targets() or any(
+                    pt == re.sub(r'-\d+$', '', t) or re.sub(r'-\d+$', '', pt) == re.sub(r'-\d+$', '', t) or re.sub(r'-\d+$', '', pt) == t
+                    for pt in data_provider.get_targets()
+                )
+                if not valid:
                     raise ValueError(_("La cible '{target}' n'existe pas dans les données fournies.").format(target=t))
             else:
-                if t not in registry:
+                matched_k, _ = self._find_target_in_registry(registry, t)
+                if matched_k is None:
                     raise ValueError(_("Cible '{target}' invalide pour registry.").format(target=t))
 
         # Signature canonique pour le cache — calculée ICI, tout en haut,
@@ -297,9 +309,15 @@ class RegistryExplorer(BaseExplorer):
         Validation d'une seule cible (conservée pour compatibilité).
         """
         if provider:
-            return target in provider.get_targets()
+            if target in provider.get_targets():
+                return True
+            base_t = re.sub(r'-\d+$', '', target)
+            for t in provider.get_targets():
+                if t == base_t or re.sub(r'-\d+$', '', t) == base_t or re.sub(r'-\d+$', '', t) == target:
+                    return True
         registry = self._get_registry()
-        return target in registry
+        matched_key, _ = self._find_target_in_registry(registry, target)
+        return matched_key is not None
 
     def create_signature(self, targets: List[str], technical_goals: List[str]) -> str:
         if not targets or not technical_goals:
@@ -309,16 +327,38 @@ class RegistryExplorer(BaseExplorer):
         targets_str = "_".join(targets)
         goals_str = "_".join(technical_goals)
         return f"{self._data_type}://multi/{targets_str}/{goals_str}"
+
     # =====================================================
     # MÉTHODES INTERNES
     # =====================================================
 
     def _get_registry(self) -> Dict[str, Any]:
-        """Récupère le registre depuis le runtime_state (fallback)."""
-        if hasattr(self.runtime_state, "variable_registry"):
+        """Récupère le registre depuis le data_context courant ou runtime_state."""
+        if hasattr(self, "_current_data_context") and self._current_data_context is not None and isinstance(self._current_data_context, dict):
+            return self._current_data_context
+        if hasattr(self.runtime_state, "execution_context"):
+            ctx_data = self.runtime_state.execution_context.get("data_context")
+            if isinstance(ctx_data, dict):
+                return ctx_data
+        if hasattr(self.runtime_state, "_solver_registry_for_tools") and self.runtime_state._solver_registry_for_tools is not None:
+            return self.runtime_state._solver_registry_for_tools
+        if hasattr(self.runtime_state, "variable_registry") and self.runtime_state.variable_registry:
             return self.runtime_state.variable_registry
         Logger.warning("[RegistryExplorer] Aucun registre trouvé.")
         return {}
+
+    def _find_target_in_registry(self, registry: Dict[str, Any], target: str) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+        if not target or not registry:
+            return None, None
+        if target in registry:
+            return target, registry[target]
+        base_target = re.sub(r'-\d+$', '', target)
+        if base_target in registry:
+            return base_target, registry[base_target]
+        for k, v in registry.items():
+            if re.sub(r'-\d+$', '', k) == target or re.sub(r'-\d+$', '', k) == base_target:
+                return k, v
+        return None, None
 
     # =====================================================
     # MÉTHODES D'EXÉCUTION DES OUTILS (privées)
@@ -340,10 +380,29 @@ class RegistryExplorer(BaseExplorer):
             return {"success": False, "data": _("Aucune cible spécifiée.")}
 
         registry = self._get_registry()
-        if target not in registry:
+        matched_key, info = self._find_target_in_registry(registry, target)
+        if info is None:
             return {"success": False, "data": _("La variable '{target}' n'existe pas dans le registre.").format(target=target)}
 
-        info = registry[target]
+        asset_obj = info.get("asset")
+        value = info.get("value")
+        if isinstance(value, DataAsset):
+            asset_obj = value
+
+        if asset_obj is not None:
+            meta = getattr(asset_obj, "asset_meta", None)
+            metadata = {
+                "description": info.get("description", _("Pas de description")),
+                "source": info.get("source", _("Inconnu")),
+                "timestamp": info.get("timestamp", "N/A"),
+                "type": "asset",
+                "uri": asset_obj.get_uri(),
+                "size_bytes": meta.size_bytes if meta else len(asset_obj.dump_data().encode('utf-8', errors='ignore')),
+                "line_count": meta.line_count if meta else len(asset_obj.dump_data().splitlines()),
+                "capabilities": asset_obj.get_capabilities()
+            }
+            return {"success": True, "data": metadata}
+
         metadata = {
             "description": info.get("description", _("Pas de description")),
             "source": info.get("source", _("Inconnu")),
@@ -357,14 +416,28 @@ class RegistryExplorer(BaseExplorer):
             return {"success": False, "data": _("Aucune cible spécifiée.")}
 
         registry = self._get_registry()
-        if target not in registry:
+        matched_key, info = self._find_target_in_registry(registry, target)
+        if info is None:
             return {"success": False, "data": _("La variable '{target}' n'existe pas dans le registre.").format(target=target)}
 
-        value = registry[target].get("value")
-        if value is None:
+        asset_obj = info.get("asset")
+        value = info.get("value")
+        if isinstance(value, DataAsset):
+            asset_obj = value
+
+        if value is None and asset_obj is None:
             return {"success": True, "data": _("La variable '{target}' n'a pas de valeur.").format(target=target)}
 
-        value_str = str(value)
+        if asset_obj is not None:
+            value_str = asset_obj.dump_data()
+        elif isinstance(value, (dict, list)):
+            try:
+                value_str = json.dumps(value, indent=2, ensure_ascii=False)
+            except Exception:
+                value_str = str(value)
+        else:
+            value_str = str(value)
+
         total_length = len(value_str)
         if offset >= total_length:
             return {

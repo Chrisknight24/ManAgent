@@ -133,6 +133,10 @@ class Solver(Supervisor, Entity):
 
             if var_type == "bool":
                 hint = f"(bool: {str(value).lower()})"
+            elif var_type == "asset":
+                asset_obj = info.get("asset")
+                uri_str = asset_obj.get_uri() if asset_obj else str(value)
+                hint = _("(DataAsset: {})").format(uri_str)
             elif var_type == "data":
                 hint = _("(donnée masquée – utilisez Progressive Disclosure pour inspecter)")
             else:
@@ -182,11 +186,13 @@ class Solver(Supervisor, Entity):
         self.signatures = signatures
         self.runtime_state.solver_registry[self.id] = {
             "signatures": signatures,
-            "similar_missions": None
+            "similar_missions": None,
+            "variable_registry": self.variable_registry
         }
         Logger.debug(f"[Solver:{self.id}] Signatures assignées : {len(signatures)}")
 
     async def run(self) -> SolverResult:
+        self.runtime_state._solver_registry_for_tools = self.variable_registry
         with self.runtime_state.execution_context.scope(
             solver_id=self.id,
             depth=self.depth,
@@ -207,7 +213,7 @@ class Solver(Supervisor, Entity):
                 parent_step_id=self.parent_step_id,
                 depth=self.depth,
                 started_at=time.time(),
-                status="failed"
+                status="in_progress"
             )
 
             proposed_plan = None  # Initialisation avant le try
@@ -329,7 +335,7 @@ class Solver(Supervisor, Entity):
                     self.current_attempt = PlanAttempt(
                         attempt_number=attempt_counter,
                         started_at=time.time(),
-                        outcome="failed",
+                        outcome="in_progress",
                         failure_class=FailureClass.NONE
                     )
                     self.execution_tree.add_attempt(self.current_attempt)
@@ -455,7 +461,7 @@ class Solver(Supervisor, Entity):
                             self.current_attempt.outcome = "failed"
                             self.current_attempt.failure_class = FailureClass.PLAN_REJECTED_SUPERVISOR
                             self.current_attempt.failure_reason = rejection_reason
-                            self.current_attempt.target_entity = "Validator"
+                            self.current_attempt.target_entity = "Planner"
                             self.context += _("\n[Échec] Plan refusé par le Superviseur : {reason}").format(reason=rejection_reason)
                             self._preexecution_failures += 1
                             if self._preexecution_failures >= MAX_PREEXECUTION_FAILURES:

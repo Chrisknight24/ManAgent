@@ -14,9 +14,11 @@ from core.i18n import _
 from memory.mission_store import MissionStore
 from utils.logger import Logger
 
+from pydantic import Field
+
 class MissionDataAsset(DataAsset):
     """Asset représentant une mission dans l'historique."""
-    data: Dict[str, Any]
+    data: Dict[str, Any] = Field(default_factory=dict)
 
     def dump_data(self) -> str:
         """

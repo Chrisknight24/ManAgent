@@ -118,13 +118,13 @@ class Analyzer:
 
         if failed_attempts:
             last_failed = failed_attempts[-1]
-            if last_failed.target_entity == "Executor":
+            if last_failed.target_entity in ("Executor", "Validator"):
                 last_failed.target_entity = "Planner"
             await self._analyze_attempt(last_failed, tree.goal, environment, mission_id, has_previous_failure=False)
             
             if success_attempts:
                 first_success = success_attempts[0]
-                if first_success.target_entity == "Executor":
+                if first_success.target_entity in ("Executor", "Validator"):
                     first_success.target_entity = "Planner"
                 await self._analyze_attempt(first_success, tree.goal, environment, mission_id, has_previous_failure=True)
 
@@ -150,6 +150,8 @@ class Analyzer:
                                  mission_id: Optional[str] = None) -> None:
         entity_type = attempt.target_entity
         if not entity_type: return
+        if entity_type == "Validator":
+            entity_type = "Planner"
 
         role_description = get_entity_role(entity_type)
         failure_class = attempt.failure_class
@@ -204,6 +206,8 @@ class Analyzer:
     async def _generate_prefer_lesson(self, attempt: PlanAttempt, goal: str, environment: str,
                                   mission_id: Optional[str] = None) -> None:
         entity_type = attempt.target_entity or "Planner"
+        if entity_type == "Validator":
+            entity_type = "Planner"
         role_description = get_entity_role(entity_type)
         proposed_plan_desc = json.dumps(attempt.proposed_plan, indent=2, ensure_ascii=False) if attempt.proposed_plan else "Aucun plan stocké."
 

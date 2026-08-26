@@ -55,12 +55,19 @@ class Entity(ABC):
         )
 
     def get_data_providers(self) -> Dict[str, DataProvider]:
-        """Retourne tous les DataProviders de l'entité."""
-        return self._data_providers
+        """Retourne tous les DataProviders de l'entité (y compris hérités du parent)."""
+        providers = {}
+        if self.parent is not None:
+            providers.update(self.parent.get_data_providers())
+        providers.update(self._data_providers)
+        return providers
 
     def get_data_provider(self, name: str) -> Optional[DataProvider]:
-        """Retourne un DataProvider spécifique par son nom."""
-        return self._data_providers.get(name)
+        """Retourne un DataProvider spécifique par son nom (y compris hérité du parent)."""
+        provider = self._data_providers.get(name)
+        if provider is None and self.parent is not None:
+            return self.parent.get_data_provider(name)
+        return provider
 
     # =====================================================
     # CONTEXTE DE DONNÉES POUR LA PROGRESSIVE DISCLOSURE

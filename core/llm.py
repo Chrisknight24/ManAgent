@@ -89,12 +89,15 @@ class Llm:
         )
         Logger.debug(f"[Llm] Providers actifs : {list(providers.keys())}")
 
-    def _build_discovery_section(self, schema: Type[BaseModel]) -> str:
+    def _build_discovery_section(self, schema: Type[BaseModel], blocked_data_types: set = None) -> str:
         """
         Construit la section Progressive Disclosure à injecter dans le prompt.
         Retourne une chaîne vide si aucune donnée n'est disponible.
         Logs détaillés pour faciliter le diagnostic.
         """
+        if blocked_data_types is None:
+            blocked_data_types = set()
+            
         if not self._discovery_engine:
             Logger.debug("[LLM] _build_discovery_section: _discovery_engine est None.")
             return ""
@@ -110,6 +113,11 @@ class Llm:
             for provider_name, provider in providers.items():
                 try:
                     data_type = provider.get_data_type()
+                    
+                    if data_type in blocked_data_types:
+                        Logger.debug(f"[LLM] _build_discovery_section: Type '{data_type}' est bloqué. Ignoré.")
+                        continue
+                        
                     explorer = self._discovery_engine.get_explorer(data_type)
                     if not explorer:
                         Logger.warning(
@@ -117,10 +125,17 @@ class Llm:
                             f"(provider: {provider_name}). Ignoré."
                         )
                         continue
+                    scope = ""
+                    if hasattr(explorer, "get_scope_description"):
+                        scope = explorer.get_scope_description()
+                    elif hasattr(provider, "get_scope_description"):
+                        scope = provider.get_scope_description()
+
                     goals = explorer.get_available_goals()
                     targets = provider.get_targets()
                     data_types_info[provider_name] = {
                         "data_type": data_type,
+                        "scope": scope,
                         "goals": goals,
                         "targets": targets
                     }
@@ -304,18 +319,25 @@ class Llm:
             return await self._generate_structured_legacy(prompt, schema, tag, mission_id)
 
         discovery_history = self._discovery_history
+        self._last_discovery_signature = None
+        blocked_data_types = set()
         discovery_blocked = False
         prompt_modified = prompt
 
-        discovery_section = self._build_discovery_section(schema)
-        full_prompt = (discovery_section + "\n\n" + prompt_modified) if discovery_section else prompt_modified
+        discovery_section = self._build_discovery_section(schema, blocked_data_types)
 
         iteration = 0
         while iteration < self._max_iterations:
             iteration += 1
 
             if discovery_blocked:
-                full_prompt = self._build_prompt_without_pd(prompt_modified, discovery_blocked)
+                full_prompt = prompt_modified + (
+                    "\n\n⚠️ IMPORTANT: La Progressive Disclosure est DÉSACTIVÉE. "
+                    "Vous NE DEVEZ PAS utiliser `discovery_request` (définissez `discovery_request=None`). "
+                    "Répondez directement avec les données dont vous disposez."
+                )
+            else:
+                full_prompt = (discovery_section + "\n\n" + prompt_modified) if discovery_section else prompt_modified
 
             result = await self._call_llm_with_schema(
                 prompt=full_prompt,
@@ -325,26 +347,42 @@ class Llm:
             )
 
             if hasattr(result, 'discovery_request') and result.discovery_request is not None:
+                if discovery_blocked:
+                    Logger.warning("[LLM] discovery_request ignorée car la découverte est bloquée.")
+                    result.discovery_request = None
+                    return result
+
                 discovery_req = result.discovery_request
+                
+                if discovery_req.data_type in blocked_data_types:
+                    Logger.warning(f"[LLM] LLM a tenté d'utiliser un outil bloqué : {discovery_req.data_type}")
+                    system_msg = f"\n\n⚠️ L'outil '{discovery_req.data_type}' EST DÉSACTIVÉ. Ne l'utilisez plus."
+                    prompt_modified = prompt_modified + system_msg
+                    continue
 
                 targets_part = ",".join(discovery_req.targets)
                 goals_part = ",".join(discovery_req.technical_goals)
                 current_signature = f"{discovery_req.data_type}:{targets_part}:{goals_part}"
                 
-                if current_signature in discovery_history:
-                    Logger.warning(
-                        f"[LLM] Boucle de découverte détectée : signature redondante '{current_signature}'. "
-                        f"Activation du blocage de la PD."
-                    )
-                    discovery_blocked = True
-                    system_msg = (
-                        "\n\n⚠️ L'information demandée a déjà été recherchée sans succès. "
-                        "Vous ne pouvez plus utiliser `discovery_request`. "
-                        "Veuillez répondre avec les données dont vous disposez, "
-                        "ou indiquer que l'information n'est pas disponible."
-                    )
-                    prompt_modified = prompt_modified + system_msg
-                    continue
+                # Le blocage de redondance ne s'applique QU'EN CAS D'APPELS CONSECUTIFS IDENTIQUES
+                if getattr(self, "_last_discovery_signature", None) == current_signature:
+                    explorer = self._discovery_engine.get_explorer(discovery_req.data_type) if self._discovery_engine else None
+                    if explorer and explorer.allow_successive_calls():
+                        Logger.debug(f"[LLM] Signature '{current_signature}' identique à la précédente, mais l'outil autorise les appels successifs.")
+                    else:
+                        Logger.warning(
+                            f"[LLM] Répétition consécutive détectée : signature redondante '{current_signature}'. "
+                            f"Masquage temporaire de l'outil '{discovery_req.data_type}'."
+                        )
+                        blocked_data_types.add(discovery_req.data_type)
+                        system_msg = (
+                            f"\n\n⚠️ REJET DE REDONDANCE CONSECUTIVE : Vous avez tenté d'invoquer de manière consécutive la même signature '{current_signature}'. "
+                            f"L'outil '{discovery_req.data_type}' a été désactivé pour cet axe. "
+                            "Veuillez vous contenter des données actuellement disponibles ou utiliser un autre axe."
+                        )
+                        prompt_modified = prompt_modified + system_msg
+                        discovery_section = self._build_discovery_section(schema, blocked_data_types)
+                        continue
 
                 discovery_history.append(current_signature)
 
@@ -360,44 +398,49 @@ class Llm:
                 try:
                     refined = await self._execute_discovery(discovery_req)
                     self._last_refined_context = refined
-                    full_prompt = full_prompt + f"\n\n[RÉSULTAT DE L'INVESTIGATION]\n{refined.summary}"
+                    self._last_discovery_signature = current_signature
+                    prompt_modified = prompt_modified + (
+                        f"\n\n[RÉSULTAT DE L'INVESTIGATION - {current_signature}]\n{refined.summary}\n\n"
+                        f"⚠️ INVESTIGATION EFFECTUÉE : Vous venez d'explorer '{current_signature}'. "
+                        f"Si vous réitérez immédiatement cette MÊME signature à l'étape suivante sans modifier l'axe ou la cible, "
+                        f"la demande sera rejetée et l'outil sera désactivé. Veuillez exploiter les données fournies ou explorer un autre axe."
+                    )
                 except Exception as e:
                     error_msg = f"⚠️ Erreur lors de l'investigation : {str(e)}. Veuillez répondre avec les données disponibles."
-                    full_prompt = full_prompt + f"\n\n[ERREUR D'INVESTIGATION]\n{error_msg}"
+                    prompt_modified = prompt_modified + f"\n\n[ERREUR D'INVESTIGATION]\n{error_msg}"
                     Logger.error(f"[LLM] Erreur lors de l'exécution de la découverte : {e}")
                 continue
 
             Logger.debug(_("[LLM] Réponse finale reçue (type: {schema})").format(schema=schema.__name__))
             return result
 
-        if not discovery_blocked:
-            Logger.warning(
-                f"[LLM] Nombre maximum d'itérations ({self._max_iterations}) atteint. "
-                "Activation du blocage de la PD et dernière tentative."
+        # --- SECOURS DE SÉCURITÉ GARANTI : Jamais de return None ---
+        Logger.warning(
+            f"[LLM] Sortie de boucle de découverte (max_iterations={self._max_iterations}, discovery_blocked={discovery_blocked}). "
+            "Exécution de la tentative finale sans Progressive Disclosure."
+        )
+        final_prompt = prompt_modified + (
+            "\n\n⚠️ La phase d'investigation est terminée. "
+            "Vous devez fournir votre décision finale immédiatement. "
+            "Ne remplissez pas 'discovery_request' (définissez-le à null/None)."
+        )
+        try:
+            final_result = await self._generate_structured_legacy(
+                prompt=final_prompt,
+                schema=schema,
+                tag=tag,
+                mission_id=mission_id
             )
-            discovery_blocked = True
-            system_msg = (
-                "\n\n⚠️ Le nombre maximum de tentatives d'investigation a été atteint. "
-                "Vous ne pouvez plus utiliser `discovery_request`. "
-                "Veuillez répondre avec les données dont vous disposez, "
-                "ou indiquer que l'information n'est pas disponible."
-            )
-            prompt_modified = prompt_modified + system_msg
-            full_prompt = self._build_prompt_without_pd(prompt_modified, discovery_blocked)
-            try:
-                final_result = await self._call_llm_with_schema(
-                    prompt=full_prompt,
-                    schema=schema,
-                    tag=tag,
-                    mission_id=mission_id
-                )
-                return final_result
-            except Exception as e:
-                raise RuntimeError(
-                    _("Nombre maximum d'itérations ({max_iterations}) atteint sans réponse finale, "
-                    "et la dernière tentative a échoué.")
-                    .format(max_iterations=self._max_iterations)
-                ) from e
+            if hasattr(final_result, 'discovery_request'):
+                final_result.discovery_request = None
+            return final_result
+        except Exception as e:
+            Logger.error(f"[LLM] Échec de la tentative finale de secours : {e}")
+            raise RuntimeError(
+                _("Nombre maximum d'itérations ({max_iterations}) atteint sans réponse finale, "
+                "et la dernière tentative a échoué.")
+                .format(max_iterations=self._max_iterations)
+            ) from e
             
     def clear_discovery_history(self):
         self._discovery_history = []

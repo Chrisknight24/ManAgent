@@ -32,7 +32,9 @@ Il est de type `DiscoveryRequest` et contient les champs suivants :
 
 {% for provider_name, info in data_types_info.items() %}
 ### Provider : `{{ provider_name }}` (type: `{{ info.data_type }}`)
-
+{% if info.scope %}
+- **Périmètre & Rôle régalien** : {{ info.scope }}
+{% endif %}
 - **Goals techniques possibles** : `{{ info.goals | join(', ') }}`
 - **Cibles disponibles** : `{{ info.targets | join(', ') }}`
 

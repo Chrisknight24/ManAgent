@@ -111,7 +111,7 @@ class PlanAttempt(BaseModel):
     )
 
     # Résultat global
-    outcome: str = Field(..., description=_("Résultat global de la tentative (success, failed)"))
+    outcome: str = Field(default="in_progress", description=_("Résultat global de la tentative (in_progress, success, failed)"))
     failure_class: FailureClass = Field(
         default=FailureClass.NONE,
         description=_("Catégorie d'échec si outcome == failed")
@@ -174,7 +174,7 @@ class ExecutionTree(BaseModel):
     # Horodatage global
     started_at: Optional[float] = Field(None, description=_("Début du solver"))
     ended_at: Optional[float] = Field(None, description=_("Fin du solver"))
-    status: str = Field(..., description=_("Statut final du solver (success, failed)"))
+    status: str = Field(default="in_progress", description=_("Statut final du solver (in_progress, success, failed)"))
 
     # Liste des tentatives
     attempts: List[PlanAttempt] = Field(

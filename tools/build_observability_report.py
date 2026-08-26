@@ -391,7 +391,7 @@ def attach_discovery_to_episodes(episodes, discovery_data):
 # RATTACHEMENT DE TOUTES LES ENTITÉS LLM & COGNITIVES
 # =====================================================
 
-def attach_llm_calls_by_mission(episodes, llm_calls):
+def attach_llm_calls_by_mission(episodes, llm_calls, events):
     ep_index = {ep["mission_id"]: ep for ep in episodes if ep.get("mission_id")}
     solver_to_mission = build_solver_to_mission_map(episodes)
 
@@ -400,6 +400,20 @@ def attach_llm_calls_by_mission(episodes, llm_calls):
     for ep in episodes:
         tree = ep.get("execution_tree") or {}
         _collect_attempts(tree, attempt_index_global, all_attempts_global)
+
+    # Rattachement des événements logs du tool_manager
+    tm_events = [e for e in events if str(e.get("event", "")).startswith("tools_manager.")]
+    for ev in tm_events:
+        step_id = ev.get("step_id")
+        solver_id = ev.get("solver_id")
+        attempt_num = ev.get("attempt_number")
+        if step_id and solver_id is not None and attempt_num is not None:
+            attempt = attempt_index_global.get((solver_id, attempt_num))
+            if attempt:
+                for node in attempt.get("nodes", []):
+                    if node.get("step_id") == step_id:
+                        node.setdefault("_tools_manager_events", []).append(ev)
+                        break
 
     for call in llm_calls:
         tag = call.get("tag")
@@ -592,17 +606,17 @@ def build_data(db_path: str, events_path: str) -> Dict[str, Any]:
 
     session_turns = [e for e in events if e.get("event") == "session_turn"]
     llm_calls = [e for e in events if e.get("event") == "llm_call"]
-    retrieval_events = [e for e in events if e.get("event") in ("retriever_results", "retriever_query")]
+    retrieval_events = [e for e in events if e.get("event") in ("retriever_results", "retriever_query", "retriever_search_completed")]
 
-    attach_llm_calls_by_mission(episodes, llm_calls)
+    attach_llm_calls_by_mission(episodes, llm_calls, events)
 
     # Retrieval indexation par mission et par solver
     ep_index = {ep["mission_id"]: ep for ep in episodes if ep.get("mission_id")}
     solver_to_mission = build_solver_to_mission_map(episodes)
 
     for ev in retrieval_events:
-        q_mid = ev.get("mission_id") or ev.get("query_mission_id")
-        solver_id = ev.get("solver_id") or ev.get("query_mission_id")
+        q_mid = ev.get("query_mission_id") or ev.get("mission_id")
+        solver_id = ev.get("solver_id") or ev.get("query_mission_id") or ev.get("mission_id")
         
         target_mid = q_mid
         if not target_mid or target_mid not in ep_index:
@@ -1379,6 +1393,96 @@ let currentMissionId = null;
 let selectedInspectorData = null;
 let activeInspectorTab = 'overview';
 
+
+function inspectAttemptPlanningCall(missionId, solverId, attNum, idx) {
+  const ep = findEpisode(missionId);
+  const node = (ep.execution_tree?.attempts || []).find(a => a.attempt_number === attNum);
+  const calls = node?._planning_calls || [];
+  const call = calls[idx];
+  if (!call) return;
+  const resp = call?.response || {};
+  const plan = resp.plan || resp.steps || (Array.isArray(resp) ? resp : []);
+
+  let overview = `<div style="display:flex; flex-direction:column; gap:14px;">
+    <div>
+      <div style="font-size:11px; font-weight:700; color:var(--text-faint); text-transform:uppercase;">Ingénierie de Plan (Tentative #${attNum})</div>
+      <div style="font-size:14px; margin-top:4px;">Le Planner a traduit la stratégie en étapes formelles HTN pour <b>${esc(solverId)}</b>.</div>
+    </div>`;
+
+  if (Array.isArray(plan) && plan.length > 0) {
+    overview += `<div>
+      <div style="font-size:11px; font-weight:700; color:var(--text-faint); text-transform:uppercase; margin-bottom:8px;">Plan Proposé (${plan.length} étapes)</div>
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        ${plan.map((st, sIdx) => `
+          <div style="background:var(--surface-alt); border:1px solid var(--border); border-radius:8px; padding:10px; font-size:12.5px;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+              <span style="font-family:var(--mono); font-weight:800; color:var(--primary);">#${sIdx + 1} · ${esc(st.id || 'step')}</span>
+              ${st.type ? `<span style="font-size:10px; padding:2px 6px; background:var(--surface); border:1px solid var(--border); border-radius:4px;">${esc(st.type)}</span>` : ''}
+            </div>
+            <div style="margin-top:6px; color:var(--text);">${esc(st.description || '')}</div>
+          </div>
+        `).join('')}
+      </div>
+    </div>`;
+  }
+  overview += `</div>`;
+  
+  updateInspector(`Planner - ${solverId}`, 'Planner', overview, call ? [call] : [], call);
+}
+
+
+function inspectAttemptConvergenceCall(missionId, solverId, attNum, idx) {
+  const ep = findEpisode(missionId);
+  const node = (ep.execution_tree?.attempts || []).find(a => a.attempt_number === attNum);
+  const calls = node?._convergence_calls || [];
+  const call = calls[idx];
+  if (!call) return;
+  const resp = call?.response || {};
+  const isConv = resp.is_convergent;
+
+  let overview = `<div style="display:flex; flex-direction:column; gap:14px;">
+    <div>
+      <div style="font-size:11px; font-weight:700; color:var(--text-faint); text-transform:uppercase;">Évaluation de Convergence (Tentative #${attNum})</div>
+      <div style="font-size:14px; margin-top:4px;">Validation sémantique pour vérifier si l'exécution d'une étape a atteint l'objectif technique attendu.</div>
+    </div>
+      
+    <div style="background:var(--surface-alt); padding:12px; border-radius:10px; border-left:4px solid ${isConv ? 'var(--success)' : 'var(--failure)'}; border:1px solid var(--border);">
+      <div style="font-weight:800; font-size:13.5px;">Statut : ${isConv ? '✅ CONVERGENCE ATTEINTE' : '❌ CONVERGENCE ÉCHOUÉE'}</div>
+      ${resp.reason ? `
+        <div style="font-size:12.5px; margin-top:6px; color:${isConv ? 'var(--text-muted)' : 'var(--failure)'};">
+          <b>Raisonnement :</b> ${esc(resp.reason)}
+        </div>
+      ` : ''}
+    </div>
+  </div>`;
+  updateInspector(`Convergence - ${solverId}`, 'Convergence', overview, call ? [call] : [], call);
+}
+function inspectAttemptValidationCall(missionId, solverId, attNum, idx) {
+  const ep = findEpisode(missionId);
+  const node = (ep.execution_tree?.attempts || []).find(a => a.attempt_number === attNum);
+  const calls = node?._validation_calls || [];
+  const call = calls[idx];
+  if (!call) return;
+  const resp = call?.response || {};
+  const isAppr = resp.is_conformant !== false && resp.approved !== false && resp.is_valid !== false;
+
+  let overview = `<div style="display:flex; flex-direction:column; gap:14px;">
+    <div>
+      <div style="font-size:11px; font-weight:700; color:var(--text-faint); text-transform:uppercase;">Supervision & Juge (Tentative #${attNum})</div>
+      <div style="font-size:14px; margin-top:4px;">Validation formelle du plan par le Superviseur avant toute exécution.</div>
+    </div>
+      
+    <div style="background:var(--surface-alt); padding:12px; border-radius:10px; border-left:4px solid ${isAppr ? 'var(--success)' : 'var(--failure)'}; border:1px solid var(--border);">
+      <div style="font-weight:800; font-size:13.5px;">Statut : ${isAppr ? '✅ PLAN VALIDÉ' : '❌ PLAN REJETÉ'}</div>
+      ${resp.critique || resp.reason || resp.feedback ? `
+        <div style="font-size:12.5px; margin-top:6px; color:${isAppr ? 'var(--text-muted)' : 'var(--failure)'};">
+          <b>Critique :</b> ${esc(resp.critique || resp.reason || resp.feedback)}
+        </div>
+      ` : ''}
+    </div>
+  </div>`;
+  updateInspector(`Validator - ${solverId}`, 'Validator', overview, call ? [call] : [], call);
+}
 // ==========================================
 // FORMATTERS & HELPERS
 // ==========================================
@@ -1922,27 +2026,8 @@ function renderSolverNodeModern(ep, treeNode, depth) {
   // Bannière Rejet Superviseur si applicable
   if (supervisorRejected) {
     html += `<div class="rejection-banner" style="margin-left:14px; margin-bottom:12px;">
-      <div class="rejection-banner__title">⚠️ Plan invalidé par le Superviseur</div>
+      <div class="rejection-banner__title">⚠️ Dernier Plan invalidé par le Superviseur</div>
       <div>${esc(supervisorCritique)}</div>
-    </div>`;
-  }
-
-  // 2. Planning & Validation Steps (Si disponibles)
-  if (planningCalls.length > 0 || validationCalls.length > 0) {
-    html += `<div style="margin-left:14px; margin-bottom:12px; display:flex; gap:8px; flex-wrap:wrap;">
-      ${planningCalls.map((c, pIdx) => `
-        <button class="tree-node-card tree-node-card--plan" style="padding:8px 14px; margin-bottom:4px; font-size:12px; font-weight:700; cursor:pointer;" onclick="inspectPlanningCall('${esc(ep.mission_id)}', '${esc(solverId)}', ${pIdx})">
-          📐 Planner LLM (${formatDuration(c.duration_ms)})
-        </button>
-      `).join('')}
-      ${validationCalls.map((c, vIdx) => {
-        const isAppr = c.response?.approved !== false && c.response?.is_valid !== false;
-        return `
-          <button class="tree-node-card ${isAppr ? 'tree-node-card--validation' : 'tree-node-card--rejected'}" style="padding:8px 14px; margin-bottom:4px; font-size:12px; font-weight:700; cursor:pointer;" onclick="inspectValidationCall('${esc(ep.mission_id)}', '${esc(solverId)}', ${vIdx})">
-            ${isAppr ? '⚖️ Supervisor: Plan Validé' : '❌ Supervisor: REJET'} (${formatDuration(c.duration_ms)})
-          </button>
-        `;
-      }).join('')}
     </div>`;
   }
 
@@ -1958,7 +2043,7 @@ function renderSolverNodeModern(ep, treeNode, depth) {
       const failedCount = nodes.filter(n => n.status === 'failed').length;
 
       // Logique robuste de statut de tentative
-      let attStatus = att.status;
+      let attStatus = att.outcome || att.status || "in_progress";
       if (!attStatus || attStatus === 'pending') {
         if (failedCount > 0) {
           attStatus = 'failed';
@@ -1979,13 +2064,50 @@ function renderSolverNodeModern(ep, treeNode, depth) {
         <div class="attempt-header" onclick="toggleAccordion('${attemptId}')">
           <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
             <span id="icon-${attemptId}">▼</span>
-            <span>Tentative #${attNum + 1} (${succCount} réussie${succCount > 1 ? 's' : ''}${skippedCount > 0 ? `, ${skippedCount} ignorée${skippedCount > 1 ? 's' : ''}` : ''}${failedCount > 0 ? `, ${failedCount} échouée${failedCount > 1 ? 's' : ''}` : ''} / ${totalNodes} étapes)</span>
+            <span>Tentative #${attNum} (${succCount} réussie${succCount > 1 ? 's' : ''}${skippedCount > 0 ? `, ${skippedCount} ignorée${skippedCount > 1 ? 's' : ''}` : ''}${failedCount > 0 ? `, ${failedCount} échouée${failedCount > 1 ? 's' : ''}` : ''} / ${totalNodes} étapes)</span>
             ${statusBadge(attStatus)}
           </div>
           <span style="font-size:11px; font-family:var(--mono); color:var(--text-faint);">Détails</span>
         </div>
 
         <div id="${attemptId}" style="display:block;">`;
+
+      // Affichage du Planner et du Validator pour CETTE tentative
+      const attPlanning = att._planning_calls || [];
+      const attValidation = att._validation_calls || [];
+      
+      if (attPlanning.length > 0 || attValidation.length > 0) {
+        html += `<div style="margin-left:8px; margin-bottom:12px; display:flex; flex-direction:column; gap:6px;">
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          ${attPlanning.map((c, pIdx) => `
+            <button class="tree-node-card tree-node-card--plan" style="padding:6px 12px; font-size:11px; font-weight:700; cursor:pointer;" onclick="event.stopPropagation(); inspectAttemptPlanningCall('${esc(ep.mission_id)}', '${esc(solverId)}', ${attNum}, ${pIdx})">
+              📐 Planner LLM (${formatDuration(c.duration_ms)})
+            </button>
+          `).join('')}
+          ${attValidation.map((c, vIdx) => {
+            const resp = c.response || {};
+            const isAppr = resp.is_conformant !== false && resp.approved !== false && resp.is_valid !== false;
+            return `
+              <button class="tree-node-card ${isAppr ? 'tree-node-card--validation' : 'tree-node-card--rejected'}" style="padding:6px 12px; font-size:11px; font-weight:700; cursor:pointer;" onclick="event.stopPropagation(); inspectAttemptValidationCall('${esc(ep.mission_id)}', '${esc(solverId)}', ${attNum}, ${vIdx})">
+                ${isAppr ? '⚖️ Supervisor: Plan Validé' : '❌ Supervisor: REJET'} (${formatDuration(c.duration_ms)})
+              </button>
+            `;
+          }).join('')}
+          </div>`;
+          
+          // Si le superviseur a rejeté, afficher directement la raison
+          attValidation.forEach(c => {
+             const resp = c.response || {};
+             const isAppr = resp.is_conformant !== false && resp.approved !== false && resp.is_valid !== false;
+             if (!isAppr && (resp.critique || resp.reason || resp.feedback)) {
+                html += `<div style="background:var(--surface-alt); padding:8px 12px; border-radius:6px; border-left:3px solid var(--failure); font-size:12px; color:var(--text); margin-top:4px;">
+                  <b>Raison du rejet :</b> ${esc(resp.critique || resp.reason || resp.feedback)}
+                </div>`;
+             }
+          });
+          
+        html += `</div>`;
+      }
 
       nodes.forEach((node, nodeIdx) => {
         const stepDisc = node._discovery_sessions || [];
@@ -2045,6 +2167,22 @@ function renderSolverNodeModern(ep, treeNode, depth) {
           </div>`;
         }
       });
+
+      // 4. Convergence Calls pour cette tentative
+      const attConvergence = att._convergence_calls || [];
+      if (attConvergence.length > 0) {
+        html += `<div style="margin-left:8px; margin-top:12px; margin-bottom:12px; display:flex; gap:8px; flex-wrap:wrap;">
+          ${attConvergence.map((c, cIdx) => {
+             const resp = c.response || {};
+             const isConv = resp.is_convergent;
+             return `
+              <button class="tree-node-card ${isConv ? 'tree-node-card--validation' : 'tree-node-card--rejected'}" style="padding:6px 12px; font-size:11px; font-weight:700; cursor:pointer;" onclick="event.stopPropagation(); inspectAttemptConvergenceCall('${esc(ep.mission_id)}', '${esc(solverId)}', ${attNum}, ${cIdx})">
+                ${isConv ? '🎯 Convergence OK' : '🎯 Convergence ÉCHOUÉE'} (${formatDuration(c.duration_ms)})
+              </button>
+             `;
+          }).join('')}
+        </div>`;
+      }
 
       html += `</div></div>`;
     });
@@ -2517,7 +2655,11 @@ function inspectStep(missionId, solverId, attemptNum, stepId) {
     targetNode = { step_id: stepId, description: 'Étape non trouvée', status: 'unknown' };
   }
 
-  const calls = targetNode._node_calls || [];
+  let calls = targetNode._node_calls ? [...targetNode._node_calls] : [];
+  if (targetNode._tools_manager_llm_calls) {
+    calls = calls.concat(targetNode._tools_manager_llm_calls);
+  }
+
   const isFailed = targetNode.status === 'failed' || !!targetNode.error_reason;
 
   let overview = `<div style="display:flex; flex-direction:column; gap:14px;">
@@ -2558,6 +2700,40 @@ function inspectStep(missionId, solverId, attemptNum, stepId) {
       <div>
         <div style="font-size:11px; font-weight:700; color:var(--text-faint); text-transform:uppercase; margin-bottom:4px;">Arguments Outil (Inputs)</div>
         <div class="code-box">${esc(JSON.stringify(targetNode.tool_args, null, 2))}</div>
+      </div>
+    ` : ''}
+
+    ${targetNode._tools_manager_events && targetNode._tools_manager_events.length > 0 ? `
+      <div>
+        <div style="font-size:11px; font-weight:700; color:var(--text-faint); text-transform:uppercase; margin-bottom:4px;">Appels Internes Tool Manager</div>
+        <div style="display:flex; flex-direction:column; gap:6px;">
+          ${targetNode._tools_manager_events.map(ev => {
+             const evName = ev.event;
+             if (evName === 'tools_manager.decision') {
+               const statusHtml = statusBadge(ev.decision_success ? 'success' : 'failed');
+               const toolHtml = ev.tool_name ? '<div style="margin-bottom:6px;"><b>Outil sélectionné:</b> <span class="badge badge--primary">' + esc(ev.tool_name) + '</span></div>' : '';
+               const argsHtml = (ev.tool_args && Object.keys(ev.tool_args).length > 0) ? '<div style="margin-bottom:6px;"><b>Arguments générés:</b> <div class="code-box" style="margin-top:4px;">' + esc(JSON.stringify(ev.tool_args, null, 2)) + '</div></div>' : '';
+               const rejectionHtml = ev.rejection_reason ? '<div style="margin-top:6px; color:var(--failure); font-weight:600; background:var(--failure-bg); padding:6px 10px; border-radius:6px; border:1px solid var(--failure-border);">❌ Refus d\'analyse : ' + esc(ev.rejection_reason) + '</div>' : '';
+               return '<div style="background:var(--surface-alt); border:1px solid var(--border); padding:10px; border-radius:8px; font-size:12.5px; color:var(--text);">' +
+                 '<div style="margin-bottom:6px;"><b>Décision d\'Analyse :</b> ' + statusHtml + '</div>' +
+                 toolHtml +
+                 argsHtml +
+                 rejectionHtml +
+               '</div>';
+             } else if (evName === 'tools_manager.result') {
+               const statusHtml = statusBadge(ev.result ? 'success' : 'failed');
+               const errMsg = ev.error_reason || ev.message;
+               const msgHtml = errMsg ? '<div style="margin-bottom:6px;"><b>Raison / Message:</b> ' + esc(errMsg) + '</div>' : '';
+               const dataHtml = ev.data ? '<div><b>Données:</b> <div class="code-box" style="margin-top:4px;">' + esc(typeof ev.data === 'object' ? JSON.stringify(ev.data, null, 2) : String(ev.data)) + '</div></div>' : '';
+               return '<div style="background:var(--surface-alt); border:1px solid var(--border); padding:10px; border-radius:8px; font-size:12.5px; color:var(--text);">' +
+                 '<div style="margin-bottom:6px;"><b>Résultat Outil [' + esc(ev.tool_name || '') + '] :</b> ' + statusHtml + '</div>' +
+                 msgHtml +
+                 dataHtml +
+               '</div>';
+             }
+             return '';
+          }).join('')}
+        </div>
       </div>
     ` : ''}
 
@@ -2626,7 +2802,7 @@ function inspectValidationCall(missionId, solverId, idx) {
   const calls = (ep._solver_validation && (ep._solver_validation[solverId] || ep._solver_validation[cleanSid])) || [];
   const call = calls[idx];
   const resp = call?.response || {};
-  const isAppr = resp.approved !== false && resp.is_valid !== false;
+  const isAppr = resp.is_conformant !== false && resp.approved !== false && resp.is_valid !== false;
 
   let overview = `<div style="display:flex; flex-direction:column; gap:14px;">
     <div>
@@ -2808,3 +2984,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
