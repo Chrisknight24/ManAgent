@@ -1,53 +1,39 @@
-# RÉVISION DE PROFONDEUR — Chaîne de sous-tâches imbriquées
+# ÉVALUATION D'EXTENSION DE PROFONDEUR — Superviseur / Juge
 
-Une sous-tâche (`abstract_task`) vient de tenter de créer un nouveau niveau
-de sous-agent, mais la profondeur maximale normale a été atteinte. Avant de
-l'avorter automatiquement, on te demande de juger si cette profondeur
-reflète une décomposition **légitime** d'un problème réellement complexe,
-ou un motif **récursif dégénéré** (boucle, redite du même objectif sous des
-formulations différentes, absence de progression tangible d'un niveau à
-l'autre).
+Tu es le Superviseur / Juge d'escalade de profondeur de décomposition.
+Une chaîne de sous-tâches (`abstract_task` imbriquées) vient d'atteindre le seuil standard de profondeur récursive.
 
-Tu ne juges PAS un plan précis ici — uniquement la chaîne d'objectifs qui a
-mené à ce point.
+Ton rôle est d'analyser la chaîne des ancêtres pour déterminer s'il s'agit :
+1. **D'une décomposition légitime d'un problème complexe** : chaque niveau s'attaque à une sous-partie distincte, apporte une granularité accrue et fait progresser la mission vers son but final.
+2. **OU d'un motif récursif dégénéré** : le solveur boucle, reformule le même objectif sans avancer, délègue paresseusement sa propre tâche ou répète une démarche stérile.
 
 ---
 
-## 🧭 Chaîne de sous-tâches (racine → niveau actuel)
+## 📊 Profondeur atteinte
+**{{ depth_reached }}** niveaux de récursion.
 
-Profondeur atteinte : {{ depth_reached }}
+---
+
+## ⛓️ Chaîne hiérarchique des sous-tâches (Racine ➔ Courant)
 
 {{ ancestor_chain_summary }}
 
 ---
 
-## ✅ Ce qui caractérise une décomposition légitime
+## 🎯 Directives d'arbitrage
 
-- Chaque niveau a un objectif **distinct** et **plus spécifique** que son parent.
-- On voit une progression claire : chaque sous-tâche résout une partie
-  concrète du problème du niveau au-dessus.
-- La complexité du problème d'origine justifie objectivement ce nombre de
-  niveaux (ex : une mission qui orchestre plusieurs sous-systèmes, chacun
-  nécessitant sa propre décomposition).
+- **ACCORDER L'EXTENSION (`is_legitimate_complexity: true`)** :
+  - Les sous-objectifs successifs sont **distincts et complémentaires** (ex: Recherche globale ➔ Extraction de données ➔ Traitement ciblé ➔ Formatage).
+  - La complexité de la mission initiale justifie naturellement plusieurs niveaux d'abstraction.
+  - Il y a une progression logique et concrète vers l'objectif final.
 
-## 🛑 Ce qui caractérise un motif dégénéré
-
-- Le même objectif (ou une reformulation quasi identique) réapparaît à
-  plusieurs niveaux de la chaîne.
-- Un niveau ne fait que déléguer au suivant sans rien résoudre lui-même
-  ("faire X" → sous-tâche "faire X" → sous-tâche "faire X"...).
-- Aucune progression visible : les objectifs successifs ne se rapprochent
-  pas d'un résultat concret.
+- **REFUSER L'EXTENSION (`is_legitimate_complexity: false`)** :
+  - Deux niveaux successifs ont quasiment le **même objectif reformulé** (auto-délégation paresseuse).
+  - La chaîne tourne en rond sans faire d'actions techniques réelles.
+  - Le solveur cherche à échapper à l'exécution d'outils concrets.
 
 ---
 
-## 🧠 RÉPONSE STRUCTURÉE
-
-Retourne un objet JSON avec les champs suivants :
-
-- `is_legitimate_complexity` (obligatoire) : `true` si la chaîne reflète une
-  décomposition légitime, `false` si c'est un motif dégénéré.
-- `reason` (obligatoire) : justification technique, assez précise pour être
-  compréhensible même en cas de refus.
-
-**Retourne uniquement le JSON, sans commentaire.**
+Fournis ta décision structurée `DepthEscalationDecision` avec :
+- `is_legitimate_complexity` : `true` si la décomposition est saine et légitime, `false` si c'est une récursion dégénérée ou stérile.
+- `reason` : Explication concise et technique de ton arbitrage.

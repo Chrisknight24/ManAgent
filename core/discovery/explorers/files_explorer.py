@@ -1,3 +1,4 @@
+import ast
 from typing import List, Dict, Any, Optional
 import json
 import re
@@ -10,6 +11,7 @@ from core.llm import Llm
 from core.discovery.data_provider import DataProvider
 from core.i18n import _
 from utils.logger import Logger
+from core.constants import DISCOVERY_MAX_SLICE_CHARS
 
 
 class FilesExplorer(BaseExplorer):
@@ -18,7 +20,7 @@ class FilesExplorer(BaseExplorer):
     Permet la recherche, la lecture par tranche et la structure sans charger tout le fichier d'un coup.
     Conforme à l'interface BaseExplorer du Discovery Framework.
     """
-    MAX_SLICE_CHARS = 4000  # Protection anti-débordement de contexte
+    MAX_SLICE_CHARS = DISCOVERY_MAX_SLICE_CHARS  # Protection anti-débordement de contexte
 
     def __init__(self, runtime_state: RuntimeState, registry: Optional[AssetRegistry] = None, llm: Optional[Llm] = None):
         super().__init__(runtime_state)
@@ -42,11 +44,18 @@ class FilesExplorer(BaseExplorer):
             "read_asset_slice",
             "search_asset",
             "get_asset_summary",
-            "inspect_asset"
+            "inspect_asset",
+            "analyze_asset",
+            "list_symbols",
+            "list_functions",
+            "count_functions",
+            "extract_symbol",
+            "extract_function",
+            "search_definitions"
         ]
 
     def get_non_cacheable_goals(self) -> List[str]:
-        return ["search_asset"]
+        return ["search_asset", "analyze_asset", "search_definitions"]
 
     def get_tools_description(self) -> List[Dict[str, Any]]:
         return [
@@ -111,6 +120,55 @@ class FilesExplorer(BaseExplorer):
                     },
                     "required": ["target"]
                 }
+            },
+            {
+                "name": "analyze_asset",
+                "description": _("Effectue une analyse sémantique assistée par LLM sur un fichier/DataAsset ou une plage de lignes pour répondre à une question."),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string", "description": _("Nom ou URI de l'asset")},
+                        "query": {"type": "string", "description": _("Question sémantique ou consigne d'analyse")},
+                        "from_line": {"type": "integer", "description": _("Ligne de début optionnelle")},
+                        "to_line": {"type": "integer", "description": _("Ligne de fin optionnelle")}
+                    },
+                    "required": ["target", "query"]
+                }
+            },
+            {
+                "name": "list_symbols",
+                "description": _("Extrait de manière déterministe (via AST/regex) la liste exacte de toutes les fonctions, méthodes et classes avec leurs numéros de ligne, signatures et comptages exacts."),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string", "description": _("Nom ou URI de l'asset")}
+                    },
+                    "required": ["target"]
+                }
+            },
+            {
+                "name": "extract_symbol",
+                "description": _("Extrait le code source complet d'une fonction, méthode ou classe spécifique identifiée par son nom."),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string", "description": _("Nom ou URI de l'asset")},
+                        "symbol_name": {"type": "string", "description": _("Nom exact ou partiel de la fonction ou classe à extraire")}
+                    },
+                    "required": ["target", "symbol_name"]
+                }
+            },
+            {
+                "name": "search_definitions",
+                "description": _("Recherche les lignes de définition de symboles (def, class, function, etc.) correspondant à un mot-clé."),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string", "description": _("Nom ou URI de l'asset")},
+                        "query": {"type": "string", "description": _("Mot-clé ou nom de symbole à chercher")}
+                    },
+                    "required": ["target", "query"]
+                }
             }
         ]
 
@@ -147,6 +205,104 @@ class FilesExplorer(BaseExplorer):
         clean_words = [w for w in words if w.lower() not in stopwords]
         return " ".join(clean_words[:2]) if clean_words else query
 
+    def _extract_symbols(self, content: str) -> Dict[str, Any]:
+        """Extrait de façon déterministe les symboles (fonctions, classes, méthodes) avec leur position exacte."""
+        symbols = []
+        total_functions = 0
+        total_classes = 0
+        total_methods = 0
+
+        # Tentative d'analyse AST (Python)
+        try:
+            tree = ast.parse(content)
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    total_functions += 1
+                    args_list = [a.arg for a in node.args.args]
+                    sig = f"{node.name}({', '.join(args_list)})"
+                    doc = ast.get_docstring(node)
+                    doc_first = doc.split("\n")[0] if doc else ""
+                    symbols.append({
+                        "name": node.name,
+                        "type": "function",
+                        "line_number": node.lineno,
+                        "end_line_number": getattr(node, "end_lineno", node.lineno),
+                        "signature": sig,
+                        "parent": None,
+                        "docstring": doc_first
+                    })
+                elif isinstance(node, ast.ClassDef):
+                    total_classes += 1
+                    symbols.append({
+                        "name": node.name,
+                        "type": "class",
+                        "line_number": node.lineno,
+                        "end_line_number": getattr(node, "end_lineno", node.lineno),
+                        "signature": f"class {node.name}",
+                        "parent": None,
+                        "docstring": (ast.get_docstring(node) or "").split("\n")[0]
+                    })
+                    for child in node.body:
+                        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            total_methods += 1
+                            m_args = [a.arg for a in child.args.args]
+                            m_sig = f"{child.name}({', '.join(m_args)})"
+                            m_doc = ast.get_docstring(child)
+                            m_doc_first = m_doc.split("\n")[0] if m_doc else ""
+                            symbols.append({
+                                "name": f"{node.name}.{child.name}",
+                                "type": "method",
+                                "line_number": child.lineno,
+                                "end_line_number": getattr(child, "end_lineno", child.lineno),
+                                "signature": m_sig,
+                                "parent": node.name,
+                                "docstring": m_doc_first
+                            })
+            return {
+                "parsed_via": "ast",
+                "total_functions": total_functions,
+                "total_classes": total_classes,
+                "total_methods": total_methods,
+                "symbols": symbols
+            }
+        except Exception:
+            pass
+
+        # Substrat Regex (Multi-langage : Python, JS/TS, C++, Java, Go, Rust)
+        lines = content.splitlines()
+        py_def_regex = re.compile(r'^\s*(async\s+def|def|class)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(?')
+        gen_def_regex = re.compile(r'^\s*(async\s+)?(function|class|def|fn|func)\s+([a-zA-Z_][a-zA-Z0-9_]*)\b')
+
+        for idx, line in enumerate(lines, 1):
+            m = py_def_regex.search(line) or gen_def_regex.search(line)
+            if m:
+                kw = m.group(1).strip()
+                name = m.group(2 if len(m.groups()) < 3 else 3)
+                is_class = "class" in kw
+                if is_class:
+                    total_classes += 1
+                    s_type = "class"
+                else:
+                    total_functions += 1
+                    s_type = "function"
+                symbols.append({
+                    "name": name,
+                    "type": s_type,
+                    "line_number": idx,
+                    "end_line_number": idx,
+                    "signature": line.strip(),
+                    "parent": None,
+                    "docstring": ""
+                })
+
+        return {
+            "parsed_via": "regex",
+            "total_functions": total_functions,
+            "total_classes": total_classes,
+            "total_methods": total_methods,
+            "symbols": symbols
+        }
+
     async def execute_tool(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         """Exécute un outil de forage déterministe sur un DataAsset."""
         target_name = args.get("target", "")
@@ -156,7 +312,89 @@ class FilesExplorer(BaseExplorer):
             return {"success": False, "data": _("Asset introuvable pour la cible '{}'.").format(target_name)}
 
         try:
-            if tool_name == "read_asset_head":
+            if tool_name in ["list_symbols", "list_functions", "count_functions"]:
+                content = asset.dump_data()
+                sym_data = self._extract_symbols(content)
+                symbols = sym_data["symbols"]
+                total_fn = sym_data["total_functions"]
+                total_cls = sym_data["total_classes"]
+                total_meth = sym_data["total_methods"]
+
+                lines_fmt = []
+                for s in symbols:
+                    parent_str = f" [Classe: {s['parent']}]" if s.get("parent") else ""
+                    doc_str = f" - {s['docstring']}" if s.get("docstring") else ""
+                    lines_fmt.append(f"- Lignes {s['line_number']}-{s['end_line_number']} [{s['type']}] {s['name']}: `{s['signature']}`{parent_str}{doc_str}")
+
+                sym_text = "\n".join(lines_fmt)
+                if len(sym_text) > self.MAX_SLICE_CHARS:
+                    sym_text = sym_text[:self.MAX_SLICE_CHARS] + "\n... [liste tronquée pour budget de tokens]"
+
+                verbatim = (
+                    f"**Analyse de symboles de `{asset.get_uri()}`** ({sym_data['parsed_via'].upper()}) :\n"
+                    f"- Total Fonctions / Méthodes : {total_fn}\n"
+                    f"- Total Classes : {total_cls}\n\n"
+                    f"**Liste déterministe des symboles** :\n{sym_text}"
+                )
+                return {
+                    "success": True,
+                    "data": {
+                        "uri": asset.get_uri(),
+                        "parsed_via": sym_data["parsed_via"],
+                        "total_functions": total_fn,
+                        "total_classes": total_cls,
+                        "total_methods": total_meth,
+                        "symbols": symbols,
+                        "verbatim": verbatim
+                    }
+                }
+
+            elif tool_name in ["extract_symbol", "extract_function"]:
+                sym_name = str(args.get("symbol_name") or args.get("query") or "").strip()
+                content = asset.dump_data()
+                sym_data = self._extract_symbols(content)
+                symbols = sym_data["symbols"]
+
+                matched = [s for s in symbols if sym_name.lower() in s["name"].lower()]
+                if not matched:
+                    return {
+                        "success": False,
+                        "data": f"Aucun symbole correspondant à '{sym_name}' trouvé dans `{asset.get_uri()}`."
+                    }
+
+                target_sym = matched[0]
+                lines = asset.read_slice(from_line=target_sym["line_number"], to_line=max(target_sym["line_number"], target_sym["end_line_number"]))
+                code_text = "\n".join(lines)
+                verbatim = f"Extraît du symbole `{target_sym['name']}` (Lignes {target_sym['line_number']}-{target_sym['end_line_number']}) dans `{asset.get_uri()}` :\n```python\n{code_text}\n```"
+                return {
+                    "success": True,
+                    "data": {
+                        "uri": asset.get_uri(),
+                        "symbol": target_sym,
+                        "code": code_text,
+                        "verbatim": verbatim
+                    }
+                }
+
+            elif tool_name == "search_definitions":
+                query = str(args.get("query", "")).strip().lower()
+                content = asset.dump_data()
+                sym_data = self._extract_symbols(content)
+                symbols = [s for s in sym_data["symbols"] if query in s["name"].lower() or query in s["signature"].lower()]
+
+                lines_fmt = [f"- Ligne {s['line_number']} [{s['type']}] `{s['signature']}`" for s in symbols]
+                verbatim = f"{len(symbols)} définitions correspondant à '{query}' dans `{asset.get_uri()}` :\n" + "\n".join(lines_fmt)
+                return {
+                    "success": True,
+                    "data": {
+                        "uri": asset.get_uri(),
+                        "matches": symbols,
+                        "count": len(symbols),
+                        "verbatim": verbatim
+                    }
+                }
+
+            elif tool_name == "read_asset_head":
                 n = int(args.get("n_lines", 20))
                 lines = asset.get_head(n_lines=min(n, 100))
                 text = "\n".join(lines)
@@ -260,6 +498,31 @@ class FilesExplorer(BaseExplorer):
                     }
                 }
 
+            elif tool_name == "analyze_asset":
+                query = str(args.get("query", ""))
+                from_line = args.get("from_line")
+                to_line = args.get("to_line")
+
+                if from_line is not None or to_line is not None:
+                    fl = max(1, int(from_line or 1))
+                    tl = max(fl, int(to_line or (fl + 100)))
+                    lines = asset.read_slice(from_line=fl, to_line=tl)
+                    content = "\n".join(lines)
+                else:
+                    content = asset.dump_data()
+
+                from tools.internal_tools import _run_llm_analysis
+                res = await _run_llm_analysis(content, query, self.runtime_state, tag="files_explorer_analyze")
+                analysis_data = res.get("data")
+                return {
+                    "success": res.get("result", False),
+                    "data": {
+                        "uri": asset.get_uri(),
+                        "analysis": analysis_data,
+                        "verbatim": str(analysis_data) if analysis_data else res.get("message", "")
+                    }
+                }
+
             return {"success": False, "data": f"Outil inconnu '{tool_name}' pour FilesExplorer."}
 
         except Exception as e:
@@ -303,11 +566,17 @@ class FilesExplorer(BaseExplorer):
         steps: List[DiscoveryStep] = []
         for idx, (t, tg) in enumerate(zip(targets, technical_goals)):
             tool_name = tg
-            if tg not in self.get_available_goals():
-                tool_name = "inspect_asset"
-
             args: Dict[str, Any] = {"target": t}
-            if "search" in tool_name or "find" in tool_name:
+
+            if tg in ["list_symbols", "list_functions", "count_functions"]:
+                tool_name = "list_symbols"
+            elif tg in ["extract_symbol", "extract_function"]:
+                tool_name = "extract_symbol"
+                args["symbol_name"] = self._extract_search_pattern(goal) or t
+            elif tg == "search_definitions":
+                tool_name = "search_definitions"
+                args["query"] = self._extract_search_pattern(goal) or "def"
+            elif "search" in tool_name or "find" in tool_name:
                 tool_name = "search_asset"
                 clean_q = self._extract_search_pattern(goal)
                 args["query"] = clean_q or "error"
@@ -321,6 +590,8 @@ class FilesExplorer(BaseExplorer):
             elif "head" in tool_name:
                 tool_name = "read_asset_head"
                 args["n_lines"] = 25
+            elif tg not in self.get_available_goals():
+                tool_name = "inspect_asset"
 
             steps.append(DiscoveryStep(
                 id=f"step_{idx+1}",

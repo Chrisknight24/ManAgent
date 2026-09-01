@@ -10,6 +10,14 @@ from typing import List, Dict, Any, Optional, Union
 from utils.logger import Logger
 from memory.history import ConversationMemory, SessionConversation
 from core.discovery.asset_registry import AssetRegistry
+from core.constants import (
+    CONTEXT_MAX_TOTAL_TOKENS,
+    CONTEXT_MAX_RECENT_TOKENS,
+    CONTEXT_MAX_ASSETS_TOKENS,
+    CONTEXT_MAX_FACTS_TOKENS,
+    CONTEXT_MAX_TIMELINE_TOKENS,
+    CONTEXT_RECENT_TURNS_LIMIT,
+)
 
 
 class TokenEstimator:
@@ -37,11 +45,11 @@ class ContextManager:
 
     def __init__(
         self,
-        max_total_tokens: int = 12000,
-        max_recent_messages_tokens: int = 4000,
-        max_assets_manifest_tokens: int = 2000,
-        max_facts_tokens: int = 1500,
-        max_timeline_tokens: int = 1000
+        max_total_tokens: int = CONTEXT_MAX_TOTAL_TOKENS,
+        max_recent_messages_tokens: int = CONTEXT_MAX_RECENT_TOKENS,
+        max_assets_manifest_tokens: int = CONTEXT_MAX_ASSETS_TOKENS,
+        max_facts_tokens: int = CONTEXT_MAX_FACTS_TOKENS,
+        max_timeline_tokens: int = CONTEXT_MAX_TIMELINE_TOKENS
     ):
         self.max_total_tokens = max_total_tokens
         self.max_recent_messages_tokens = max_recent_messages_tokens
@@ -57,7 +65,7 @@ class ContextManager:
         facts_summary: Optional[str] = None,
         context_notes: Optional[str] = None,
         asset_registry: Optional[AssetRegistry] = None,
-        recent_turns_limit: int = 6
+        recent_turns_limit: int = CONTEXT_RECENT_TURNS_LIMIT
     ) -> Dict[str, Any]:
         """
         Construit dynamiquement les sections du contexte pour l'Orchestrateur sous budget strict.

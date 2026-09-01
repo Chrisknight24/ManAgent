@@ -21,6 +21,7 @@ class Events:
     RUNTIME_CONFIGURED = "runtime.configured"
     RUNTIME_ERROR = "runtime.error"
     THINKING_STARTED = "thinking.started"
+    STATUS_UPDATE = "status.update"
     THINKING_FINISHED = "thinking.finished"
     RESPONSE_CHUNK = "response.chunk"
     RESPONSE_COMPLETED = "response.completed"
@@ -64,6 +65,31 @@ class Providers:
     GROQ = "groq"
     OPENAI = "openai"  # <- On ajoute ça ici
     OPENROUTER = "openrouter"
+    CLAUDE = "claude"
+    DEEPSEEK = "deepseek"
+
+class ModelCapabilities(StrEnum):
+    TEXT = "text"
+    VISION = "vision"
+    TOOLS = "tools"
+    STRUCTURED_OUTPUT = "structured_output"
+    AUDIO = "audio"
+    VIDEO = "video"
+    REASONING = "reasoning"
+    CODING = "coding"
+    AGENTIC = "agentic"
+    LONG_CONTEXT = "long_context"
+    FAST_INFERENCE = "fast_inference"
+    LOW_LATENCY = "low_latency"
+    HIGH_VOLUME = "high_volume"
+    CLASSIFICATION = "classification"
+    DATA_EXTRACTION = "data_extraction"
+    CYBERSECURITY = "cybersecurity"
+    FILES = "files"
+    COMPUTER_USE = "computer_use"
+    AUTOMATIC_MODEL_SELECTION = "automatic_model_selection"
+    DYNAMIC_ROUTING = "dynamic_routing"
+    VISION_WHEN_AVAILABLE = "vision_when_available"
 
 class OrchestratorMode(StrEnum):
     DIRECT = "direct"
@@ -84,12 +110,41 @@ CACHE_MAX_ENTRIES = 1000
 CACHE_TTL_SECONDS = 7 * 24 * 3600  # 7 jours
 
 # =====================================================
-# ENTITY LEARNER
+# ENTITY LEARNER & LESSON STORE
 # =====================================================
-ENTITY_LEARNER_MIN_EVIDENCE = 3   # Nombre minimal d'évidences pour consolider un groupe
+ENTITY_LEARNER_MIN_EVIDENCE = 3      # Nombre minimal d'évidences pour consolider un groupe
+LESSON_STORE_TOP_K = 3               # Nombre max de leçons similaires retournées par défaut
+LESSON_SIMILARITY_THRESHOLD = 0.15   # Seuil de similarité cosinus pour les leçons
+LESSON_MAX_KEYWORDS_PER_CALL = 6     # Nombre max de mots-clés par appel
+LESSON_MAX_KEYWORDS_TOTAL = 20       # Nombre max total de mots-clés
+LESSON_MAX_SOURCE_EPISODES = 50      # Nombre max d'épisodes sources par leçon
 
 # =====================================================
-# DISCOVERY FRAMEWORK
+# DISCOVERY FRAMEWORK & ASSETS
 # =====================================================
-DISCOVERY_MAX_ITERATIONS = 10      # Nombre maximum d'étapes dans une DiscoverySession
+DISCOVERY_MAX_ITERATIONS = 10        # Nombre maximum d'étapes dans une DiscoverySession
 DISCOVERY_CACHE_TTL = 7 * 24 * 3600  # 7 jours pour le cache des RefinedContexts
+DISCOVERY_MAX_SLICE_CHARS = 50000    # Budget large pour tranches de code/logs dans FilesExplorer
+ASSET_INLINE_LIMIT = 3000            # Seuil de caractères au-delà duquel un résultat est encapsulé en DataAsset
+
+# =====================================================
+# SOLVER & EXÉCUTION
+# =====================================================
+SOLVER_MAX_DEPTH = 12                # Profondeur maximale de décomposition récursive
+SOLVER_MAX_EXECUTION_TRIES = 3       # Nombre maximal de tentatives d'exécution d'un plan
+SOLVER_MAX_PREEXECUTION_FAILURES = 3 # Nombre maximal d'échecs de validation de plan consécutifs
+MAX_DEPTH_EXTENSIONS = 5             # Plafond d'extensions de profondeur accordées par mission (arbitrées par le Superviseur)
+MAX_INSIGHTS_PER_TARGET = 5          # Nombre max d'insights mémorisés par cible
+
+# =====================================================
+# LLM & CONTEXT BUDGETS
+# =====================================================
+LLM_STRUCTURED_MAX_ATTEMPTS = 2      # Nombre maximal de retries en cas d'erreur de schéma Pydantic
+LLM_DISCOVERY_MAX_ITERATIONS = 5     # Nombre maximal d'itérations pour la Progressive Disclosure LLM
+CONTEXT_MAX_TOTAL_TOKENS = 12000     # Budget total maximal de tokens pour l'Orchestrateur
+CONTEXT_MAX_RECENT_TOKENS = 4000     # Budget de tokens pour les messages récents verbatim
+CONTEXT_MAX_ASSETS_TOKENS = 2000     # Budget de tokens pour le manifeste des DataAssets
+CONTEXT_MAX_FACTS_TOKENS = 1500      # Budget de tokens pour les faits et leçons sémantiques
+CONTEXT_MAX_TIMELINE_TOKENS = 1000   # Budget de tokens pour l'index chronologique
+CONTEXT_RECENT_TURNS_LIMIT = 6       # Nombre de tours récents inclus par défaut
+

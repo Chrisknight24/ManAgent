@@ -53,10 +53,14 @@ class DiscoveryEngine:
         # Assigner le LLM à l'Explorer
         if llm is not None:
             target_explorer.llm = llm
-        elif self.runtime_state.discovery_llm is not None:
+        elif getattr(self.runtime_state, "discovery_llm", None) is not None:
             target_explorer.llm = self.runtime_state.discovery_llm
+        elif hasattr(self.runtime_state, "orchestrator") and getattr(self.runtime_state.orchestrator, "llm", None):
+            target_explorer.llm = self.runtime_state.orchestrator.llm
+        elif hasattr(self.runtime_state, "current_llm") and self.runtime_state.current_llm:
+            target_explorer.llm = self.runtime_state.current_llm
         elif not hasattr(target_explorer, "llm") or target_explorer.llm is None:
-            Logger.warning(f"[DiscoveryEngine] Aucun LLM fourni pour l'Explorer '{data_type}'. generate_plan échouera.")
+            Logger.warning(f"[DiscoveryEngine] Aucun LLM fourni pour l'Explorer '{data_type}'. generate_plan utilisera le LLM de la session.")
 
         self._explorers[data_type] = target_explorer
 

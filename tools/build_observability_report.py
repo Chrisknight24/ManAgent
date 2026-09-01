@@ -599,7 +599,14 @@ def parse_signature_string(s):
         return {"action": action, "object": obj, "desired_state": desired}
     return {"action": "?", "object": "?", "desired_state": None}
 
-def build_data(db_path: str, events_path: str) -> Dict[str, Any]:
+def build_data(
+    db_path: str,
+    events_path: str,
+    target_session_id: Optional[str] = None,
+    target_mission_id: Optional[str] = None,
+    max_sessions: int = 20,
+    session_only: bool = False,
+) -> Dict[str, Any]:
     episodes = load_episodes(db_path)
     lessons = load_lessons(db_path)
     events = load_events(events_path)
@@ -607,6 +614,15 @@ def build_data(db_path: str, events_path: str) -> Dict[str, Any]:
     session_turns = [e for e in events if e.get("event") == "session_turn"]
     llm_calls = [e for e in events if e.get("event") == "llm_call"]
     retrieval_events = [e for e in events if e.get("event") in ("retriever_results", "retriever_query", "retriever_search_completed")]
+
+    # Filtrage strict si session_only demandé
+    if session_only and target_session_id:
+        session_turns = [t for t in session_turns if t.get("session_id") == target_session_id]
+        session_mids = {t.get("mission_id") for t in session_turns if t.get("mission_id")}
+        if target_mission_id:
+            session_mids.add(target_mission_id)
+        if session_mids:
+            episodes = [ep for ep in episodes if ep.get("mission_id") in session_mids]
 
     attach_llm_calls_by_mission(episodes, llm_calls, events)
 
@@ -653,10 +669,10 @@ def build_data(db_path: str, events_path: str) -> Dict[str, Any]:
 
     for turn in session_turns:
         turn_id = turn.get("turn_id")
-        sessions = discovery_by_turn.get(turn_id, []) if turn_id else []
-        if not sessions and turn.get("mission_id"):
-            sessions = [s for s in discovery_by_mission.get(turn.get("mission_id"), []) if s.get("caller") == "orchestrator"]
-        turn["_discovery_sessions"] = sessions
+        sessions_disc = discovery_by_turn.get(turn_id, []) if turn_id else []
+        if not sessions_disc and turn.get("mission_id"):
+            sessions_disc = [s for s in discovery_by_mission.get(turn.get("mission_id"), []) if s.get("caller") == "orchestrator"]
+        turn["_discovery_sessions"] = sessions_disc
 
     for turn in session_turns:
         mission_id = turn.get("mission_id")
@@ -691,11 +707,33 @@ def build_data(db_path: str, events_path: str) -> Dict[str, Any]:
     for turns in sessions.values():
         turns.sort(key=lambda t: t.get("ts") or "", reverse=False)
 
+    # Tri par récence (la session la plus récente en premier)
+    sorted_session_list = sorted(
+        [{"session_id": sid, "turns": turns} for sid, turns in sessions.items()],
+        key=lambda s: (s["turns"][-1].get("ts") if s.get("turns") and s["turns"][-1].get("ts") else (s["turns"][0].get("ts") if s.get("turns") else "")),
+        reverse=True
+    )
+
+    if target_session_id and not session_only:
+        target_item = next((s for s in sorted_session_list if s["session_id"] == target_session_id), None)
+        other_items = [s for s in sorted_session_list if s["session_id"] != target_session_id]
+        if target_item:
+            if max_sessions and max_sessions > 0:
+                sorted_session_list = [target_item] + other_items[:max_sessions - 1]
+            else:
+                sorted_session_list = [target_item] + other_items
+        elif max_sessions and max_sessions > 0:
+            sorted_session_list = sorted_session_list[:max_sessions]
+    elif max_sessions and max_sessions > 0:
+        sorted_session_list = sorted_session_list[:max_sessions]
+
     return {
         "episodes": episodes,
         "lessons": lessons,
-        "sessions": [{"session_id": sid, "turns": turns} for sid, turns in sessions.items()],
+        "sessions": sorted_session_list,
         "discovery_registry": discovery_data.get("by_run", {}),
+        "target_session_id": target_session_id,
+        "target_mission_id": target_mission_id,
         "clock_offset_detected": 0,
     }
 
@@ -778,9 +816,26 @@ body {
   overflow: hidden;
 }
 
+/* RESIZERS FOR DYNAMIC PANELS */
+.resizer {
+  width: 6px;
+  height: 100vh;
+  background: var(--border);
+  cursor: col-resize;
+  flex-shrink: 0;
+  transition: background 0.15s ease;
+  z-index: 30;
+  user-select: none;
+}
+.resizer:hover, .resizer.dragging {
+  background: var(--primary);
+}
+
 /* SIDEBAR */
 .sidebar {
-  width: 310px;
+  width: 290px;
+  min-width: 180px;
+  max-width: 480px;
   flex-shrink: 0;
   background: var(--surface);
   border-right: 1px solid var(--border);
@@ -788,6 +843,10 @@ body {
   flex-direction: column;
   height: 100vh;
   z-index: 10;
+  transition: width 0.05s ease;
+}
+.sidebar.collapsed {
+  display: none !important;
 }
 .sidebar__header {
   padding: 16px 18px;
@@ -899,6 +958,7 @@ body {
   overflow: hidden;
   display: flex;
   background: var(--bg);
+  min-width: 0;
 }
 
 .workspace-area {
@@ -911,6 +971,53 @@ body {
   flex-direction: column;
 }
 
+.workspace-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: #ffffff;
+  border-bottom: 1px solid var(--border);
+  gap: 12px;
+  flex-shrink: 0;
+  z-index: 5;
+}
+.tb-btn {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  padding: 5px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.12s ease;
+  user-select: none;
+}
+.tb-btn:hover {
+  background: #ffffff;
+  color: var(--primary);
+  border-color: var(--primary-border);
+}
+.tb-btn-close {
+  background: transparent;
+  border: none;
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: all 0.12s ease;
+}
+.tb-btn-close:hover {
+  background: var(--failure-bg);
+  color: var(--failure);
+}
+
 .view-container {
   display: none;
   width: 100%;
@@ -920,10 +1027,11 @@ body {
 
 /* CHAT TIMELINE */
 .chat-view {
-  padding: 24px 32px 60px;
-  max-width: 960px;
+  padding: 18px clamp(12px, 3vw, 28px) 60px;
+  max-width: 1050px;
   margin: 0 auto;
   width: 100%;
+  min-width: 0;
 }
 
 .chat-turn {
@@ -937,6 +1045,7 @@ body {
   justify-content: flex-end;
   align-items: flex-end;
   gap: 8px;
+  width: 100%;
 }
 .chat-bubble-user {
   background: var(--user-bubble-bg);
@@ -945,10 +1054,62 @@ body {
   border-radius: 18px 18px 4px 18px;
   font-size: 14.5px;
   font-weight: 500;
-  line-height: 1.5;
-  max-width: 78%;
+  line-height: 1.55;
+  max-width: 88%;
   box-shadow: var(--shadow-sm);
-  word-break: break-word;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+.chat-bubble-user__content {
+  white-space: pre-wrap;
+}
+.chat-bubble-user__content.collapsed-text {
+  max-height: 220px;
+  overflow: hidden;
+  position: relative;
+}
+.chat-bubble-user__content.collapsed-text::after {
+  content: "";
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 70px;
+  background: linear-gradient(to bottom, transparent, var(--user-bubble-bg));
+  pointer-events: none;
+}
+.chat-bubble-user__toggle {
+  margin-top: 8px;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #93c5fd;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(255,255,255,0.12);
+  padding: 4px 10px;
+  border-radius: 6px;
+  user-select: none;
+  transition: background 0.12s ease;
+}
+.chat-bubble-user__toggle:hover {
+  background: rgba(255,255,255,0.22);
+  color: #ffffff;
+}
+.btn-copy-bubble {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: #cbd5e1;
+  background: rgba(255,255,255,0.1);
+  border: 1px solid rgba(255,255,255,0.15);
+  padding: 2px 7px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+  user-select: none;
+}
+.btn-copy-bubble:hover {
+  background: rgba(255,255,255,0.25);
+  color: #ffffff;
 }
 .chat-turn__time {
   font-size: 11px;
@@ -962,11 +1123,13 @@ body {
   border: 1px solid var(--border);
   border-radius: 18px 18px 18px 4px;
   padding: 16px 20px;
-  max-width: 88%;
+  max-width: 90%;
   box-shadow: var(--shadow-sm);
   display: flex;
   flex-direction: column;
   gap: 8px;
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 .bot-header-tag {
   display: flex;
@@ -984,7 +1147,7 @@ body {
   border: 1.5px solid var(--border);
   border-radius: 14px;
   padding: 16px 20px;
-  max-width: 90%;
+  max-width: 92%;
   box-shadow: var(--shadow-sm);
   cursor: pointer;
   transition: all 0.15s ease;
@@ -1049,9 +1212,11 @@ body {
 .badge--primary { background: var(--primary-bg); color: var(--primary); border: 1px solid var(--primary-border); }
 .badge--purple { background: var(--purple-bg); color: var(--purple); border: 1px solid var(--purple-border); }
 
-/* INSPECTOR PANE (PERSISTANT) */
+/* INSPECTOR PANE (PERSISTANT & RESIZABLE) */
 .inspector-pane {
-  width: 490px;
+  width: 380px;
+  min-width: 250px;
+  max-width: 650px;
   flex-shrink: 0;
   height: 100vh;
   background: var(--surface);
@@ -1060,9 +1225,13 @@ body {
   flex-direction: column;
   overflow: hidden;
   box-shadow: -4px 0 16px rgba(0,0,0,0.03);
+  transition: width 0.05s ease;
+}
+.inspector-pane.collapsed {
+  display: none !important;
 }
 .inspector-header {
-  padding: 14px 18px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
@@ -1294,7 +1463,7 @@ body {
 
 <div class="app-layout">
   <!-- SIDEBAR -->
-  <div class="sidebar">
+  <div class="sidebar" id="sidebar">
     <div class="sidebar__header">
       <div class="sidebar__brand">
         <div class="sidebar__logo-icon">M</div>
@@ -1311,9 +1480,28 @@ body {
     <div class="session-list" id="session-list"></div>
   </div>
 
-  <!-- WORKSPACE + PERSISTENT INSPECTOR -->
+  <!-- RESIZER SIDEBAR -->
+  <div class="resizer" id="resizer-sidebar" title="Glisser pour redimensionner le panneau latéral"></div>
+
+  <!-- WORKSPACE AREA -->
   <div class="main-content">
     <div class="workspace-area" id="workspace-area">
+      <!-- TOP TOOLBAR -->
+      <div class="workspace-toolbar">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <button class="tb-btn" id="btn-toggle-sidebar" onclick="toggleSidebar()" title="Masquer / Afficher les sessions">
+            <span id="icon-sidebar-toggle">☰</span> Sessions
+          </button>
+          <span style="font-size:12px; color:var(--border-strong);">|</span>
+          <span style="font-size:13px; font-weight:800; color:var(--text);" id="workspace-title">Fil d'Observabilité</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <button class="tb-btn" id="btn-toggle-inspector" onclick="toggleInspector()" title="Masquer / Afficher l'Inspecteur">
+            🔍 Inspecteur de Traces <span class="badge badge--primary" id="tb-inspector-indicator" style="font-size:10px; padding:1px 5px;">380px</span>
+          </button>
+        </div>
+      </div>
+
       <!-- VIEW SESSIONS -->
       <div class="view-container active" id="view-sessions">
         <div class="chat-view" id="chat-thread"></div>
@@ -1321,7 +1509,7 @@ body {
 
       <!-- VIEW MISSION DETAIL -->
       <div class="view-container" id="view-mission">
-        <div style="padding:24px 28px 80px; min-width: 600px;" id="mission-tree-pane"></div>
+        <div style="padding:16px clamp(12px, 2.5vw, 28px) 80px; width: 100%; min-width: 0; box-sizing: border-box;" id="mission-tree-pane"></div>
       </div>
 
       <!-- VIEW LESSONS -->
@@ -1334,11 +1522,17 @@ body {
       </div>
     </div>
 
+    <!-- RESIZER INSPECTOR -->
+    <div class="resizer" id="resizer-inspector" title="Glisser pour redimensionner l'Inspecteur"></div>
+
     <!-- PERSISTENT INSPECTOR -->
     <div class="inspector-pane" id="inspector-pane">
       <div class="inspector-header">
-        <div class="inspector-title" id="inspector-title">Inspecteur de Traces</div>
-        <span class="badge badge--primary" id="inspector-badge">Info</span>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <div class="inspector-title" id="inspector-title">Inspecteur de Traces</div>
+          <span class="badge badge--primary" id="inspector-badge">Info</span>
+        </div>
+        <button class="tb-btn-close" onclick="toggleInspector(false)" title="Masquer l'Inspecteur">✕</button>
       </div>
       <div class="inspector-tabs" id="inspector-tabs" style="display:none;">
         <div class="inspector-tab-btn active" data-tab="overview">Synthèse</div>
@@ -1388,8 +1582,36 @@ DATA.episodes.forEach(ep => {
 });
 
 let currentNav = 'sessions';
-let currentSessionId = DATA.sessions[0] ? DATA.sessions[0].session_id : null;
-let currentMissionId = null;
+
+// Extraction ciblée depuis l'URL ou DATA
+const urlParams = new URLSearchParams(window.location.search);
+const hashStr = window.location.hash || '';
+
+let urlMission = urlParams.get('mission');
+let urlSession = urlParams.get('session');
+
+if (!urlMission && hashStr.startsWith('#mission/')) {
+  urlMission = decodeURIComponent(hashStr.replace('#mission/', '')).trim();
+}
+if (!urlSession && hashStr.startsWith('#session/')) {
+  urlSession = decodeURIComponent(hashStr.replace('#session/', '')).trim();
+}
+
+let initialTargetSession = DATA.target_session_id || urlSession || null;
+let initialTargetMission = DATA.target_mission_id || urlMission || null;
+
+// Si une mission cible est spécifiée mais pas de session, trouver la session qui contient cette mission
+if (initialTargetMission && !initialTargetSession) {
+  for (const s of DATA.sessions) {
+    if (s.turns && s.turns.some(t => t.mission_id === initialTargetMission)) {
+      initialTargetSession = s.session_id;
+      break;
+    }
+  }
+}
+
+let currentSessionId = initialTargetSession || (DATA.sessions[0] ? DATA.sessions[0].session_id : null);
+let currentMissionId = initialTargetMission || null;
 let selectedInspectorData = null;
 let activeInspectorTab = 'overview';
 
@@ -1683,11 +1905,27 @@ function renderSessionThread(sessionId) {
 
   turns.forEach((t, i) => {
     const tsStr = formatTimestamp(t.ts);
+    const uMsg = t.user_message || '(Message vide)';
+    const isLongUMsg = uMsg.length > 320;
+    const bubbleId = `ububble-${sessionId}-${i}`;
+    const escUMsg = esc(uMsg);
+
     html += `<div class="chat-turn">
       <!-- User Message -->
       <div class="chat-turn__user-row">
         <span class="chat-turn__time">${tsStr}</span>
-        <div class="chat-bubble-user" style="cursor:pointer;" onclick="inspectUserTurn('${esc(sessionId)}', ${i})">${esc(t.user_message || '(Message vide)')}</div>
+        <div class="chat-bubble-user" id="${bubbleId}" style="cursor:pointer;" onclick="inspectUserTurn('${esc(sessionId)}', ${i})">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:4px;">
+            <span style="font-size:10.5px; text-transform:uppercase; font-weight:800; opacity:0.8; font-family:var(--mono);">Utilisateur</span>
+            <button class="btn-copy-bubble" onclick="event.stopPropagation(); copyTextToClipboard(this, ${JSON.stringify(uMsg)})" title="Copier le texte complet">📋 Copier</button>
+          </div>
+          <div class="chat-bubble-user__content ${isLongUMsg ? 'collapsed-text' : ''}" id="ucontent-${bubbleId}">${escUMsg}</div>
+          ${isLongUMsg ? `
+            <div class="chat-bubble-user__toggle" id="utoggle-${bubbleId}" onclick="event.stopPropagation(); toggleUserBubbleText('${bubbleId}', ${uMsg.length})">
+              ▼ Afficher tout (${uMsg.length} caractères)
+            </div>
+          ` : ''}
+        </div>
       </div>`;
 
     if (t.mode === 'direct') {
@@ -2240,6 +2478,7 @@ function toggleAllAttempts() {
 // INSPECTEUR LATÉRAL (PANNEAU PERSISTANT)
 // ==========================================
 function updateInspector(title, badge, htmlOverview, promptCalls = [], rawJson = null) {
+  toggleInspector(true); // Open inspector panel if it was collapsed
   document.getElementById('inspector-title').textContent = title;
   document.getElementById('inspector-badge').textContent = badge;
   document.getElementById('inspector-tabs').style.display = 'flex';
@@ -2943,12 +3182,161 @@ function renderLessonsView(filter) {
 }
 
 // ==========================================
+// UTILITY & RESIZER FUNCTIONS
+// ==========================================
+function copyTextToClipboard(btn, text) {
+  if (!navigator.clipboard) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    btn.textContent = '✅ Copié !';
+    setTimeout(() => { btn.textContent = '📋 Copier'; }, 1800);
+    return;
+  }
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = '✅ Copié !';
+    setTimeout(() => { btn.textContent = '📋 Copier'; }, 1800);
+  }).catch(() => {
+    btn.textContent = '❌ Erreur';
+  });
+}
+
+function toggleUserBubbleText(bubbleId, totalLen) {
+  const content = document.getElementById(`ucontent-${bubbleId}`);
+  const toggleBtn = document.getElementById(`utoggle-${bubbleId}`);
+  if (!content || !toggleBtn) return;
+  if (content.classList.contains('collapsed-text')) {
+    content.classList.remove('collapsed-text');
+    toggleBtn.textContent = '▲ Réduire';
+  } else {
+    content.classList.add('collapsed-text');
+    toggleBtn.textContent = `▼ Afficher tout (${totalLen} caractères)`;
+  }
+}
+
+function toggleSidebar() {
+  const sidebar = document.getElementById('sidebar');
+  const resizer = document.getElementById('resizer-sidebar');
+  if (!sidebar) return;
+  sidebar.classList.toggle('collapsed');
+  if (resizer) resizer.style.display = sidebar.classList.contains('collapsed') ? 'none' : 'block';
+}
+
+function toggleInspector(forceOpen) {
+  const inspector = document.getElementById('inspector-pane');
+  const resizer = document.getElementById('resizer-inspector');
+  if (!inspector) return;
+  
+  if (forceOpen === true) {
+    inspector.classList.remove('collapsed');
+  } else if (forceOpen === false) {
+    inspector.classList.add('collapsed');
+  } else {
+    inspector.classList.toggle('collapsed');
+  }
+  
+  const isCollapsed = inspector.classList.contains('collapsed');
+  if (resizer) resizer.style.display = isCollapsed ? 'none' : 'block';
+  
+  const indicator = document.getElementById('tb-inspector-indicator');
+  if (indicator) {
+    indicator.textContent = isCollapsed ? 'Masqué' : (Math.round(inspector.offsetWidth || 380) + 'px');
+  }
+}
+
+function initResizers() {
+  const sidebar = document.getElementById('sidebar');
+  const inspector = document.getElementById('inspector-pane');
+  const resizerSidebar = document.getElementById('resizer-sidebar');
+  const resizerInspector = document.getElementById('resizer-inspector');
+
+  // Load stored widths
+  const savedSidebarW = localStorage.getItem('managent_sidebar_w');
+  const savedInspectorW = localStorage.getItem('managent_inspector_w');
+  if (savedSidebarW && sidebar) sidebar.style.width = savedSidebarW + 'px';
+  if (savedInspectorW && inspector) inspector.style.width = savedInspectorW + 'px';
+
+  // Auto collapse inspector on narrow screens initially
+  if (window.innerWidth < 1100 && inspector) {
+    inspector.classList.add('collapsed');
+    if (resizerInspector) resizerInspector.style.display = 'none';
+    const indicator = document.getElementById('tb-inspector-indicator');
+    if (indicator) indicator.textContent = 'Masqué';
+  }
+
+  // Resizer Sidebar dragging
+  if (resizerSidebar && sidebar) {
+    let isDragging = false;
+    resizerSidebar.addEventListener('mousedown', (e) => {
+      isDragging = true;
+      resizerSidebar.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    });
+    document.addEventListener('mousemove', (e) => {
+      if (!isDragging) return;
+      let newW = e.clientX;
+      if (newW < 180) newW = 180;
+      if (newW > 480) newW = 480;
+      sidebar.style.width = newW + 'px';
+      localStorage.setItem('managent_sidebar_w', newW);
+    });
+    document.addEventListener('mouseup', () => {
+      if (isDragging) {
+        isDragging = false;
+        resizerSidebar.classList.remove('dragging');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      }
+    });
+  }
+
+  // Resizer Inspector dragging
+  if (resizerInspector && inspector) {
+    let isDragging = false;
+    resizerInspector.addEventListener('mousedown', (e) => {
+      isDragging = true;
+      resizerInspector.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    });
+    document.addEventListener('mousemove', (e) => {
+      if (!isDragging) return;
+      let newW = window.innerWidth - e.clientX;
+      if (newW < 240) newW = 240;
+      if (newW > 700) newW = 700;
+      inspector.style.width = newW + 'px';
+      localStorage.setItem('managent_inspector_w', newW);
+      const indicator = document.getElementById('tb-inspector-indicator');
+      if (indicator) indicator.textContent = Math.round(newW) + 'px';
+    });
+    document.addEventListener('mouseup', () => {
+      if (isDragging) {
+        isDragging = false;
+        resizerInspector.classList.remove('dragging');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      }
+    });
+  }
+}
+
+// ==========================================
 // INIT
 // ==========================================
 const genDate = DATA.generated_at ? new Date(DATA.generated_at) : new Date();
 document.getElementById('gen-timestamp').textContent = 'Généré le ' + genDate.toLocaleDateString('fr-FR') + ' à ' + genDate.toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit'});
+initResizers();
 renderSidebar();
-if (currentSessionId) renderSessionThread(currentSessionId);
+
+if (currentMissionId) {
+  openMission(currentMissionId, false);
+} else if (currentSessionId) {
+  renderSessionThread(currentSessionId);
+}
 </script>
 </body>
 </html>"""
@@ -2967,12 +3355,23 @@ def render_html(data: Dict[str, Any]) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="Génère le rapport d'observabilité HTML autonome.")
-    parser.add_argument("--db", default="memory.db")
-    parser.add_argument("--events", default="observability/events.jsonl")
-    parser.add_argument("--out", default="observability_report.html")
+    parser.add_argument("--db", default="memory.db", help="Chemin vers la base SQLite memory.db")
+    parser.add_argument("--events", default="observability/events.jsonl", help="Chemin vers events.jsonl")
+    parser.add_argument("--out", default="observability_report.html", help="Fichier HTML de sortie")
+    parser.add_argument("--session", default=None, help="ID de la session à cibler par défaut")
+    parser.add_argument("--mission", default=None, help="ID de la mission à cibler et afficher directement")
+    parser.add_argument("--max-sessions", type=int, default=20, help="Nombre max de sessions récentes à charger (0 pour tout charger)")
+    parser.add_argument("--session-only", action="store_true", help="N'exporter que les événements de la session demandée")
     args = parser.parse_args()
 
-    data = build_data(args.db, args.events)
+    data = build_data(
+        db_path=args.db,
+        events_path=args.events,
+        target_session_id=args.session,
+        target_mission_id=args.mission,
+        max_sessions=args.max_sessions,
+        session_only=args.session_only,
+    )
     html = render_html(data)
 
     with open(args.out, "w", encoding="utf-8") as f:

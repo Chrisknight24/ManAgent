@@ -48,7 +48,7 @@ class RegistryExplorer(BaseExplorer):
         return "Inspecte et analyse les variables temporaires et leurs valeurs stockées en mémoire vive pour la mission en cours."
 
     def get_available_goals(self) -> List[str]:
-        return ["list_keys", "describe_type", "check_value", "summarize"]
+        return ["list_keys", "describe_type", "check_value", "summarize", "analyze_value"]
 
     def get_tools_description(self) -> List[Dict[str, Any]]:
         return [
@@ -78,6 +78,18 @@ class RegistryExplorer(BaseExplorer):
                     },
                     "required": ["target"]
                 }
+            },
+            {
+                "name": "analyze_value",
+                "description": _("Effectue une analyse sémantique par LLM d'une variable du registre pour répondre à une question."),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string", "description": _("Nom de la variable à analyser")},
+                        "query": {"type": "string", "description": _("Question sémantique ou consigne d'analyse")}
+                    },
+                    "required": ["target", "query"]
+                }
             }
         ]
 
@@ -93,6 +105,9 @@ class RegistryExplorer(BaseExplorer):
                     args.get("offset", 0),
                     args.get("limit", 500)
                 )
+            elif tool_name == "analyze_value":
+                from tools.internal_tools import llm_analyze_data
+                return await llm_analyze_data({"source": args.get("target"), "query": args.get("query")}, self.runtime_state)
             else:
                 return {"success": False, "data": _("Outil inconnu.")}
         except Exception as e:

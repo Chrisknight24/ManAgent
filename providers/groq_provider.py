@@ -2,393 +2,274 @@
 groq_provider.py
 ================
 
-Provider Groq du runtime.
-
-IMPORTANT :
--------------
-Groq expose une API compatible OpenAI.
-
-Donc :
-nous utilisons simplement des requêtes HTTP.
-
-Contrairement au SDK Gemini :
-nous pouvons ici utiliser du vrai async.
+Provider Groq officiel du runtime.
+Supporte nativement le pool multi-clés ordonné avec failover automatique.
 """
 
-
-# =========================================================
-# IMPORTS
-# =========================================================
-from typing import Type
+from typing import Type, AsyncGenerator, Optional, Any, List
 from pydantic import BaseModel
 import aiohttp
-
-
-# Provider abstrait
-#
-from providers.base_provider import BaseProvider
-
-
-# Logger runtime
-#
+import json
+import asyncio
+from core.i18n import _
+from providers.base_provider import (
+    BaseProvider,
+    ProviderQuotaExhaustedError,
+    ProviderAuthError,
+    ProviderServiceUnavailableError,
+    ProviderError
+)
 from utils.logger import Logger
 
-from typing import AsyncGenerator
-import json
-from core.i18n import _
-# =========================================================
-# GROQ PROVIDER
-# =========================================================
 
 class GroqProvider(BaseProvider):
 
-
-    # =====================================================
-    # CONSTRUCTOR
-    # =====================================================
-
     def __init__(
         self,
-        api_key: str,
+        api_keys: Any,
         model_name: str,
         system_prompt: str
     ):
-
         super().__init__()
-
         self.provider_name = "groq"
-
+        self.provider_id = "groq"
         self.model_name = model_name
-
-        self.api_key = api_key
-
         self.system_prompt = system_prompt
         self.history = []
-
-
-    # =====================================================
-    # INITIALIZE
-    # =====================================================
+        self.set_api_keys_pool(api_keys)
 
     async def initialize(self):
+        Logger.info(f"Initializing Groq provider: {self.model_name}")
 
-        Logger.info(
-            f"Initializing Groq provider: {self.model_name}"
-        )
+    async def _execute_http_request(self, payload: dict, endpoint: str = "https://api.groq.com/openai/v1/chat/completions") -> dict:
+        total_keys = max(1, len(self.api_keys_pool))
+        attempts = 0
 
+        while attempts < total_keys:
+            active_key = self.get_active_api_key()
+            if not active_key:
+                raise ProviderQuotaExhaustedError(_("[GroqProvider] Aucune clé API active ou disponible."))
 
-    # =====================================================
-    # GENERATE RESPONSE
-    # =====================================================
+            headers = {
+                "Authorization": f"Bearer {active_key}",
+                "Content-Type": "application/json"
+            }
 
-    async def generate_response(
-        self,
-        user_message: str
-    ) -> str:
-
-        try:
-
-            Logger.debug(
-                "Sending request to Groq"
-            )
-
-            # =============================================
-            # Construction historique messages
-            # =============================================
-
-            messages = [
-
-                {
-                    "role": "system",
-                    "content": self.system_prompt
-                }
-
-            ]
-
-            # Ajout historique
-            #
-            messages.extend(
-                self.history
-            )
-
-            # Ajout message user actuel
-            #
-            messages.append(
-                {
-                    "role": "user",
-                    "content": user_message
-                }
-            )
-
-            # =============================================
-            # Appel HTTP async
-            # =============================================
-
-            async with aiohttp.ClientSession() as session:
-
-                async with session.post(
-
-                    "https://api.groq.com/openai/v1/chat/completions",
-
-                    headers={
-                        "Authorization":
-                            f"Bearer {self.api_key}",
-
-                        "Content-Type":
-                            "application/json"
-                    },
-
-                    json={
-                        "model": self.model_name,
-                        "messages": messages
-                    }
-
-                ) as response:
-
-                    # =====================================
-                    # Vérification erreurs HTTP
-                    # =====================================
-
-                    if response.status != 200:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(endpoint, headers=headers, json=payload) as response:
+                        if response.status == 200:
+                            return await response.json()
 
                         error_text = await response.text()
+                        masked_key = active_key[:8] if len(active_key) >= 8 else active_key
 
-                        raise RuntimeError(
-                            _("Groq API error: {}").format(error_text)
-                        )
+                        if response.status in [429, 503] or "rate_limit" in error_text.lower() or "quota" in error_text.lower():
+                            attempts += 1
+                            self.mark_key_in_cooldown(active_key, 60.0)
+                            Logger.warning(f"[Groq Failover] Erreur {response.status} sur clé [{masked_key}...]. Rotation ({attempts}/{total_keys}).")
+                            if self.has_available_keys():
+                                await asyncio.sleep(0.5)
+                                continue
+                            raise ProviderQuotaExhaustedError(_("[GroqProvider] Quota épuisé sur toutes les clés : {}").format(error_text))
+                        elif response.status in [401, 403]:
+                            self.mark_key_in_cooldown(active_key, 3600.0)
+                            raise ProviderAuthError(_("[GroqProvider] Clé invalide (401/403) : {}").format(error_text))
+                        else:
+                            raise ProviderError(_("Groq API error {}: {}").format(response.status, error_text))
 
-                    # =====================================
-                    # Lecture JSON réponse
-                    # =====================================
+            except aiohttp.ClientError as ce:
+                attempts += 1
+                self.mark_key_in_cooldown(active_key, 30.0)
+                if self.has_available_keys():
+                    await asyncio.sleep(0.5)
+                    continue
+                raise ProviderServiceUnavailableError(_("Groq network error: {}").format(str(ce))) from ce
 
-                    data = await response.json()
+        raise ProviderQuotaExhaustedError(_("[GroqProvider] Quota épuisé sur toutes les clés."))
 
-            # =============================================
-            # Extraction réponse finale
-            # =============================================
+    async def generate_response(self, user_message: str) -> str:
+        messages = [{"role": "system", "content": self.system_prompt}]
+        messages.extend(self.history)
+        messages.append({"role": "user", "content": user_message})
 
-            final_text = (
-                data["choices"][0]
-                ["message"]
-                ["content"]
-            )
+        payload = {
+            "model": self.model_name,
+            "messages": messages
+        }
 
-            # =============================================
-            # Sauvegarde historique
-            # =============================================
-
-            # self.history.append(
-            #     {
-            #         "role": "user",
-            #         "content": user_message
-            #     }
-            # )
-
-            # self.history.append(
-            #     {
-            #         "role": "assistant",
-            #         "content": final_text
-            #     }
-            # )
-
-            Logger.debug(
-                "Groq response received"
-            )
-
-            return final_text
-
-        except Exception as e:
-
-            Logger.error(
-                _("Groq generation error: {}").format(str(e))
-            )
-
-            raise
-
-    # =====================================================
-    # PROVIDER STATUS
-    # =====================================================
+        data = await self._execute_http_request(payload)
+        return data["choices"][0]["message"]["content"]
 
     async def is_available(self) -> bool:
-
-        return True
-    
-    # =====================================================
-    # STREAM RESPONSE (AVEC FUNCTION CALLING)
-    # =====================================================
+        return self.has_available_keys()
 
     async def stream_response(
         self,
         user_message: str,
         context: list = None,
-        tools: list = None  # NOUVEAU
+        tools: list = None
     ) -> AsyncGenerator[str | dict, None]:
-        
-        try:
-            Logger.debug("Starting Groq stateless streaming with Tools capability")
+        total_keys = max(1, len(self.api_keys_pool))
+        attempts = 0
 
-            # 1. Prompt Système & Contexte
+        while attempts < total_keys:
+            active_key = self.get_active_api_key()
+            if not active_key:
+                raise ProviderQuotaExhaustedError(_("[GroqProvider] Aucune clé disponible pour le streaming."))
+
             messages = [{"role": "system", "content": self.system_prompt}]
             if context:
                 messages.extend(context)
             messages.append({"role": "user", "content": user_message})
 
-            # 2. Préparation du Payload
             payload = {
                 "model": self.model_name,
                 "messages": messages,
                 "stream": True
             }
-
-            # Si des outils sont disponibles, on les formate au standard OpenAI
             if tools:
                 payload["tools"] = [{"type": "function", "function": t} for t in tools]
 
-            # 3. Requête streaming
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json"
-                    },
-                    json=payload
-                ) as response:
+            headers = {
+                "Authorization": f"Bearer {active_key}",
+                "Content-Type": "application/json"
+            }
 
-                    if response.status != 200:
-                        error_text = await response.text()
-                        raise RuntimeError(_("Groq streaming error: {}").format(error_text))
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=payload) as response:
+                        if response.status in [429, 503]:
+                            error_text = await response.text()
+                            attempts += 1
+                            self.mark_key_in_cooldown(active_key, 60.0)
+                            if self.has_available_keys():
+                                await asyncio.sleep(0.5)
+                                continue
+                            raise ProviderQuotaExhaustedError(_("[GroqProvider] Quota streaming épuisé : {}").format(error_text))
 
-                    # =====================================
-                    # ACCUMULATEURS DE FUNCTION CALL
-                    # =====================================
-                    is_tool_call = False
-                    tool_name = ""
-                    tool_args_str = ""
+                        if response.status != 200:
+                            error_text = await response.text()
+                            raise ProviderError(f"Groq streaming error: {error_text}")
 
-                    # Lecture stream réseau
-                    async for raw_line in response.content:
-                        line = raw_line.decode("utf-8").strip()
-                        if not line or not line.startswith("data:"):
-                            continue
+                        is_tool_call = False
+                        tool_name = ""
+                        tool_args_str = ""
 
-                        line = line[5:].strip()
-                        if line == "[DONE]":
-                            break
-
-                        try:
-                            data = json.loads(line)
-                            delta = data["choices"][0]["delta"]
-
-                            # INTERCEPTION DU TOOL CALL
-                            if "tool_calls" in delta and delta["tool_calls"]:
-                                is_tool_call = True
-                                tc = delta["tool_calls"][0]
-                                
-                                if "function" in tc:
-                                    if "name" in tc["function"]:
-                                        tool_name += tc["function"]["name"]
-                                    if "arguments" in tc["function"]:
-                                        tool_args_str += tc["function"]["arguments"]
+                        async for raw_line in response.content:
+                            line = raw_line.decode("utf-8").strip()
+                            if not line or not line.startswith("data:"):
                                 continue
 
-                            # STREAMING TEXTE CLASSIQUE
-                            chunk = delta.get("content", "")
-                            if chunk and not is_tool_call:
-                                yield chunk
+                            line = line[5:].strip()
+                            if line == "[DONE]":
+                                break
 
-                        except Exception:
-                            continue
+                            try:
+                                data = json.loads(line)
+                                delta = data["choices"][0]["delta"]
 
-                    # =====================================
-                    # RÉSOLUTION FINALE DU TOOL CALL
-                    # =====================================
-                    if is_tool_call:
-                        Logger.info(f"[Groq] Tool call intercepted: {tool_name}")
-                        try:
-                            # Tentative de parsing sécurisé des arguments
-                            parsed_args = json.loads(tool_args_str) if tool_args_str else {}
-                        except json.JSONDecodeError:
-                            Logger.error(_("Groq hallucinated invalid JSON for tool args: {}").format(tool_args_str))
-                            parsed_args = {} # Harnais de sécurité
+                                if "tool_calls" in delta and delta["tool_calls"]:
+                                    is_tool_call = True
+                                    tc = delta["tool_calls"][0]
+                                    if "function" in tc:
+                                        if "name" in tc["function"]:
+                                            tool_name += tc["function"]["name"]
+                                        if "arguments" in tc["function"]:
+                                            tool_args_str += tc["function"]["arguments"]
+                                    continue
 
-                        yield {"call": tool_name, "args": parsed_args}
+                                chunk = delta.get("content", "")
+                                if chunk and not is_tool_call:
+                                    yield chunk
+                            except Exception:
+                                continue
 
-            Logger.debug("Groq streaming sequence completed")
+                        if is_tool_call:
+                            Logger.info(f"[Groq] Tool call intercepted: {tool_name}")
+                            try:
+                                parsed_args = json.loads(tool_args_str) if tool_args_str else {}
+                            except json.JSONDecodeError:
+                                Logger.error(f"Groq invalid JSON for tool args: {tool_args_str}")
+                                parsed_args = {}
+                            yield {"call": tool_name, "args": parsed_args}
 
-        except Exception as e:
-            Logger.error(_("Groq stream error: {}").format(str(e)))
-            raise
+                return
 
-    
-    # =====================================================
-    # STRUCTURED OUTPUT (JSON / PYDANTIC)
-    # =====================================================
+            except aiohttp.ClientError as ce:
+                attempts += 1
+                self.mark_key_in_cooldown(active_key, 30.0)
+                if self.has_available_keys():
+                    await asyncio.sleep(0.5)
+                    continue
+                raise ProviderServiceUnavailableError(f"Groq stream network error: {ce}") from ce
+
     async def generate_structured_output(
         self,
         prompt: str,
         response_schema: Type[BaseModel],
-        context: list = None
+        context: list = None,
+        media_assets: Optional[list] = None
     ) -> BaseModel:
-        try:
-            Logger.debug(f"[Groq] Structured Output request for schema: {response_schema.__name__}")
+        Logger.debug(f"[Groq] Structured Output request for schema: {response_schema.__name__}")
+        schema_dict = response_schema.model_json_schema()
+        strict_system_prompt = (
+            f"{self.system_prompt}\n\n"
+            "CRITICAL INSTRUCTION: You MUST respond ONLY with a valid JSON object.\n"
+            "The JSON must strictly adhere to the following schema:\n"
+            f"{json.dumps(schema_dict, indent=2)}"
+        )
 
-            schema_dict = response_schema.model_json_schema()
-            strict_system_prompt = (
-                f"{self.system_prompt}\n\n"+
-                _("CRITICAL INSTRUCTION: You MUST respond ONLY with a valid JSON object.\n")+
-                _("The JSON must strictly adhere to the following schema:\n")+
-                f"{json.dumps(schema_dict, indent=2)}"
-            )
+        messages = [{"role": "system", "content": strict_system_prompt}]
+        if context:
+            messages.extend(context)
 
-            messages = [{"role": "system", "content": strict_system_prompt}]
-            if context:
-                messages.extend(context)
+        if media_assets:
+            import base64
+            import os
+            import mimetypes
+            user_content = [{"type": "text", "text": prompt}]
+            for asset in media_assets:
+                if hasattr(asset, "filepath") and asset.filepath and os.path.exists(asset.filepath):
+                    try:
+                        with open(asset.filepath, "rb") as f:
+                            img_data = f.read()
+                        base64_str = base64.b64encode(img_data).decode("utf-8")
+                        mime_type, _ = mimetypes.guess_type(asset.filepath)
+                        if not mime_type:
+                            mime_type = "image/png"
+                        user_content.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime_type};base64,{base64_str}"}
+                        })
+                    except Exception as ex:
+                        Logger.error(f"[GroqProvider] Erreur image : {ex}")
+            messages.append({"role": "user", "content": user_content})
+        else:
             messages.append({"role": "user", "content": prompt})
 
-            payload = {
-                "model": self.model_name,
-                "messages": messages,
-                "response_format": {"type": "json_object"},
-                "stream": False
-            }
+        payload = {
+            "model": self.model_name,
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+            "stream": False
+        }
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json"
-                    },
-                    json=payload
-                ) as response:
-                    if response.status != 200:
-                        error_text = await response.text()
-                        raise RuntimeError(_("Groq structured output error: {}").format(error_text))
-                    data = await response.json()
+        data = await self._execute_http_request(payload)
+        raw_json_str = data["choices"][0]["message"]["content"]
 
-            raw_json_str = data["choices"][0]["message"]["content"]
+        def clean_none(obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if k == "tool_args" and v is None:
+                        obj[k] = {}
+                    else:
+                        clean_none(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    clean_none(item)
+            return obj
 
-            # ---- NOUVEAU : Nettoyage des None dans tool_args ----
-            def clean_none(obj):
-                if isinstance(obj, dict):
-                    for k, v in obj.items():
-                        if k == "tool_args" and v is None:
-                            obj[k] = {}
-                        else:
-                            clean_none(v)
-                elif isinstance(obj, list):
-                    for item in obj:
-                        clean_none(item)
-                return obj
-
-            parsed_data = json.loads(raw_json_str)
-            cleaned_data = clean_none(parsed_data)
-            # ---------------------------------------------------
-
-            return response_schema.model_validate_json(json.dumps(cleaned_data))
-
-        except Exception as e:
-            #TODO tout nest pas forcemet une erreru de generation
-            Logger.error(_("generation error: {}").format(str(e)))
-            raise
+        parsed_data = json.loads(raw_json_str)
+        cleaned_data = clean_none(parsed_data)
+        return response_schema.model_validate_json(json.dumps(cleaned_data))

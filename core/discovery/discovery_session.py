@@ -172,6 +172,15 @@ class DiscoverySession:
 
     async def _execute_step(self, step: DiscoveryStep, index: int) -> None:
         Logger.debug(f"[DiscoverySession:{self.session_id}] Exécution étape {index+1}: {step.description}")
+        msg = f"Exploration ({self.plan.data_type}) [{index+1}/{len(self.plan.steps)}] : {step.description}"
+        try:
+            if hasattr(self.runtime_state, "orchestrator") and self.runtime_state.orchestrator:
+                await self.runtime_state.orchestrator.propagate_event(Events.STATUS_UPDATE, {"message": msg})
+            elif hasattr(self.runtime_state, "event_bus") and self.runtime_state.event_bus:
+                await self.runtime_state.event_bus.emit(Events.STATUS_UPDATE, {"message": msg})
+        except Exception as e:
+            Logger.debug(f"[DiscoverySession:{self.session_id}] Échec propagation status update: {e}")
+
         try:
             if step.type == StepType.TOOL:
                 result, tool_args_raw = await self._execute_tool_step(step)
@@ -190,8 +199,10 @@ class DiscoverySession:
                 tool_result=result
             )
 
-            if not self._check_expected_result(step, result):
-                self.workspace.set_exit_policy(ExitPolicy.EXPECTED_RESULT_FOUND)
+            if self._check_expected_result(step, result):
+                if step.expected_result and step.expected_result.strip().lower() == "true" and result.get("success"):
+                    self.workspace.set_exit_policy(ExitPolicy.EXPECTED_RESULT_FOUND)
+            else:
                 Logger.debug(f"[DiscoverySession:{self.session_id}] Expected_result non satisfait (attendu: {step.expected_result}, obtenu: {result.get('success')}).")
 
             await self._emit_event(Events.DISCOVERY_STEP, {
@@ -292,3 +303,11 @@ class DiscoverySession:
         # au lieu de l'ID de la dernière mission exécutée dans le process.
         payload["mission_id"] = exec_ctx.get("mission_id")
         Logger.event(event_name, **payload)
+
+        try:
+            if hasattr(self.runtime_state, "orchestrator") and self.runtime_state.orchestrator:
+                await self.runtime_state.orchestrator.propagate_event(event_name, payload)
+            elif hasattr(self.runtime_state, "event_bus") and self.runtime_state.event_bus:
+                await self.runtime_state.event_bus.emit(event_name, payload)
+        except Exception as e:
+            Logger.debug(f"[DiscoverySession:{self.session_id}] Échec propagation événement '{event_name}': {e}")

@@ -159,10 +159,26 @@ class InputIngestor:
                 estimated_tokens=token_est
             )
 
-        # Cas C : Texte court mais avec des pièces jointes attachées
+        # Cas C : Message avec pièces jointes attachées
+        final_display_content = raw_text
+        if created_uris:
+            uris_str = ", ".join([f"`{u}`" for u in created_uris])
+            if not raw_text.strip():
+                final_display_content = (
+                    f"[PIÈCES JOINTES REÇUES — {len(created_uris)} fichier(s)]\n"
+                    f"L'utilisateur vous a transmis les pièces jointes suivantes : {uris_str}\n"
+                    f"*(Consigne : Analyse et prends en compte immédiatement ces pièces jointes. "
+                    f"Si tu as besoin de lire leur contenu ou d'effectuer des traitements dessus, utilise DiscoveryRequest ou les outils appropriés pour l'utilisateur).*"
+                )
+            else:
+                final_display_content = (
+                    f"{raw_text}\n\n"
+                    f"[PIÈCES JOINTES ASSOCIÉES : {uris_str}]"
+                )
+
         return IngestionResult(
             is_asset=bool(created_uris),
-            display_content=raw_text,
+            display_content=final_display_content,
             created_assets=created_uris,
             original_char_count=char_len,
             estimated_tokens=token_est

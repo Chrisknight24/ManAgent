@@ -45,6 +45,10 @@ class AssetRegistry:
             token_estimate = max(1, char_count // 4)
             sha256 = DataAsset.compute_sha256(content_sample)
             
+            import mimetypes
+            guessed_mime, _ = mimetypes.guess_type(target)
+            mime_type = guessed_mime or "text/plain"
+            
             asset.asset_meta = AssetMetadata(
                 uri=uri,
                 data_type=inferred_scheme,
@@ -53,6 +57,7 @@ class AssetRegistry:
                 char_count=char_count,
                 line_count=len(lines),
                 token_estimate=token_estimate,
+                mime_type=mime_type,
                 sha256_hash=sha256,
                 capabilities=asset.get_capabilities(),
                 custom_attributes=asset.metadata

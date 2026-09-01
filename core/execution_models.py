@@ -61,6 +61,10 @@ class ExecutionNode(BaseModel):
         None,
         description=_("Valeur brute 'result' renvoyée par l'outil C++ (avant tout jugement de convergence). None si non applicable (direct_answer, abstract_task).")
     )
+    raw_success_flag: Optional[str] = Field(
+        None,
+        description=_("Statut brut ('true'/'false'/etc.) renvoyé par l'outil C++.")
+    )
 
     # Statut et erreur
     status: str = Field(..., description=_("Statut final de l'étape (success, failed, skipped, pending)"))

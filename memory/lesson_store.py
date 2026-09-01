@@ -15,6 +15,14 @@ import math
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from utils.logger import Logger
+from core.constants import (
+    ENTITY_LEARNER_MIN_EVIDENCE,
+    LESSON_STORE_TOP_K,
+    LESSON_SIMILARITY_THRESHOLD,
+    LESSON_MAX_KEYWORDS_PER_CALL,
+    LESSON_MAX_KEYWORDS_TOTAL,
+    LESSON_MAX_SOURCE_EPISODES,
+)
 
 class LessonStore:
 
@@ -120,9 +128,9 @@ class LessonStore:
         except Exception as e:
             Logger.error(f"[LessonStore] Erreur d'initialisation : {e}")
 
-    MAX_KEYWORDS_PER_CALL = 6
-    MAX_KEYWORDS_TOTAL = 20
-    MAX_SOURCE_EPISODES = 50
+    MAX_KEYWORDS_PER_CALL = LESSON_MAX_KEYWORDS_PER_CALL
+    MAX_KEYWORDS_TOTAL = LESSON_MAX_KEYWORDS_TOTAL
+    MAX_SOURCE_EPISODES = LESSON_MAX_SOURCE_EPISODES
 
     def upsert_lesson(self, entity_type: str, scope: str, recommendation: str,
                    environment: str = "simulated", keywords: Optional[List[str]] = None,
@@ -234,7 +242,6 @@ class LessonStore:
             return []
 
     def get_unconsolidated_groups(self) -> List[Dict[str, Any]]:
-        from core.constants import ENTITY_LEARNER_MIN_EVIDENCE
         try:
             with self._get_connection() as conn:
                 conn.row_factory = sqlite3.Row
@@ -370,7 +377,7 @@ class LessonStore:
             return 0.0
         return dot / (norm1 * norm2)
 
-    def get_similar_lessons(self, query_embedding: List[float], entity_types: List[str], environment: str, top_k: int = 3, include_semantic_facts: Optional[bool] = None) -> List[Dict[str, Any]]:
+    def get_similar_lessons(self, query_embedding: List[float], entity_types: List[str], environment: str, top_k: int = LESSON_STORE_TOP_K, include_semantic_facts: Optional[bool] = None) -> List[Dict[str, Any]]:
         """
         Recherche vectorielle des leçons les plus pertinentes.
         Si include_semantic_facts est None, il est automatiquement True si 'Orchestrator' fait partie des entity_types.
@@ -459,7 +466,7 @@ class LessonStore:
                 scored_results.sort(key=lambda x: (x["combined_score"], x.get("is_consolidated", 0)), reverse=True)
                 
                 # Conserver les résultats pertinents
-                filtered = [r for r in scored_results if r["similarity"] > 0.15 or r.get("scope") == "semantic_fact"]
+                filtered = [r for r in scored_results if r["similarity"] > LESSON_SIMILARITY_THRESHOLD or r.get("scope") == "semantic_fact"]
                 if not filtered:
                     filtered = scored_results
                 

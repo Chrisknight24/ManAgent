@@ -7,7 +7,7 @@ import base64
 import mimetypes
 from typing import List, Optional, Tuple, Any, Dict
 from .plan_models import Plan, PlanStep, SolverResult, ExecutionStatus, StepType, ConvergenceDecision
-from core.constants import Events
+from core.constants import Events, ASSET_INLINE_LIMIT
 from utils.logger import Logger
 import re
 from datetime import datetime
@@ -131,7 +131,7 @@ class Executor:
                         if child_result and child_result.execution_tree:
                             node.child_execution_tree = child_result.execution_tree
                     else:
-                        success, execution_output, supplemental_data = await self._execute_step_action(step, accumulated_context)
+                        success, execution_output, supplemental_data = await self._execute_step_action(step, accumulated_context, node=node)
 
                     if step.type == StepType.TOOL_CALL and success and execution_output is not None:
                         node.raw_tool_success = str(execution_output).strip().lower() == "true"
@@ -211,7 +211,7 @@ class Executor:
                             target_entity="Executor"
                         )
 
-                    convergence = await self._check_convergence(step, execution_output, supplemental_data)
+                    convergence = await self._check_convergence(step, execution_output, supplemental_data, node=node)
 
                     if self.solver.runtime_state.cancel_requested:
                         Logger.warning(f"[Executor] 🛑 Interruption après convergence de l'étape [{step.id}].")
@@ -479,14 +479,14 @@ class Executor:
     # EXÉCUTION DES ÉTAPES
     # =====================================================
 
-    async def _execute_step_action(self, step: PlanStep, runtime_context: str) -> Tuple[bool, str, Optional[str]]:
+    async def _execute_step_action(self, step: PlanStep, runtime_context: str, node: Optional[ExecutionNode] = None) -> Tuple[bool, str, Optional[str]]:
         if step.type == StepType.DIRECT_ANSWER:
             final_text = step.response_text or _("Réponse formulée.")
             if final_text:
                 final_text = self._interpolate_text(final_text, for_json=False)
             return True, final_text, None
         elif step.type == StepType.TOOL_CALL:
-            return await self._handle_tool_call(step)
+            return await self._handle_tool_call(step, node=node)
         else:
             Logger.error(f"[Executor] 🛑 Type de step non pris en charge dans _execute_step_action : '{step.type}'")
             return False, "", _("Erreur de spécification : Le type d'étape '{}' est introuvable.").format(step.type)
@@ -494,6 +494,7 @@ class Executor:
     async def _handle_abstract_task(self, step: PlanStep, runtime_context: str) -> Tuple[bool, str, Optional[str], Optional[SolverResult]]:
         from .solver import Solver, MAX_DEPTH
 
+        is_leaf_mode = False
         if self.solver.depth >= MAX_DEPTH:
             ancestor_chain = self.solver._build_ancestor_chain()
 
@@ -504,12 +505,17 @@ class Executor:
                 extended = False
 
             if not extended:
-                return False, "", _("Profondeur maximale de réflexion atteinte, sous-tâche avortée (extension non accordée)."), None
-
-            Logger.info(
-                f"[Executor] 🔓 Profondeur étendue pour [{step.id}] : le juge n'a pas détecté de "
-                f"récursion dégénérée dans la chaîne de sous-tâches actuelle."
-            )
+                Logger.warning(
+                    f"[Executor] ⚠️ Profondeur maximale atteinte pour [{step.id}] (extension non accordée). "
+                    f"Basculement en mode 'Résolution Directe Feuille' : interdiction de sous-délégation récursive "
+                    f"et obligation de résoudre par tool_call direct."
+                )
+                is_leaf_mode = True
+            else:
+                Logger.info(
+                    f"[Executor] 🔓 Profondeur étendue pour [{step.id}] : le juge n'a pas détecté de "
+                    f"récursion dégénérée dans la chaîne de sous-tâches actuelle."
+                )
 
         Logger.info(f"[Executor] 🌀 Déploiement d'un sous-agent pour l'identifiant [{step.id}]")
 
@@ -526,6 +532,14 @@ class Executor:
             _("--- DIRECTIVE LOCALE SPÉCIFIQUE À CETTE TÂCHE ---\n") +
             _("{}").format(interpolated_step_context or _('Pas de donnees supplementaires'))
         )
+        if is_leaf_mode:
+            dynamic_context += (
+                _("\n\n⚠️ DIRECTIVE OBLIGATOIRE DE NIVEAU TERMINAL (FEUILLE) : "
+                  "Tu as atteint la limite de profondeur de décomposition. "
+                  "Tu as l'INTERDICTION FORMELLE d'utiliser le type d'étape 'abstract_task'. "
+                  "Tu DOIS résoudre cette sous-tâche UNIQUEMENT avec des appels d'outils concrets ('tool_call') "
+                  "ou une réponse directe ('direct_answer').")
+            )
 
         child_solver = Solver(
             solver_id=step.id,
@@ -593,7 +607,7 @@ class Executor:
             if custom_data_name not in target_data_var_names:
                 target_data_var_names.append(custom_data_name)
 
-        INLINE_LIMIT = 3000
+        INLINE_LIMIT = ASSET_INLINE_LIMIT
         data_val_str = str(data_value) if data_value is not None else ""
 
         if data_value is not None and len(data_val_str) > INLINE_LIMIT:
@@ -654,7 +668,7 @@ class Executor:
             enriched_error = f"[TOOLS FAILED] {error_msg}"
             return False, "", enriched_error, child_result
 
-    async def _handle_tool_call(self, step: PlanStep) -> Tuple[bool, str, Optional[str]]:
+    async def _handle_tool_call(self, step: PlanStep, node: Optional[ExecutionNode] = None) -> Tuple[bool, str, Optional[str]]:
         try:
             tool_args = self._safe_json_loads(step.tool_args_json)
         except json.JSONDecodeError as e:
@@ -751,7 +765,7 @@ class Executor:
                     target_data_var_names.append(custom_data_name)
 
             # Seuil de volumétrie pour encapsulation en DataAsset (~3000 chars)
-            INLINE_LIMIT = 3000
+            INLINE_LIMIT = ASSET_INLINE_LIMIT
             data_str_len = len(str(actual_data)) if actual_data is not None else 0
 
             if actual_data is not None and data_str_len > INLINE_LIMIT:
@@ -804,7 +818,22 @@ class Executor:
                 crucial_target = step.output_variable_name or step_bool_id
                 self._propagate_crucial_variable(crucial_target)
 
-            return True, is_success_flag, error_reason_msg
+            if node:
+                node.raw_success_flag = is_success_flag
+                node.raw_tool_success = (is_success_flag == "true")
+
+            if is_success_flag == "true":
+                if actual_data is not None:
+                    if isinstance(actual_data, (dict, list)):
+                        formatted_output = json.dumps(actual_data, ensure_ascii=False, indent=2)
+                    else:
+                        formatted_output = str(actual_data)
+                else:
+                    formatted_output = "true"
+            else:
+                formatted_output = _("Erreur : {}").format(tool_error_reason or error_reason_msg or _("Échec de l'outil ({})").format(is_success_flag))
+
+            return True, formatted_output, error_reason_msg
 
         except json.JSONDecodeError:
             Logger.warning(f"[Executor] Échec de parsing JSON pour l'outil {step.tool_name}. Contenu reçu : {hardware_result_str[:200]}")
@@ -814,7 +843,7 @@ class Executor:
     # CONVERGENCE ET VALIDATION
     # =====================================================
 
-    async def _check_convergence(self, step: PlanStep, actual_result: str, supplemental_data: Optional[str] = None) -> ConvergenceDecision:
+    async def _check_convergence(self, step: PlanStep, actual_result: str, supplemental_data: Optional[str] = None, node: Optional[ExecutionNode] = None) -> ConvergenceDecision:
         if not step.expected_result:
             Logger.info(f"[Executor] Aucun critère défini pour [{step.id}]. Convergence implicite acceptée.")
             return ConvergenceDecision(is_convergent=True, reason=_("Aucun critère d'output spécifié."))
@@ -824,15 +853,15 @@ class Executor:
 
         if step.type == StepType.TOOL_CALL:
             Logger.info(f"[Executor] [Analyse Rigide] Évaluation déterministe pour l'outil '{step.tool_name}'...")
-            is_valid, rigid_reason = self._verify_rigid_outcome(step.expected_result, actual_result, supplemental_data)
+            raw_flag = getattr(node, "raw_success_flag", None) if node else None
+            is_valid, rigid_reason = self._verify_rigid_outcome(step.expected_result, actual_result, supplemental_data, raw_success_flag=raw_flag)
             return ConvergenceDecision(is_convergent=is_valid, reason=rigid_reason)
 
         Logger.info(f"[Executor] [Analyse Sémantique] Invocation du LLM pour l'étape abstraite [{step.id}]...")
         return await self._evaluate_semantic_convergence(step, actual_result)
 
-    def _verify_rigid_outcome(self, expected: str, actual: str, supplemental_data: Optional[str] = None) -> Tuple[bool, str]:
+    def _verify_rigid_outcome(self, expected: str, actual: str, supplemental_data: Optional[str] = None, raw_success_flag: Optional[str] = None) -> Tuple[bool, str]:
         expected_clean = expected.strip().lower()
-        actual_clean = actual.strip().lower()
 
         if expected_clean == "any":
             return True, _("Convergence acceptée : Le plan accepte toute valeur de retour pour traitement conditionnel ultérieur.")
@@ -840,13 +869,25 @@ class Executor:
         if expected_clean not in ["true", "false"]:
             return False, _("Défaut de planification : expected_result doit valoir 'true', 'false' ou 'any', mais vaut '{}'.").format(expected)
 
-        if expected_clean == actual_clean:
+        if raw_success_flag:
+            flag_clean = raw_success_flag.strip().lower()
+            if flag_clean in ["true", "false"]:
+                if expected_clean == flag_clean:
+                    return True, _("Validation stricte réussie.")
+                else:
+                    reason = _("Rejet matériel : L'outil a renvoyé le statut '{}', mais le plan exigeait expressément '{}'.").format(flag_clean, expected_clean)
+                    if supplemental_data:
+                        reason += f" Raison de l'outil : {supplemental_data}"
+                    return False, reason
+
+        actual_clean = actual.strip().lower()
+        if expected_clean == actual_clean or (expected_clean == "true" and not actual_clean.startswith("erreur") and not actual_clean.startswith("error")):
             return True, _("Validation stricte réussie.")
-        
+
         reason = _("Rejet matériel : L'outil a renvoyé '{}', mais le plan exigeait expressément '{}'.").format(actual_clean, expected_clean)
         if supplemental_data:
             reason += f" Raison de l'outil : {supplemental_data}"
-            
+
         return False, reason
 
     async def _evaluate_semantic_convergence(self, step: PlanStep, actual_result: str) -> ConvergenceDecision:

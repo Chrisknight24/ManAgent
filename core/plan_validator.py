@@ -27,11 +27,21 @@ Trois responsabilités, dans cet ordre :
 
 from __future__ import annotations
 
-from typing import List, Optional, Callable, Awaitable, Any, Dict
+import re
+from typing import List, Optional, Callable, Awaitable, Any, Dict, Set, Tuple
 from core.plan_models import Plan, PlanValidationDecision, RiskLevel, DepthEscalationDecision, StepType
 from core.execution_models import PlanAttempt
 from core.i18n import _
 from utils.logger import Logger
+
+
+def _normalize_text(text: str) -> str:
+    """Normalise un texte pour comparaison sémantique simple (minuscules, sans ponctuation)."""
+    if not text:
+        return ""
+    t = text.lower().strip()
+    t = re.sub(r'[\W_]+', ' ', t).strip()
+    return t
 
 
 class PlanValidationOutcome:
@@ -80,16 +90,6 @@ class PlanValidator:
             Callable[[Plan, PlanValidationDecision], Awaitable[bool]]
         ] = None,
     ):
-        """
-        llm : objet exposant `generate_structured(prompt, schema, tag=...)`.
-        prompt_loader : objet exposant `load(template_name, lang=..., **kwargs)`.
-        rules_text : contenu brut de rules.md (chaîne vide si absent — la
-            validation continue quand même, sans critères explicites, plutôt
-            que de bloquer toute mission faute de fichier).
-        request_human_confirmation : callback optionnel appelé quand le LLM
-            juge qu'une confirmation humaine est requise. None = pas de canal
-            disponible (refus par prudence systématique dans ce cas).
-        """
         self._llm = llm
         self._prompt_loader = prompt_loader
         self._rules_text = rules_text
@@ -104,11 +104,6 @@ class PlanValidator:
     def _plan_step_signature(steps: list) -> tuple:
         """
         Signature STRUCTURELLE d'un plan : (type, tool_name) par étape.
-        Volontairement insensible à la formulation (description, step_context)
-        qui varie d'une tentative à l'autre même quand le Planner retente,
-        dans les faits, la même approche.
-        Accepte aussi bien des PlanStep (tentative courante) que des dicts
-        (tentatives passées, désérialisées depuis PlanAttempt.proposed_plan).
         """
         sig = []
         for s in steps:
@@ -124,9 +119,7 @@ class PlanValidator:
     ) -> Optional[str]:
         """
         Compare le plan proposé aux tentatives ÉCHOUÉES précédentes de ce
-        Solver. Retourne un avertissement textuel si un pattern récursif est
-        détecté (même structure qu'au moins une tentative déjà en échec),
-        sinon None.
+        Solver. Retourne un avertissement textuel si la même structure échouée est répétée.
         """
         if not previous_attempts:
             return None
@@ -149,75 +142,140 @@ class PlanValidator:
             return None
 
         return _(
-            "⚠️ Ce plan a EXACTEMENT la même structure (types d'étapes et outils, dans le "
+            "⚠️ RÉPÉTITION D'ÉCHEC : Ce plan a EXACTEMENT la même structure (types d'étapes et outils, dans le "
             "même ordre) que {repeats} tentative(s) précédente(s) de ce Solver, déjà en "
-            "échec. Il est probable que le Planner ignore le feedback d'échec plutôt que "
-            "d'adapter son approche."
+            "échec sans adaptation."
         ).format(repeats=repeats)
+
+    def detect_lazy_delegation_and_tree_recursion(
+        self,
+        plan: Plan,
+        target_goal: str,
+        mission_history_tree: Optional[Any] = None,
+    ) -> List[str]:
+        """
+        Détecte les patterns de délégation récursive stérile :
+        - Un Solver qui délègue sa propre tâche à un sous-solver sans décomposition.
+        - Un Solver qui délègue à une sous-tâche déjà tentée/échouée dans l'arbre d'exécution.
+        - Un plan à étape unique de délégation paresseuse.
+        """
+        warnings: List[str] = []
+        norm_target_goal = _normalize_text(target_goal)
+
+        # 1. Collecter tous les objectifs déjà présents dans l'arbre d'exécution
+        tree_goals: List[Tuple[str, str, str]] = []  # (norm_goal, raw_goal, status)
+        if mission_history_tree:
+            def collect_goals(tree: Any):
+                g = getattr(tree, "goal", "")
+                st = getattr(tree, "status", "")
+                if g:
+                    tree_goals.append((_normalize_text(g), g, st))
+                for attempt in getattr(tree, "attempts", []) or []:
+                    for node in getattr(attempt, "nodes", []) or []:
+                        child_tree = getattr(node, "child_execution_tree", None)
+                        if child_tree:
+                            collect_goals(child_tree)
+
+            collect_goals(mission_history_tree)
+
+        # 2. Analyser chaque étape de type abstract_task du plan proposé
+        abstract_steps = []
+        for step in plan.steps:
+            stype = getattr(step.type, "value", step.type)
+            if stype == "abstract_task" or step.type == StepType.ABSTRACT_TASK:
+                abstract_steps.append(step)
+
+        # Cas critique : plan à étape unique qui ne fait que déléguer
+        if len(plan.steps) == 1 and len(abstract_steps) == 1:
+            step = abstract_steps[0]
+            norm_step_desc = _normalize_text(step.description)
+            if norm_step_desc == norm_target_goal or (norm_target_goal and norm_target_goal in norm_step_desc):
+                warnings.append(
+                    _(
+                        "⚠️ DÉLÉGATION PARESSEUSE UNIQUE : Le plan se résume à une seule sous-tâche ('{desc}') "
+                        "qui transfère intégralement l'objectif courant ('{goal}') à un sous-solver sans "
+                        "aucune décomposition ni action concrète."
+                    ).format(desc=step.description, goal=target_goal)
+                )
+
+        for step in abstract_steps:
+            norm_desc = _normalize_text(step.description)
+            if not norm_desc:
+                continue
+
+            # Auto-délégation directe
+            if norm_desc == norm_target_goal:
+                warnings.append(
+                    _(
+                        "⚠️ AUTO-DÉLÉGATION RÉCURSIVE : L'étape `{step_id}` délègue la sous-tâche '{desc}' "
+                        "qui est STRICTEMENT IDENTIQUE à l'objectif du Solver courant. Un Solver ne doit "
+                        "pas déléguer son propre mandat sans le décomposer."
+                    ).format(step_id=step.id, desc=step.description)
+                )
+                continue
+
+            # Récursion d'arbre : sous-tâche déjà tentée dans la hiérarchie
+            for norm_tg, raw_tg, st in tree_goals:
+                if norm_desc == norm_tg and norm_tg != norm_target_goal:
+                    warnings.append(
+                        _(
+                            "⚠️ RÉCURSION D'ARBRE D'EXÉCUTION : L'étape `{step_id}` propose de déléguer '{desc}' "
+                            "alors que cet objectif exact a déjà été exécuté dans l'arbre de la mission (statut: {status})."
+                        ).format(step_id=step.id, desc=step.description, status=st)
+                    )
+                    break
+
+        return warnings
 
     @staticmethod
     def summarize_mission_history(
         root_tree: Optional[Any],
-        max_display_depth: int = 4,
-        max_nodes_per_attempt: int = 8,
+        max_display_depth: int = 5,
+        max_nodes_per_attempt: int = 10,
     ) -> str:
         """
-        Vue compacte de l'historique d'exécution de TOUTE la mission depuis
-        la racine (pas seulement ce Solver) : quels sous-objectifs ont été
-        tentés, à quel niveau, avec quel résultat, et pourquoi un échec a eu
-        lieu le cas échéant.
-
-        REMPLACE l'ancienne détection par similarité de texte entre
-        objectifs (`detect_ancestor_goal_recursion`, supprimée) : cette
-        dernière déclenchait sur toute reformulation "qui sonne pareil",
-        y compris pour une décomposition parfaitement légitime d'un
-        sous-problème (ex: une étape qui ne délègue qu'UNE PARTIE de
-        l'objectif du parent se voyait comparée au texte complet de ce
-        parent). Un faux positif documenté a bloqué une mission valide.
-
-        Ici, pas de jugement pré-calculé : on donne au LLM juge les FAITS
-        (quels sous-objectifs ont déjà été tentés et avec quel résultat),
-        et c'est LUI qui raisonne pour distinguer "cette approche a déjà
-        échoué plusieurs fois à ce niveau" (récursion dégénérée réelle) de
-        "c'est simplement la suite logique d'une mission complexe qui
-        avance" (décomposition légitime) — une distinction qu'aucune
-        heuristique de surface ne peut fiablement trancher à sa place.
+        Vue synthétique et claire de l'arbre d'exécution de la mission.
+        Permet au LLM Judge de lire littéralement la hiérarchie des Solvers et sous-tâches.
         """
         if not root_tree:
-            return _("(aucun historique disponible — probablement le tout premier plan de la mission)")
+            return _("(aucun historique disponible — tout premier plan de la mission)")
 
         lines: List[str] = []
 
         def walk(tree: Any, indent: int = 0) -> None:
-            if indent // 2 > max_display_depth:
-                lines.append("  " * indent + _("… (sous-arbre non développé, profondeur d'affichage atteinte)"))
+            depth = getattr(tree, "depth", indent // 2)
+            if depth > max_display_depth:
+                lines.append("  " * indent + _("… (profondeur max d'affichage atteinte)"))
                 return
+
             prefix = "  " * indent
             status = getattr(tree, "status", "?")
             goal = getattr(tree, "goal", "?")
-            lines.append(f"{prefix}- [{status}] {goal}")
+            solver_id = getattr(tree, "solver_id", "?")
+            lines.append(f"{prefix}🌳 [Niveau {depth}] Solver `{solver_id}` [{status}] : {goal}")
 
             attempts = getattr(tree, "attempts", None) or []
             for attempt in attempts:
                 outcome = getattr(attempt, "outcome", "?")
-                if outcome in ("in_progress", "pending"):
+                if outcome in ("in_progress", "pending") and len(attempts) > 1:
                     continue
                 failure_reason = getattr(attempt, "failure_reason", None)
-                suffix = f" — ÉCHEC : {failure_reason}" if outcome == "failed" and failure_reason else ""
-                lines.append(f"{prefix}    tentative {getattr(attempt, 'attempt_number', '?')} : {outcome}{suffix}")
+                suffix = f" -> ÉCHEC : {failure_reason}" if outcome == "failed" and failure_reason else ""
+                lines.append(f"{prefix}   ↳ Tentative {getattr(attempt, 'attempt_number', 1)} [{outcome}]{suffix}")
 
                 nodes = getattr(attempt, "nodes", None) or []
                 for node in nodes[:max_nodes_per_attempt]:
                     node_desc = getattr(node, "description", "") or ""
+                    node_type = getattr(node, "step_type", "")
                     node_status = getattr(node, "status", "?")
-                    lines.append(f"{prefix}      · {node_desc} [{node_status}]")
+                    lines.append(f"{prefix}     • [{node_type}] {node_desc} ({node_status})")
                     child = getattr(node, "child_execution_tree", None)
                     if child:
                         walk(child, indent + 2)
+
                 if len(nodes) > max_nodes_per_attempt:
                     lines.append(
-                        f"{prefix}      … ({len(nodes) - max_nodes_per_attempt} "
-                        f"étape(s) supplémentaire(s) non affichée(s))"
+                        f"{prefix}     … ({len(nodes) - max_nodes_per_attempt} étape(s) supplémentaire(s))"
                     )
 
         walk(root_tree)
@@ -228,27 +286,17 @@ class PlanValidator:
     # =====================================================
 
     def _summarize_plan_for_prompt(self, plan: Plan) -> str:
-        lines = [f"Objectif du plan : {plan.goal}"]
+        """
+        Résumé épuré du plan : objectif, type d'étape, outil appelé, description et flags d'irréversibilité.
+        Aucun bruit de syntaxe de variables, de nommage ou de tuyauterie interne.
+        """
+        lines = [f"Objectif déclaré du plan : {plan.goal}"]
         for step in plan.steps:
             marker = " ⚠️ DÉCLARÉ IRRÉVERSIBLE" if getattr(step, "is_irreversible", False) else ""
             reason = f" ({step.irreversibility_reason})" if getattr(step, "irreversibility_reason", None) else ""
-            tool = f" outil={step.tool_name}" if getattr(step, "tool_name", None) else ""
-            # BUG CORRIGÉ : execute_if n'était jamais montré au juge. Deux
-            # étapes gardées par des conditions mutuellement exclusives
-            # (ex: "si le process a été tué" / "si le process n'a PAS été
-            # tué") ressemblaient alors à deux actions contradictoires
-            # exécutées inconditionnellement l'une après l'autre, ce qui
-            # provoquait des refus de plans parfaitement valides.
-            condition = f" [SI {step.execute_if}]" if getattr(step, "execute_if", None) else ""
-            if getattr(step, "output_variable_name", None):
-                out_var = f" [sortie: {step.output_variable_name} / $@_data_{step.output_variable_name}]"
-            elif step.type in (StepType.TOOL_CALL, StepType.ABSTRACT_TASK):
-                out_var = f" [sortie auto: $@_data_{step.id}]"
-            else:
-                out_var = ""
-            args = f" | args: {step.tool_args_json}" if getattr(step, "tool_args_json", None) and step.tool_args_json != "{}" else ""
-            resp = f" | réponse: {step.response_text}" if getattr(step, "response_text", None) else ""
-            lines.append(f"- {step.id} [{step.type.value}]{tool}{condition}{out_var} : {step.description}{args}{resp}{marker}{reason}")
+            tool = f" [outil: {step.tool_name}]" if getattr(step, "tool_name", None) else ""
+            step_type_str = step.type.value if hasattr(step.type, 'value') else str(step.type)
+            lines.append(f"- {step.id} [{step_type_str}]{tool} : {step.description}{marker}{reason}")
         return "\n".join(lines)
 
     async def validate(
@@ -259,7 +307,20 @@ class PlanValidator:
         previous_attempts: Optional[List[PlanAttempt]] = None,
         mission_history_tree: Optional[Any] = None,
     ) -> PlanValidationOutcome:
-        pattern_warning = self.detect_repeated_plan_pattern(plan, previous_attempts or [])
+        # Collecter les signaux déterministes
+        repeated_warning = self.detect_repeated_plan_pattern(plan, previous_attempts or [])
+        recursion_warnings = self.detect_lazy_delegation_and_tree_recursion(
+            plan=plan,
+            target_goal=target_goal,
+            mission_history_tree=mission_history_tree,
+        )
+
+        all_warnings = []
+        if repeated_warning:
+            all_warnings.append(repeated_warning)
+        all_warnings.extend(recursion_warnings)
+        pattern_warning = "\n\n".join(all_warnings) if all_warnings else None
+
         mission_history_summary = self.summarize_mission_history(mission_history_tree)
         declared_irreversible = [s.id for s in plan.steps if getattr(s, "is_irreversible", False)]
 
@@ -282,8 +343,6 @@ class PlanValidator:
             )
         except Exception as e:
             Logger.error(f"[PlanValidator] Échec de l'appel LLM de validation : {e}")
-            # Le juge lui-même a échoué : refus PAR PRUDENCE plutôt que de
-            # laisser passer un plan qui n'a jamais été réellement jugé.
             return PlanValidationOutcome(
                 is_valid=False,
                 reason=_(

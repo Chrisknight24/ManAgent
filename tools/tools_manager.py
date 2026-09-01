@@ -75,9 +75,10 @@ class ToolsManager(Entity):
                 name="llm_analyze_data",
                 handler=llm_analyze_data,
                 description=_(
-                    "Analyse une donnée (JSON, CSV, texte, etc.) à l'aide d'un LLM. "
-                    "Requiert 'source' (nom de la variable) et 'query' (question en langage naturel). "
-                    "Retourne le résultat de l'analyse dans 'data'. "
+                    "Analyse une donnée (JSON, CSV, texte, code) ou un fichier multimédia/visuel (image, photo, capture d'écran, schéma, document PDF, vidéo) à l'aide d'un LLM multimodal (vision & texte). "
+                    "Requiert 'source' (nom de la variable ou de l'asset, ex: 'data_image_asset', 'files://photo.png') et 'query' (question ou instruction d'analyse en langage naturel). "
+                    "Optionnels : 'from_line' et 'to_line' pour analyser une plage spécifique dans un fichier/texte volumineux. "
+                    "Retourne le résultat détaillé de l'analyse dans 'data'. "
                     "N'utilisez cet outil QUE pour UNE SEULE variable : si la requête porte sur "
                     "DEUX variables ou plus (comparaison, cohérence, calcul croisé...), utilisez "
                     "'llm_analyze_multi_data' à la place."
@@ -85,14 +86,18 @@ class ToolsManager(Entity):
                 parameters_schema={
                     "type": "object",
                     "properties": {
-                        "source": {"type": "string", "description": "Nom de la variable contenant les données"},
-                        "query": {"type": "string", "description": "Question en langage naturel"}
+                        "source": {"type": "string", "description": "Nom de la variable ou URI de l'asset contenant les données, l'image ou le document"},
+                        "query": {"type": "string", "description": "Question ou consigne d'analyse en langage naturel"},
+                        "from_line": {"type": "integer", "description": "Ligne de début optionnelle pour forage/découpage progressif"},
+                        "to_line": {"type": "integer", "description": "Ligne de fin optionnelle pour forage/découpage progressif"}
                     },
                     "required": ["source", "query"]
                 },
                 capabilities=[
-                    "analyser des données textuelles avec un LLM",
-                    "effectuer des calculs sur des données structurées"
+                    "analyser des données textuelles, structurées et du code",
+                    "analyser le contenu d'une image, photo, capture d'écran ou schéma visuel avec un LLM multimodal (vision)",
+                    "analyser des documents PDF et pièces jointes multimédias",
+                    "effectuer de la reconnaissance visuelle, OCR et extraction sur des images"
                 ]
             )
 

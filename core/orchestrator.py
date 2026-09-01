@@ -11,7 +11,7 @@ import time
 from providers.provider_manager import ProviderManager
 from core.event_bus import EventBus
 from core.runtime_state import RuntimeState
-from core.constants import Events, Actions, Providers, OrchestratorMode
+from core.constants import Events, Actions, Providers, OrchestratorMode, ModelCapabilities
 
 from memory.history import ConversationMemory
 from core.context_manager import ContextManager
@@ -19,6 +19,8 @@ from providers.gemini_provider import GeminiProvider
 from providers.groq_provider import GroqProvider
 from providers.openai_provider import OpenAIProvider
 from providers.openrouter_provider import OpenRouterProvider
+from providers.deepseek_provider import DeepSeekProvider
+from providers.anthropic_provider import AnthropicProvider
 
 from transport.packet_models import RequestPacket, ResponsePacket, ErrorPacket
 from utils.logger import Logger
@@ -62,21 +64,7 @@ from core.discovery.providers.files_provider import FilesProvider
 from core.discovery.explorers.files_explorer import FilesExplorer
 from core.discovery.providers.mission_history_provider import MissionHistoryProvider
 from core.discovery.explorers.mission_history_explorer import MissionHistoryExplorer
-
-# Nombre maximum d'insights conservés par cible dans session_memory.context.insights_by_mission.
-# Sans cette borne, la liste grossit indéfiniment sur toute la durée de vie de la session
-# (elle n'était vidée qu'à travers active_investigation_targets lors d'une nouvelle mission,
-# jamais elle-même) et regonfle le prompt de l'Orchestrateur à chaque fois qu'une cible déjà
-# investiguée redevient active.
-MAX_INSIGHTS_PER_TARGET = 5
-
-# Plafond ABSOLU du nombre d'extensions de profondeur accordées par mission,
-# indépendamment de ce que dit le juge à chaque demande. Sans ce plafond,
-# une chaîne de sous-tâches capable de convaincre le juge à répétition
-# (à tort ou à raison) pourrait neutraliser complètement MAX_DEPTH — le
-# juge est une aide à la décision, pas une autorité illimitée sur un
-# garde-fou de sécurité.
-MAX_DEPTH_EXTENSIONS = 2
+from core.constants import MAX_INSIGHTS_PER_TARGET, MAX_DEPTH_EXTENSIONS
 
 class Orchestrator(Supervisor, Entity):
     """
@@ -155,6 +143,8 @@ class Orchestrator(Supervisor, Entity):
                 return await self._handle_tool_result(packet)
             elif packet.action == Actions.CHAT_STOP:
                 return await self._handle_chat_stop()
+            elif packet.action == Actions.CHAT_RESET:
+                return await self._handle_chat_reset()
             elif packet.action == Actions.LEARNER_ANALYZE:
                 if not self.runtime_state.learner:
                     return ErrorPacket(type="error", message="Learner non initialisé. Envoyez un message d'abord.")
@@ -196,6 +186,10 @@ class Orchestrator(Supervisor, Entity):
         Orchestre le chargement du contexte, le routage, l'exécution des missions
         et la génération des réponses (directes ou après mission).
         """
+        self.runtime_state.cancel_requested = False
+        if hasattr(self.runtime_state, "cancel_requested_for_turn"):
+            self.runtime_state.cancel_requested_for_turn = False
+
         payload = packet.payload
         user_message = payload.get("content", "")
         forced_provider = payload.get("forced_provider", "")
@@ -270,12 +264,17 @@ class Orchestrator(Supervisor, Entity):
             Logger.info(f"[Orchestrator] Input volumineux détecté et encapsulé en DataAsset(s) : {ingestion_result.created_assets}")
 
         # --- GESTION DU LLM DE L'ORCHESTRATEUR ---
+        from providers.provider_manager import ModelRequirement
         if self.llm is None:
             self.llm = Llm(
                 provider_manager=self.provider_manager,
                 provider_id=forced_provider,
                 model_id=forced_model,
-                runtime_state=self.runtime_state
+                runtime_state=self.runtime_state,
+                requirement=ModelRequirement.for_orchestrator(
+                    preferred_provider=forced_provider if forced_provider != "auto" else None,
+                    preferred_model=forced_model if forced_model != "auto" else None
+                )
             )
             if self.runtime_state.discovery_engine:
                 self.llm.enable_discovery(self.runtime_state.discovery_engine, self)
@@ -323,8 +322,10 @@ class Orchestrator(Supervisor, Entity):
 
         # --- NOUVEAU : générer un turn_id unique pour ce tour ---
         turn_id = str(uuid.uuid4())
-        with self.runtime_state.execution_context.scope(turn_id=turn_id, session_id=session_id):
+        turn_epoch = self.runtime_state.generation_epoch
+        with self.runtime_state.execution_context.scope(turn_id=turn_id, session_id=session_id, epoch=turn_epoch):
             await self.propagate_event(Events.THINKING_STARTED, {})
+            await self.propagate_event(Events.STATUS_UPDATE, {"message": _("L'Orchestrateur analyse votre demande...")})
 
             try:
                 # 5. Récupérer et assembler l'historique de conversation et manifestes sous budget strict
@@ -363,12 +364,51 @@ class Orchestrator(Supervisor, Entity):
                     session_context_vars["active_investigation_insights"] = []
                     session_context_vars["active_investigation_targets"] = []
 
+                # --- PRÉPARATION DES MODALITÉS GÉRÉES / DYNAMIQUES ---
+                supported_modalities = []
+                unsupported_modalities = []
+                
+                modalities_def = {
+                    "audio": {
+                        "capability": ModelCapabilities.AUDIO,
+                        "formats": ["MP3", "WAV", "OGG", "M4A", "FLAC"],
+                        "name": "audio (fichiers audio, voix)",
+                    },
+                    "video": {
+                        "capability": ModelCapabilities.VIDEO,
+                        "formats": ["MP4", "MKV", "AVI", "MOV"],
+                        "name": "vidéo (fichiers vidéo, flux)",
+                    },
+                    "vision": {
+                        "capability": ModelCapabilities.VISION,
+                        "formats": ["PNG", "JPG", "JPEG", "WEBP", "GIF"],
+                        "name": "vision (images, photos, captures d'écran)",
+                    }
+                }
+                
+                for mod_key, mod_info in modalities_def.items():
+                    has_cap = False
+                    if self.provider_manager.get_model_metadata(forced_model) is not None:
+                        has_cap = self.provider_manager.has_model_capability(forced_model, mod_info["capability"])
+                    
+                    info_dict = {
+                        "name": mod_info["name"],
+                        "formats": ", ".join(mod_info["formats"])
+                    }
+                    if has_cap:
+                        supported_modalities.append(info_dict)
+                    else:
+                        unsupported_modalities.append(info_dict)
+
                 orchestrator_prompt = loader.load(
                     "orchestrator.md",
                     lang=self.runtime_state.language,
                     user_message=effective_user_message,
                     history=context_str,
                     advice=advice_orchestrator,
+                    model_id=forced_model,
+                    supported_modalities=supported_modalities,
+                    unsupported_modalities=unsupported_modalities,
                     **session_context_vars
                 )
 
@@ -428,6 +468,7 @@ class Orchestrator(Supervisor, Entity):
 
                 # 10. Traiter selon le mode
                 if decision.type == OrchestratorMode.MISSION or (decision.type == OrchestratorMode.REQUEST and signatures):
+                    await self.propagate_event(Events.STATUS_UPDATE, {"message": _("L'Orchestrateur délègue la résolution au Solver principal...")})
                     return await self._handle_mission_decision(
                         decision, session_id, user_message, forced_provider, forced_model, session_memory
                     )
@@ -443,11 +484,16 @@ class Orchestrator(Supervisor, Entity):
                 return ResponsePacket(type="response", status="success",
                                      payload={"message": _("Action annulée")})
             except Exception as e:
+                if getattr(self.runtime_state, "cancel_requested", False) or getattr(self.runtime_state, "cancel_requested_for_turn", False):
+                    Logger.warning(f"[Orchestrator] Exception suppressed due to cancellation: {str(e)}")
+                    return ResponsePacket(type="response", status="success",
+                                         payload={"message": _("Action annulée")})
                 Logger.error(f"[Orchestrator] Critical failure during agent loop: {str(e)}")
                 await self.propagate_event(Events.RUNTIME_ERROR, {"message": str(e)})
                 return ErrorPacket(type="error", message=str(e))
             finally:
-                await self.propagate_event(Events.THINKING_FINISHED, {})
+                if self.runtime_state.generation_epoch == turn_epoch and not getattr(self.runtime_state, "cancel_requested", False):
+                    await self.propagate_event(Events.THINKING_FINISHED, {})
 
     # =====================================================
     # SOUS‑MÉTHODES DE CHAT SEND
@@ -479,11 +525,20 @@ class Orchestrator(Supervisor, Entity):
     async def _ensure_learner_initialized(self, forced_provider: str, forced_model: str):
         """Initialise le Learner s'il ne l'est pas déjà."""
         if not self.runtime_state.learner:
+            from providers.provider_manager import ModelRequirement
             llm_for_learner = Llm(
                 provider_manager=self.provider_manager,
                 provider_id=forced_provider,
                 model_id=forced_model,
-                runtime_state=self.runtime_state  # <--- AJOUT
+                runtime_state=self.runtime_state,
+                requirement=ModelRequirement(
+                    role_name="analytical_helper",
+                    min_reasoning_score=30.0,
+                    min_speed_score=0.0,
+                    require_structured_output=True,
+                    preferred_provider=forced_provider if forced_provider != "auto" else None,
+                    preferred_model=forced_model if forced_model != "auto" else None
+                )
             )
             self.learner = Learner(
                 name="learner",
@@ -840,7 +895,7 @@ class Orchestrator(Supervisor, Entity):
         Logger.info(f"[Orchestrator] 📝 Mission cache créé : {mission_id}")
 
         # 4. Prévenir le frontend
-        await self.propagate_event(Events.MISSION_STARTED, {"goal": refined_goal})
+        await self.propagate_event(Events.MISSION_STARTED, {"goal": refined_goal, "mission_id": mission_id})
 
         # 5. Instancier le Solver racine
         self.root_solver = Solver(
@@ -1051,6 +1106,8 @@ class Orchestrator(Supervisor, Entity):
 
         # 8. PRESENTATOR (rapport + résumé structuré) – UTILISE LE RUM
         try:
+            await self.propagate_event(Events.STATUS_UPDATE, {"message": _("Le Presentator rédige le rapport et la synthèse de la mission...")})
+
             presentator = Presentator(
                 provider_manager=self.provider_manager,
                 runtime_state=self.runtime_state,
@@ -1231,6 +1288,7 @@ class Orchestrator(Supervisor, Entity):
             target_goal = plan.goal or self.current_execution_context.get("refined_goal") or ""
             
         Logger.info(f"[Orchestrator] ⚖️ Validation du plan du Solver '{child_solver_id}' (is_root={is_root}, objectif cible : '{target_goal}')")
+        await self.propagate_event(Events.STATUS_UPDATE, {"message": _("L'Orchestrateur vérifie la conformité et la sécurité du plan généré...")})
 
         validator = PlanValidator(
             llm=self.llm,
@@ -1289,14 +1347,72 @@ class Orchestrator(Supervisor, Entity):
 
     async def _request_human_confirmation(self, plan: Plan, decision: PlanValidationDecision) -> bool:
         """
-        Pont entre PlanValidator et le frontend : réutilise TEL QUEL le
-        mécanisme déjà en place pour les outils externes (Future + call_id,
-        cf. _execute_external_tool).
-        POUR L'INSTANT (Mock) : on simule toujours une validation positive
-        en attendant que le front Qt implémente la boîte de dialogue.
+        Pont entre PlanValidator et le frontend : émet un événement TOOL_REQUESTED
+        avec le nom d'outil 'human_validation' et attend la décision explicite de l'utilisateur.
         """
-        Logger.info("[Orchestrator] 🧑‍💻 [MOCK] Simulation de l'accord humain (Auto-Approve = True)")
-        return True
+        call_id = str(uuid.uuid4())
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        self.pending_tool_calls[call_id] = future
+
+        # Sérialisation des informations du plan pour affichage transparent dans l'UI
+        steps_info = []
+        for step in plan.steps:
+            steps_info.append({
+                "step_id": step.id,
+                "type": step.type.value if hasattr(step.type, 'value') else str(step.type),
+                "description": step.description,
+                "tool_name": step.tool_name or "",
+                "tool_args": step.get_parsed_args,
+                "is_irreversible": bool(step.is_irreversible or (step.id in decision.irreversibility_flags)),
+                "irreversibility_reason": step.irreversibility_reason or ""
+            })
+
+        risk_val = decision.risk_level.value if hasattr(decision.risk_level, 'value') else str(decision.risk_level)
+        payload = {
+            "call_id": call_id,
+            "tool_name": "human_validation",
+            "arguments": {
+                "goal": plan.goal,
+                "reason": decision.reason,
+                "risk_level": risk_val,
+                "irreversibility_flags": decision.irreversibility_flags,
+                "steps": steps_info
+            }
+        }
+
+        Logger.info(f"[Orchestrator] 🧑‍💻 Demande de validation humaine transmise à l'UI (call_id: {call_id}, risk: {risk_val})")
+        await self.propagate_event(Events.TOOL_REQUESTED, payload)
+
+        try:
+            raw_result = await future
+            if isinstance(raw_result, str):
+                try:
+                    parsed = json.loads(raw_result)
+                    if isinstance(parsed, dict):
+                        confirmed = parsed.get("confirmed", parsed.get("result", False))
+                        user_feedback = parsed.get("user_feedback", "")
+                        if not confirmed and user_feedback:
+                            decision.reason = f"{decision.reason} | Feedback utilisateur: {user_feedback}"
+                        return bool(confirmed)
+                    return bool(parsed)
+                except Exception:
+                    return raw_result.strip().lower() in ("true", "1", "yes", "oui", "approved")
+            elif isinstance(raw_result, dict):
+                confirmed = raw_result.get("confirmed", raw_result.get("result", False))
+                user_feedback = raw_result.get("user_feedback", "")
+                if not confirmed and user_feedback:
+                    decision.reason = f"{decision.reason} | Feedback utilisateur: {user_feedback}"
+                return bool(confirmed)
+            return bool(raw_result)
+        except asyncio.CancelledError:
+            Logger.warning(f"[Orchestrator] Validation humaine annulée pour call_id {call_id}")
+            return False
+        except Exception as e:
+            Logger.error(f"[Orchestrator] Erreur lors de l'attente de validation humaine : {e}")
+            return False
+        finally:
+            self.pending_tool_calls.pop(call_id, None)
 
     async def report_critical_failure(self, error_context: str, child_solver_id: str):
         Logger.error(f"[Orchestrator] 🚨 ALERTE CRITIQUE du Solver '{child_solver_id}' : {error_context}")
@@ -1325,11 +1441,39 @@ class Orchestrator(Supervisor, Entity):
         Logger.info("[Orchestrator] 🛑 ARRET D'URGENCE DEMANDE PAR L'UI")
         self.runtime_state.cancel_requested = True
         self.runtime_state.generation_epoch = getattr(self.runtime_state, "generation_epoch", 0) + 1
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            self._heartbeat_task = None
+            Logger.debug("[Orchestrator] Heartbeat stopped on chat.stop.")
         for call_id, future in self.pending_tool_calls.items():
             if not future.done():
                 future.set_result(_('{"result": false, "message": "Exécution interrompue par l\'utilisateur."}'))
         self.pending_tool_calls.clear()
         return ResponsePacket(type="response", status="success", payload={"message": _("Stop signal broadcasted")})
+
+    async def _handle_chat_reset(self):
+        Logger.info("[Orchestrator] 📥 CHAT RESET DEMANDE PAR L'UI")
+        self.runtime_state.cancel_requested = True
+        self.runtime_state.generation_epoch = getattr(self.runtime_state, "generation_epoch", 0) + 1
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            self._heartbeat_task = None
+            Logger.debug("[Orchestrator] Heartbeat stopped on chat.reset.")
+        for call_id, future in self.pending_tool_calls.items():
+            if not future.done():
+                future.set_result(_('{"result": false, "message": "Exécution interrompue par réinitialisation."}'))
+        self.pending_tool_calls.clear()
+        self.runtime_state.reset_execution_markers()
+        self.runtime_state.current_mission_id = None
+        return ResponsePacket(type="response", status="success", payload={"message": _("Chat reset handled successfully")})
 
     # Dans core/orchestrator.py, méthode execute_tool
 
@@ -1373,22 +1517,39 @@ class Orchestrator(Supervisor, Entity):
     # =====================================================
     async def propagate_event(self, event_name: str, payload: dict):
         """Propagation des événements vers le C++ (via event_bus)."""
+        exec_ctx = self.runtime_state.execution_context
+        turn_id = exec_ctx.get("turn_id")
+        epoch = exec_ctx.get("epoch")
+        current_epoch = getattr(self.runtime_state, "generation_epoch", 0)
+
+        # Si l'événement provient d'un tour ou d'une époque antérieure, on le supprime (éviter les orphelins)
+        if epoch is not None and epoch < current_epoch:
+            Logger.debug(f"[Orchestrator] Suppressing stale event '{event_name}' from turn {turn_id} (epoch {epoch} < {current_epoch})")
+            return
+
+        if getattr(self.runtime_state, "cancel_requested", False) or getattr(self.runtime_state, "cancel_requested_for_turn", False):
+            Logger.debug(f"[Orchestrator] Cancel requested: suppressing event '{event_name}' to frontend")
+            return
+
         if event_name == Events.THINKING_STARTED:
             if self._heartbeat_task is None or self._heartbeat_task.done():
                 self._heartbeat_task = asyncio.create_task(self._send_heartbeat())
                 Logger.debug("[Orchestrator] Heartbeat started.")
         elif event_name in (Events.THINKING_FINISHED, Events.RUNTIME_ERROR, Events.MISSION_FAILED):
-            if self._heartbeat_task and not self._heartbeat_task.done():
-                self._heartbeat_task.cancel()
-                try:
-                    await self._heartbeat_task
-                except asyncio.CancelledError:
-                    pass
-                self._heartbeat_task = None
-                Logger.debug("[Orchestrator] Heartbeat stopped.")
+            if epoch is None or epoch == current_epoch:
+                if self._heartbeat_task and not self._heartbeat_task.done():
+                    self._heartbeat_task.cancel()
+                    try:
+                        await self._heartbeat_task
+                    except asyncio.CancelledError:
+                        pass
+                    self._heartbeat_task = None
+                    Logger.debug("[Orchestrator] Heartbeat stopped.")
 
         if "session_id" not in payload and self.current_execution_context.get("session_id"):
             payload["session_id"] = self.current_execution_context["session_id"]
+        if turn_id and "turn_id" not in payload:
+            payload["turn_id"] = turn_id
 
         await self.event_bus.emit(event_name, payload)
 
@@ -1424,6 +1585,9 @@ class Orchestrator(Supervisor, Entity):
     # =====================================================
     async def _handle_runtime_configure(self, packet: RequestPacket):
         Logger.info("Runtime configuration started")
+        self.runtime_state.cancel_requested = False
+        if hasattr(self.runtime_state, "cancel_requested_for_turn"):
+            self.runtime_state.cancel_requested_for_turn = False
         payload = packet.payload
         self.runtime_state.system_prompt = payload.get("system_prompt", "")
         self.runtime_state.language = payload.get("language", "en")
@@ -1505,10 +1669,15 @@ class Orchestrator(Supervisor, Entity):
             self.runtime_state.embedding_manager.set_active_provider("sentence-transformers/all-MiniLM-L6-v2")
 
         api_keys = payload.get("api_keys", {})
+        runtime_config = payload.get("runtime_configuration", {})
+        routing_policy = runtime_config.get("routing_policy", {})
         models_registry = payload.get("models_registry", {})
 
         self.provider_manager.clear()
+        self.provider_manager.set_routing_policy(routing_policy)
         validated_models = []
+
+        from providers.provider_manager import ModelMetadata
 
         registry_providers = models_registry.get("providers", {})
         for provider_key, provider_data in registry_providers.items():
@@ -1522,6 +1691,22 @@ class Orchestrator(Supervisor, Entity):
                 if "display_name" not in enriched_model:
                     enriched_model["display_name"] = enriched_model["id"]
                 validated_models.append(enriched_model)
+                
+                # Enregistrement de la carte d'identité du modèle
+                meta = ModelMetadata(
+                    model_id=enriched_model.get("id"),
+                    provider_id=enriched_model.get("provider_id"),
+                    display_name=enriched_model.get("display_name"),
+                    capabilities=enriched_model.get("capabilities", []),
+                    reasoning_score=float(enriched_model.get("reasoning_score", enriched_model.get("reasoning_level", 1.0))),
+                    speed_score=float(enriched_model.get("speed_score", 1.0)),
+                    cost_tier=enriched_model.get("cost_tier", "standard"),
+                    benchmark_score=float(enriched_model.get("benchmark_score", 50.0)),
+                    latency_profile=enriched_model.get("latency_profile", "medium"),
+                    context_window=int(enriched_model.get("context_window", 4000)),
+                    is_recommended=bool(enriched_model.get("is_recommended", False))
+                )
+                self.provider_manager.register_model_metadata(meta)
 
             if normalized_key == Providers.GEMINI:
                 p = GeminiProvider(api_key, "default", self.runtime_state.system_prompt)
@@ -1539,6 +1724,24 @@ class Orchestrator(Supervisor, Entity):
                 p = OpenRouterProvider(api_key, "default", self.runtime_state.system_prompt)
                 p.provider_id = Providers.OPENROUTER
                 self.provider_manager.register_provider(p)
+            elif normalized_key == Providers.CLAUDE:
+                p = AnthropicProvider(api_key, "default", self.runtime_state.system_prompt)
+                p.provider_id = Providers.CLAUDE
+                self.provider_manager.register_provider(p)
+            elif normalized_key == Providers.DEEPSEEK:
+                p = DeepSeekProvider(api_key, "default", self.runtime_state.system_prompt)
+                p.provider_id = Providers.DEEPSEEK
+                self.provider_manager.register_provider(p)
+
+            # --- Injection du pool de clés API (Multi-keys Resilience) ---
+            if 'p' in locals():
+                providers_config = runtime_config.get("providers", [])
+                for cfg in providers_config:
+                    if cfg.get("provider_name", "").lower() == normalized_key:
+                        keys_arr = cfg.get("keys", [])
+                        if keys_arr:
+                            p.set_api_keys_pool(keys_arr)
+                        break
 
         await self.provider_manager.initialize()
         self.runtime_state.is_configured = True

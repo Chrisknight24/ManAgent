@@ -8,34 +8,45 @@ et vue normalisée du registre utilisant les types stockés (bool/data).
 """
 
 from typing import Optional, Any, Dict, List
+import asyncio
+import time
+import json
+import re
+from pydantic import ValidationError
+
 from utils.logger import Logger
 from core.entity import Entity
-from core.constants import Events
+from core.constants import (
+    Events,
+    RETRIEVAL_TOP_K,
+    RETRIEVAL_THRESHOLD,
+    RETRIEVAL_MAX_RESULTS_INJECTED,
+    SOLVER_MAX_DEPTH,
+    SOLVER_MAX_EXECUTION_TRIES,
+    SOLVER_MAX_PREEXECUTION_FAILURES,
+    MAX_DEPTH_EXTENSIONS,
+    MAX_INSIGHTS_PER_TARGET,
+)
 from .supervisor import Supervisor
 from .plan_models import FeasibilityDecision, Plan, SolverResult, ExecutionStatus, MissionSignature, CompactedAdvice
 from .planner import Planner
 from .executor import Executor
 from core.llm import Llm
-from pydantic import ValidationError
 from core.prompt_loader import get_prompt_loader
 from core.i18n import _
 from core.id_generator import make_step_id
-import time
 from core.execution_models import ExecutionTree, PlanAttempt, FailureClass
 from core.retriever import Retriever
 from core.signature_extractor import SignatureExtractor
-from core.constants import RETRIEVAL_TOP_K, RETRIEVAL_THRESHOLD, RETRIEVAL_MAX_RESULTS_INJECTED
 from core.mission_compactor import MissionCompactor
 from core.runtime_state import RuntimeState
 from memory.mission_profile_store import MissionProfileStore
-import asyncio
 from core.discovery.providers.registry_provider import SolverRegistryProvider
-import json
-import re
 
-MAX_DEPTH = 10
-MAX_EXECUTION_TRIES = 3
-MAX_PREEXECUTION_FAILURES = 3
+MAX_DEPTH = SOLVER_MAX_DEPTH
+MAX_EXECUTION_TRIES = SOLVER_MAX_EXECUTION_TRIES
+MAX_PREEXECUTION_FAILURES = SOLVER_MAX_PREEXECUTION_FAILURES
+
 
 
 class Solver(Supervisor, Entity):
@@ -81,11 +92,16 @@ class Solver(Supervisor, Entity):
         self._similar_missions = None
 
         if not self.llm and provider_id and model_id:
+            from providers.provider_manager import ModelRequirement
             self.llm = Llm(
                 provider_manager=provider_manager,
                 provider_id=provider_id,
                 model_id=model_id,
-                runtime_state=runtime_state
+                runtime_state=runtime_state,
+                requirement=ModelRequirement.for_solver(
+                    preferred_provider=provider_id if provider_id != "auto" else None,
+                    preferred_model=model_id if model_id != "auto" else None
+                )
             )
 
         if not self.llm:
@@ -243,6 +259,7 @@ class Solver(Supervisor, Entity):
                             similar = None
                     else:
                         try:
+                            await self.propagate_event(Events.STATUS_UPDATE, {"message": _("Le Solver recherche des expériences similaires dans la mémoire...")})
                             retriever = Retriever(
                                 runtime_state=self.runtime_state,
                                 top_k=RETRIEVAL_TOP_K,
@@ -620,6 +637,7 @@ class Solver(Supervisor, Entity):
         return "\n".join(lines)
 
     async def _check_feasibility(self, similar_missions_context: Optional[List[Dict]] = None) -> FeasibilityDecision:
+        await self.propagate_event(Events.STATUS_UPDATE, {"message": _("Le Solver évalue la faisabilité technique de la mission...")})
         Logger.info(f"[Solver:{self.id}] 🤔 Évaluation de la faisabilité...")
 
         tools_view = await self.runtime_state.tools_manager.get_tools_view(goal_query=self.goal)
@@ -695,22 +713,26 @@ class Solver(Supervisor, Entity):
             Logger.warning(f"[Solver:{self.id}] Échec stockage embeddings : {e}")
 
     async def validate_plan(
-        self, plan: Plan, child_solver_id: str, previous_attempts: Optional[List] = None
+        self,
+        plan: Plan,
+        child_solver_id: str,
+        previous_attempts: Optional[List] = None,
+        mission_history_tree: Optional[Any] = None,
     ):
         root_solver = self._get_root_solver()
-        mission_history_tree = root_solver.execution_tree if root_solver else self.execution_tree
+        mission_history_tree = mission_history_tree or (root_solver.execution_tree if root_solver else self.execution_tree)
         try:
             return await self.parent.validate_plan(
-                plan, child_solver_id, previous_attempts=previous_attempts,
+                plan,
+                child_solver_id,
+                previous_attempts=previous_attempts,
                 mission_history_tree=mission_history_tree,
             )
         except TypeError as e:
             if "mission_history_tree" not in str(e):
                 raise
-            Logger.error(
-                f"[Solver:{self.id}] validate_plan : incompatibilité de version détectée "
-                f"({e}) — repli sur l'appel sans mission_history_tree. Vérifier que "
-                f"orchestrator.py/solver.py/plan_validator.py sont bien synchronisés."
+            Logger.warning(
+                f"[Solver:{self.id}] validate_plan : repli sur l'appel sans mission_history_tree ({e})."
             )
             return await self.parent.validate_plan(
                 plan, child_solver_id, previous_attempts=previous_attempts

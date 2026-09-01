@@ -92,11 +92,23 @@ class Presentator(Entity):
         self._discovery_activated = False  # Flag pour activation unique
 
         if not self.llm and provider_id and model_id:
+            from providers.provider_manager import ModelRequirement
             self.llm = Llm(
                 provider_manager=provider_manager,
                 provider_id=provider_id,
                 model_id=model_id,
-                runtime_state=runtime_state
+                runtime_state=runtime_state,
+                requirement=ModelRequirement.for_presentator(
+                    preferred_provider=provider_id if provider_id != "auto" else None,
+                    preferred_model=model_id if model_id != "auto" else None
+                )
+            )
+
+        if self.llm and (not hasattr(self.llm, "requirement") or self.llm.requirement.role_name == "general"):
+            from providers.provider_manager import ModelRequirement
+            self.llm.requirement = ModelRequirement.for_presentator(
+                preferred_provider=self.llm.provider_id if self.llm.provider_id != "auto" else None,
+                preferred_model=self.llm.model_id if self.llm.model_id != "auto" else None
             )
 
         if not self.llm:

@@ -15,6 +15,7 @@ from utils.logger import Logger
 import re
 from core.prompt_loader import get_prompt_loader
 from core.i18n import _
+from core.constants import Events, ModelCapabilities
 from typing import Tuple, List, Optional, Any, Dict
 from core.entity import Entity
 
@@ -81,6 +82,13 @@ class Planner(Entity):
         self._cached_advice: Optional[str] = None
         self._last_proposed_plan: Optional[Plan] = None
 
+        if self.llm and (not hasattr(self.llm, "requirement") or self.llm.requirement.role_name == "general"):
+            from providers.provider_manager import ModelRequirement
+            self.llm.requirement = ModelRequirement.for_planner(
+                preferred_provider=self.llm.provider_id if self.llm.provider_id != "auto" else None,
+                preferred_model=self.llm.model_id if self.llm.model_id != "auto" else None
+            )
+
         if self.runtime_state.discovery_engine:
             registry_provider = PlannerRegistryProvider(self)
             self.register_data_provider("registry", registry_provider)
@@ -110,6 +118,8 @@ class Planner(Entity):
         return await self.propose_plan(goal, context, strategy, variable_registry)
 
     async def propose_plan(self, goal: str, context: str, strategy: str, variable_registry: dict) -> Plan:
+        if hasattr(self.runtime_state, 'orchestrator') and self.runtime_state.orchestrator:
+            await self.runtime_state.orchestrator.propagate_event(Events.STATUS_UPDATE, {"message": _("Le Planner génère un plan d'action structuré...")})
         Logger.info("[Planner] 🧠 Traduction de la stratégie en plan d'action structuré...")
 
         fallback_msg = "Aucun conseil historique ou sémantique pertinent disponible pour cette tâche."
@@ -140,6 +150,42 @@ class Planner(Entity):
                 "source": info.get("source", "N/A"),
             }
 
+        # --- PRÉPARATION DES MODALITÉS GÉRÉES / DYNAMIQUES POUR LE PLANIFICATEUR ---
+        supported_modalities = []
+        unsupported_modalities = []
+        
+        modalities_def = {
+            "audio": {
+                "capability": ModelCapabilities.AUDIO,
+                "formats": ["MP3", "WAV", "OGG", "M4A", "FLAC"],
+                "name": "audio (fichiers audio, voix)",
+            },
+            "video": {
+                "capability": ModelCapabilities.VIDEO,
+                "formats": ["MP4", "MKV", "AVI", "MOV"],
+                "name": "vidéo (fichiers vidéo, flux)",
+            },
+            "vision": {
+                "capability": ModelCapabilities.VISION,
+                "formats": ["PNG", "JPG", "JPEG", "WEBP", "GIF"],
+                "name": "vision (images, photos, captures d'écran)",
+            }
+        }
+        
+        for mod_key, mod_info in modalities_def.items():
+            has_cap = False
+            if self.llm.provider_manager.get_model_metadata(self.llm.model_id) is not None:
+                has_cap = self.llm.provider_manager.has_model_capability(self.llm.model_id, mod_info["capability"])
+            
+            info_dict = {
+                "name": mod_info["name"],
+                "formats": ", ".join(mod_info["formats"])
+            }
+            if has_cap:
+                supported_modalities.append(info_dict)
+            else:
+                unsupported_modalities.append(info_dict)
+
         prompt = loader.load(
             "planner.md",
             lang=self.runtime_state.language,
@@ -148,7 +194,10 @@ class Planner(Entity):
             strategy=strategy,
             variable_registry=enriched_registry,
             tools=tools_view,
-            advice=advice
+            advice=advice,
+            model_id=self.llm.model_id,
+            supported_modalities=supported_modalities,
+            unsupported_modalities=unsupported_modalities
         )
 
         proposed_plan: Plan = await self.llm.generate_structured(
