@@ -78,9 +78,24 @@ Chaque outil produit **deux sorties** :
 
 ### Utilisation
 
-- **Conditions (`execute_if`)** : utilisent exclusivement le booléen (`$@_bool_xxx`).  
-  Exemple : `execute_if = "$@_bool_whatsapp_open == True"`  
-  ⛔ Interdiction formelle d'utiliser `$@_data_xxx`, la notation pointée (`.result`, `.data`), ou des opérateurs (`IN`, `CONTAINS`) dans les conditions.
+- **Conditions (`execute_if`)** : utilisent exclusivement le booléen (`$@_bool_xxx` ou `$@_bool_step_X`).  
+  Exemple valide : `execute_if = "$@_bool_whatsapp_open == True"` ou `execute_if = "$@_bool_step_1 == True"`  
+  ⛔ **Interdiction formelle** d'utiliser une variable de données (`$@_data_xxx`), la notation pointée (`.result`, `.data`), ou des opérateurs (`IN`, `CONTAINS`) dans les conditions `execute_if`. Seuls les signaux booléens (`$@_bool_...`) sont autorisés dans `execute_if`.
+
+### DEUX FACONS PARFAITES DE GERER UN FALLBACK / CONDITIONNEL
+
+Lorsque la mission implique une condition ou un fallback (ex: "regarde si l'onglet X est ouvert, si oui extrais le texte, sinon note ABSENT") :
+
+- **Option A (Recommandée : Encapsulation dans une `abstract_task`)** :
+  Englobe la vérification et l'alternative dans la description d'une tâche abstraite.
+  Exemple : `description: "Activer l'onglet Amazon si ouvert et extraire sa recherche, ou retourner explicitement 'ABSENT' si non présent."`, `output_variable_name: "data_amazon_text"`.
+  *Pourquoi c'est idéal* : C'est simple, propre, et le sous-agent délégué gèrera la branche sans alourdir le plan racine.
+
+- **Option B (Branches séparées avec `execute_if`)** :
+  Si tu préfères créer des étapes séparées dans le graphe :
+  - `step_1` : `abstract_task` pour la vérification, `output_variable_name: "bool_amazon_present"`.
+  - `step_2` : Branche si VRAI $\rightarrow$ `execute_if: "$@_bool_amazon_present == True"` (ou `$@_bool_step_1 == True`).
+  - `step_3` : Branche si FAUX $\rightarrow$ `execute_if: "$@_bool_amazon_present == False"` (ou `$@_bool_step_1 == False`).
 
 - **Arguments d'outils (`tool_args_json`)** : peuvent utiliser `$@_data_xxx` pour transmettre des données complexes. Exemple : `"target": "$@_data_file_content"`.
 

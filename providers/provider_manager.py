@@ -166,13 +166,31 @@ class ProviderManager:
         self.providers.append(provider)
         Logger.info(f"Registered provider: {getattr(provider, 'provider_id', provider.provider_name)}")
 
+    def _normalize_pid(self, pid: str) -> str:
+        if not pid:
+            return ""
+        n = pid.lower().strip()
+        if "gemini" in n or "google" in n:
+            return "gemini"
+        if "groq" in n:
+            return "groq"
+        if "openai" in n:
+            return "openai"
+        if "openrouter" in n:
+            return "openrouter"
+        if "claude" in n or "anthropic" in n:
+            return "claude"
+        if "deepseek" in n:
+            return "deepseek"
+        return n
+
     def get_provider(self, provider_id: str) -> Optional[BaseProvider]:
         if not provider_id:
             return None
-        normalized_id = provider_id.lower().strip()
+        norm_id = self._normalize_pid(provider_id)
         for p in self.providers:
-            pid = getattr(p, "provider_id", getattr(p, "provider_name", "")).lower()
-            if pid == normalized_id:
+            pid = getattr(p, "provider_id", getattr(p, "provider_name", ""))
+            if self._normalize_pid(pid) == norm_id:
                 return p
         return None
 
@@ -187,7 +205,7 @@ class ProviderManager:
         et les priorités utilisateur.
         """
         exclude_set = set(exclude_models or [])
-        provider_priorities = [p.lower() for p in self.routing_policy.get(
+        provider_priorities = [self._normalize_pid(p) for p in self.routing_policy.get(
             "fallback_order",
             ["gemini", "groq", "openai", "claude", "deepseek", "openrouter"]
         )]
@@ -234,14 +252,14 @@ class ProviderManager:
                 score += (meta.reasoning_score * 30.0) + (meta.speed_score * 5.0)
 
             # Bonus de priorité fournisseur de l'utilisateur
-            norm_prov = meta.provider_id.lower()
+            norm_prov = self._normalize_pid(meta.provider_id)
             if norm_prov in provider_priorities:
                 rank = provider_priorities.index(norm_prov)
                 priority_bonus = max(0, 50 - (rank * 10))
                 score += priority_bonus
 
             # Bonus si préféré explicitement
-            if requirement.preferred_provider and norm_prov == requirement.preferred_provider.lower():
+            if requirement.preferred_provider and norm_prov == self._normalize_pid(requirement.preferred_provider):
                 score += 30.0
             if requirement.preferred_model and meta.model_id == requirement.preferred_model:
                 score += 50.0

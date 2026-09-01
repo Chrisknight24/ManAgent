@@ -87,6 +87,20 @@ class Llm:
         self._last_refined_context: Optional[RefinedContext] = None
         self._discovery_history = []  # historique des signatures demandées (global à l'instance)
 
+    def _emit_active_model(self, is_fallback: bool = False, old_model: str = ""):
+        if self.runtime_state and hasattr(self.runtime_state, "event_bus") and self.runtime_state.event_bus:
+            payload = {
+                "provider_id": self.provider_id,
+                "model_id": self.model_id,
+                "is_fallback": is_fallback,
+                "old_model": old_model
+            }
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.runtime_state.event_bus.emit("llm.active_model", payload))
+            except RuntimeError:
+                pass
+
     def _resolve_fallback(self, excluded_models: List[str]) -> bool:
         """
         Trouve et bascule vers un modèle de substitution Cross-Provider
@@ -102,23 +116,25 @@ class Llm:
         if self.model_id not in excluded_models:
             excluded_models.append(self.model_id)
 
+        old_model = self.model_id
         best = self.provider_manager.find_best_model_for_requirement(self.requirement, exclude_models=excluded_models)
         if best:
             new_provider_id, new_model_id = best
             Logger.event(
                 "llm_fallback_triggered",
                 old_provider=self.provider_id,
-                old_model=self.model_id,
+                old_model=old_model,
                 new_provider=new_provider_id,
                 new_model=new_model_id,
                 role=self.requirement.role_name
             )
             Logger.warning(
                 f"[LLM Fallback] Basculement Cross-Provider ({self.requirement.role_name}): "
-                f"{self.provider_id}/{self.model_id} -> {new_provider_id}/{new_model_id}"
+                f"{self.provider_id}/{old_model} -> {new_provider_id}/{new_model_id}"
             )
             self.provider_id = new_provider_id
             self.model_id = new_model_id
+            self._emit_active_model(is_fallback=True, old_model=old_model)
             return True
         return False
 
@@ -293,6 +309,7 @@ class Llm:
             full_prompt = f"{context_str}\n\n{prompt}" if context_str else prompt
 
             provider.model_name = self.model_id
+            self._emit_active_model(is_fallback=(len(excluded_models) > 0))
 
             start_time = time.monotonic()
             call_epoch = getattr(self.runtime_state, "generation_epoch", 0) if self.runtime_state else 0
@@ -711,6 +728,7 @@ class Llm:
                 ephemeral_context.append({"role": "user", "content": prompt})
 
                 provider.model_name = self.model_id
+                self._emit_active_model(is_fallback=(len(excluded_models) > 0))
 
                 start_time = time.monotonic()
                 call_epoch = getattr(self.runtime_state, "generation_epoch", 0) if self.runtime_state else 0

@@ -81,6 +81,7 @@ class Orchestrator(Supervisor, Entity):
         self.provider_manager = provider_manager
         self.event_bus = event_bus
         self.runtime_state = runtime_state
+        self.runtime_state.event_bus = event_bus
         self.memory = ConversationMemory()
         self.context_manager = ContextManager()
 
@@ -1668,10 +1669,29 @@ class Orchestrator(Supervisor, Entity):
             self.runtime_state.embedding_manager.register_provider(default_provider)
             self.runtime_state.embedding_manager.set_active_provider("sentence-transformers/all-MiniLM-L6-v2")
 
+        def normalize_prov(name: str) -> str:
+            if not name:
+                return ""
+            n = name.lower().strip()
+            if "gemini" in n or "google" in n:
+                return "gemini"
+            if "groq" in n:
+                return "groq"
+            if "openai" in n:
+                return "openai"
+            if "openrouter" in n:
+                return "openrouter"
+            if "claude" in n or "anthropic" in n:
+                return "claude"
+            if "deepseek" in n:
+                return "deepseek"
+            return n
+
         api_keys = payload.get("api_keys", {})
         runtime_config = payload.get("runtime_configuration", {})
         routing_policy = runtime_config.get("routing_policy", {})
         models_registry = payload.get("models_registry", {})
+        providers_config = runtime_config.get("providers", [])
 
         self.provider_manager.clear()
         self.provider_manager.set_routing_policy(routing_policy)
@@ -1681,10 +1701,25 @@ class Orchestrator(Supervisor, Entity):
 
         registry_providers = models_registry.get("providers", {})
         for provider_key, provider_data in registry_providers.items():
-            normalized_key = provider_key.lower()
-            if normalized_key not in api_keys or not api_keys[normalized_key]:
+            normalized_key = normalize_prov(provider_key)
+            api_key = api_keys.get(normalized_key, "")
+            
+            # Fallback extraction de la clé si api_keys[normalized_key] n'est pas rempli directement
+            if not api_key:
+                for cfg in providers_config:
+                    cfg_norm = normalize_prov(cfg.get("provider_name", ""))
+                    if cfg_norm == normalized_key:
+                        api_key = cfg.get("active_api_key", "")
+                        if not api_key:
+                            keys_list = cfg.get("keys", [])
+                            if keys_list and isinstance(keys_list, list):
+                                api_key = keys_list[0].get("key_value", keys_list[0].get("key", ""))
+                        if api_key:
+                            break
+
+            if not api_key:
                 continue
-            api_key = api_keys[normalized_key]
+
             for model in provider_data.get("models", []):
                 enriched_model = dict(model)
                 enriched_model["provider_id"] = normalized_key
@@ -1708,6 +1743,7 @@ class Orchestrator(Supervisor, Entity):
                 )
                 self.provider_manager.register_model_metadata(meta)
 
+            p = None
             if normalized_key == Providers.GEMINI:
                 p = GeminiProvider(api_key, "default", self.runtime_state.system_prompt)
                 p.provider_id = Providers.GEMINI
@@ -1734,10 +1770,10 @@ class Orchestrator(Supervisor, Entity):
                 self.provider_manager.register_provider(p)
 
             # --- Injection du pool de clés API (Multi-keys Resilience) ---
-            if 'p' in locals():
-                providers_config = runtime_config.get("providers", [])
+            if p is not None:
                 for cfg in providers_config:
-                    if cfg.get("provider_name", "").lower() == normalized_key:
+                    cfg_norm = normalize_prov(cfg.get("provider_name", ""))
+                    if cfg_norm == normalized_key:
                         keys_arr = cfg.get("keys", [])
                         if keys_arr:
                             p.set_api_keys_pool(keys_arr)
