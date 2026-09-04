@@ -29,6 +29,7 @@ class SessionStore:
                         discovery_history TEXT,       -- JSON : ["sig1", "sig2"]   <-- NOUVEAU
                         active_investigation_targets TEXT,  -- JSON : ["last_mission", "abc123"]
                         insights_by_mission TEXT,     -- JSON : {"abc123": [{"question":..., "answer":...}]}
+                        asset_registry TEXT,          -- JSON : {"session_id":..., "assets":[...]}
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                     )
@@ -40,6 +41,7 @@ class SessionStore:
                     ("discovery_history", "'[]'"),
                     ("active_investigation_targets", "'[]'"),
                     ("insights_by_mission", "'{}'"),
+                    ("asset_registry", "'{}'"),
                 ):
                     try:
                         cursor.execute(f"ALTER TABLE sessions ADD COLUMN {col} TEXT DEFAULT {default}")
@@ -56,13 +58,7 @@ class SessionStore:
         """
         Sauvegarde ou met à jour une session.
         context_dict peut contenir : goal_stack, unresolved_issues, mission_history, mood,
-        last_mission_status, discovery_history, active_investigation_targets, insights_by_mission.
-
-        NB : l'ensemble des champs persistables est défini une seule fois dans
-        `memory.session_memory.SessionContext.PERSISTABLE_FIELDS` — c'est
-        `SessionContext.to_persistable_dict()` qui doit alimenter ce
-        `context_dict`, pour éviter que ce store et SessionContext ne
-        redivergent silencieusement comme ça a été le cas par le passé.
+        last_mission_status, discovery_history, active_investigation_targets, insights_by_mission, asset_registry.
         """
         try:
             with self._get_connection() as conn:
@@ -79,8 +75,9 @@ class SessionStore:
                         discovery_history,
                         active_investigation_targets,
                         insights_by_mission,
+                        asset_registry,
                         updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ''', (
                     session_id,
                     json.dumps(context_dict.get("goal_stack", []), ensure_ascii=False),
@@ -92,6 +89,7 @@ class SessionStore:
                     json.dumps(context_dict.get("discovery_history", []), ensure_ascii=False),
                     json.dumps(context_dict.get("active_investigation_targets", []), ensure_ascii=False),
                     json.dumps(context_dict.get("insights_by_mission", {}), ensure_ascii=False),
+                    json.dumps(context_dict.get("asset_registry", {}), ensure_ascii=False),
                 ))
                 conn.commit()
         except Exception as e:
@@ -112,6 +110,7 @@ class SessionStore:
                     d["discovery_history"] = json.loads(d.get("discovery_history") or "[]")
                     d["active_investigation_targets"] = json.loads(d.get("active_investigation_targets") or "[]")
                     d["insights_by_mission"] = json.loads(d.get("insights_by_mission") or "{}")
+                    d["asset_registry"] = json.loads(d.get("asset_registry") or "{}")
                     return d
                 return None
         except Exception as e:
@@ -127,6 +126,32 @@ class SessionStore:
                 Logger.info(f"[SessionStore] Session supprimée : {session_id}")
         except Exception as e:
             Logger.error(f"[SessionStore] Erreur delete_session {session_id} : {e}")
+
+    def get_sessions_count(self) -> int:
+        """Retourne le nombre total de sessions dans SQLite."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT COUNT(*) FROM sessions')
+                row = cursor.fetchone()
+                return int(row[0]) if row else 0
+        except Exception as e:
+            Logger.error(f"[SessionStore] Erreur comptage sessions : {e}")
+            return 0
+
+    def clear_all_sessions(self) -> int:
+        """Supprime toutes les sessions de la base SQLite."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM sessions')
+                count = cursor.rowcount
+                conn.commit()
+                Logger.info(f"[SessionStore] Toutes les sessions purgées ({count} sessions).")
+                return count
+        except Exception as e:
+            Logger.error(f"[SessionStore] Erreur purge sessions : {e}")
+            return 0
     
     def get_recurrent_themes(self, session_id: str, limit: int = 5) -> List[Dict[str, Any]]:
         try:

@@ -16,7 +16,7 @@ import re
 from core.prompt_loader import get_prompt_loader
 from core.i18n import _
 from core.constants import Events, ModelCapabilities
-from typing import Tuple, List, Optional, Any, Dict
+from typing import Tuple, List, Optional, Any, Dict, Union
 from core.entity import Entity
 
 PLANNER_PD_ENABLED = False
@@ -115,9 +115,17 @@ class Planner(Entity):
         context = kwargs.get("context", args[1] if len(args) > 1 else "")
         strategy = kwargs.get("strategy", args[2] if len(args) > 2 else "")
         variable_registry = kwargs.get("variable_registry", args[3] if len(args) > 3 else {})
-        return await self.propose_plan(goal, context, strategy, variable_registry)
+        candidate_skills = kwargs.get("candidate_skills", args[4] if len(args) > 4 else None)
+        return await self.propose_plan(goal, context, strategy, variable_registry, candidate_skills=candidate_skills)
 
-    async def propose_plan(self, goal: str, context: str, strategy: str, variable_registry: dict) -> Plan:
+    async def propose_plan(
+        self,
+        goal: str,
+        context: str,
+        strategy: str,
+        variable_registry: dict,
+        candidate_skills: Optional[Union[List[Dict[str, Any]], str]] = None
+    ) -> Plan:
         if hasattr(self.runtime_state, 'orchestrator') and self.runtime_state.orchestrator:
             await self.runtime_state.orchestrator.propagate_event(Events.STATUS_UPDATE, {"message": _("Le Planner génère un plan d'action structuré...")})
         Logger.info("[Planner] 🧠 Traduction de la stratégie en plan d'action structuré...")
@@ -141,6 +149,26 @@ class Planner(Entity):
 
         tools_view = await self.runtime_state.tools_manager.get_tools_view()
         loader = get_prompt_loader()
+
+        skills_text = ""
+        if candidate_skills:
+            if isinstance(candidate_skills, str):
+                skills_text = candidate_skills
+            elif isinstance(candidate_skills, list):
+                lines = []
+                for idx, sk in enumerate(candidate_skills, 1):
+                    if isinstance(sk, dict):
+                        s_id = sk.get("skill_id", "")
+                        desc = sk.get("description", "")
+                        ver = sk.get("version", 1)
+                        trust = sk.get("trust_score", 1.0)
+                        cps = ", ".join(sk.get("checkpoints", [])) or "aucun"
+                        lines.append(f"{idx}. Skill ID : `{s_id}` (v{ver}, Score Confiance : {trust:.2f})")
+                        lines.append(f"   Description : {desc}")
+                        lines.append(f"   Checkpoints vérifiables : {cps}")
+                    else:
+                        lines.append(f"{idx}. {sk}")
+                skills_text = "\n".join(lines)
 
         enriched_registry = {}
         for name, info in (variable_registry or {}).items():
@@ -194,6 +222,7 @@ class Planner(Entity):
             strategy=strategy,
             variable_registry=enriched_registry,
             tools=tools_view,
+            skills=skills_text,
             advice=advice,
             model_id=self.llm.model_id,
             supported_modalities=supported_modalities,

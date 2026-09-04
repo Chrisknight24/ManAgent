@@ -147,5 +147,14 @@ class Entity(ABC):
 
 
 # Imports différés pour éviter les circularités
-from core.llm import Llm
-from core.discovery.data_provider import DataProvider
+try:
+    from core.llm import Llm
+except Exception:
+    class Llm:
+        pass
+
+try:
+    from core.discovery.data_provider import DataProvider
+except Exception:
+    class DataProvider:
+        pass

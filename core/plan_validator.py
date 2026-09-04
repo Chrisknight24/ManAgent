@@ -89,12 +89,92 @@ class PlanValidator:
         request_human_confirmation: Optional[
             Callable[[Plan, PlanValidationDecision], Awaitable[bool]]
         ] = None,
+        hitl_policy: str = "balanced",
+        human_validation_history: Optional[List[Dict[str, Any]]] = None,
     ):
         self._llm = llm
         self._prompt_loader = prompt_loader
         self._rules_text = rules_text
         self._language = language
         self._request_human_confirmation = request_human_confirmation
+        self._hitl_policy = hitl_policy or "balanced"
+        self._human_validation_history = human_validation_history or []
+
+    def _summarize_human_validation_history(self) -> str:
+        """Synthétise l'historique des arbitrages humains survenus durant la mission courante."""
+        if not self._human_validation_history:
+            return _("(aucun arbitrage humain préalable pour cette mission)")
+        lines = []
+        for idx, entry in enumerate(self._human_validation_history, 1):
+            status = _("✅ APPROUVÉ") if entry.get("approved") else _("❌ REFUSÉ")
+            steps = entry.get("steps", [])
+            steps_str = "; ".join(steps[:5]) if steps else _("(étapes non spécifiées)")
+            feedback = entry.get("user_feedback", "")
+            feedback_str = f" | Note utilisateur: '{feedback}'" if feedback else ""
+            lines.append(
+                f"- Arbitrage #{idx} : {status} [Risque: {entry.get('risk_level', 'inconnu')}] "
+                f"— Objectif: '{entry.get('goal', '')}' — Actions: {steps_str}{feedback_str}"
+            )
+        return "\n".join(lines)
+
+    def _check_implicit_validation(self, plan: Plan, decision: PlanValidationDecision) -> bool:
+        """
+        Vérifie si les actions sensibles du plan bénéficient d'un consentement implicite
+        déjà accordé par l'utilisateur lors d'une tentative précédente de cette même mission.
+        """
+        if not self._human_validation_history:
+            return False
+
+        # 1. Prudence : Si un refus utilisateur récent a été enregistré dans cette mission,
+        # on ne permet pas de validation implicite aveugle
+        for entry in self._human_validation_history:
+            if not entry.get("approved", False):
+                return False
+
+        # 2. Récupérer l'ensemble des outils sensibles et descriptions autorisés
+        approved_tools: Set[str] = set()
+        approved_steps_text: List[str] = []
+        for entry in self._human_validation_history:
+            if entry.get("approved"):
+                for t in entry.get("tools", []):
+                    if t:
+                        approved_tools.add(t)
+                for s in entry.get("steps", []):
+                    if s:
+                        approved_steps_text.append(_normalize_text(s))
+
+        # 3. Récupérer les étapes sensibles du plan courant
+        flagged_step_ids = set(decision.irreversibility_flags or [])
+        sensitive_current_steps = [
+            s for s in plan.steps
+            if s.id in flagged_step_ids or getattr(s, "is_irreversible", False)
+        ]
+
+        if not sensitive_current_steps:
+            return True
+
+        # 4. Vérifier la convergence pour chaque étape sensible
+        for step in sensitive_current_steps:
+            tool = getattr(step, "tool_name", "") or ""
+            desc = _normalize_text(step.description)
+
+            # Si l'outil utilisé est déjà expressément approuvé
+            if tool and tool in approved_tools:
+                continue
+
+            # Ou si la description converge avec une action déjà approuvée
+            matched = False
+            for app_desc in approved_steps_text:
+                if app_desc and (desc in app_desc or app_desc in desc):
+                    matched = True
+                    break
+            if matched:
+                continue
+
+            # Une action sensible inédite ou non couverte a été trouvée
+            return False
+
+        return True
 
     # =====================================================
     # 1. Détection de motifs récursifs (déterministe, sans LLM)
@@ -333,6 +413,8 @@ class PlanValidator:
             pattern_warning=pattern_warning,
             mission_history_summary=mission_history_summary,
             declared_irreversible_steps=declared_irreversible,
+            hitl_policy=self._hitl_policy,
+            human_validation_history=self._summarize_human_validation_history(),
         )
 
         try:
@@ -358,6 +440,19 @@ class PlanValidator:
                 risk_level=decision.risk_level,
                 irreversibility_flags=decision.irreversibility_flags,
             )
+
+        # Gestion des politiques HITL (Human-in-the-loop) et validation implicite
+        if decision.requires_human_confirmation:
+            if self._hitl_policy == "autonomous":
+                Logger.info("[PlanValidator] 🤖 Mode HITL 'autonomous' : confirmation humaine contournée.")
+                decision.requires_human_confirmation = False
+            elif self._hitl_policy == "balanced":
+                if self._check_implicit_validation(plan, decision):
+                    Logger.info(
+                        "[PlanValidator] ⚡ Validation implicite appliquée (mode balanced) : les actions sensibles "
+                        "du plan convergent avec un arbitrage favorable déjà consenti par l'utilisateur lors de cette mission."
+                    )
+                    decision.requires_human_confirmation = False
 
         if not decision.requires_human_confirmation:
             return PlanValidationOutcome(

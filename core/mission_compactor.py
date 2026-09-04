@@ -77,6 +77,7 @@ class MissionCompactor(Entity):
         return annotated
 
     async def compact(
+        # IDE sync
         self,
         goal: str,
         similar_missions: List[Dict[str, Any]],
@@ -212,7 +213,6 @@ class MissionCompactor(Entity):
             )
 
     def _format_missions(self, missions: List[Dict[str, Any]]) -> str:
-        """Formate la liste des missions pour le prompt avec information de récence."""
         lines = []
         for idx, m in enumerate(missions, 1):
             goal = m.get("goal") or m.get("user_goal", "Objectif inconnu")

@@ -475,3 +475,64 @@ class LessonStore:
         except Exception as e:
             Logger.error(f"[LessonStore] Erreur get_similar_lessons : {e}")
             return []
+
+    def get_lessons_count(self) -> int:
+        """Retourne le nombre total de règles/leçons apprises."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT COUNT(*) FROM lessons')
+                row = cursor.fetchone()
+                return int(row[0]) if row else 0
+        except Exception as e:
+            Logger.error(f"[LessonStore] Erreur comptage leçons : {e}")
+            return 0
+
+    def get_all_lessons(self) -> List[Dict[str, Any]]:
+        """Retourne toutes les leçons actives sans blob d'embedding pour export."""
+        try:
+            with self._get_connection() as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT id, entity_type, scope, recommendation, confidence, 
+                           evidence_count, environment, contradiction_count, is_active, 
+                           keywords_json, source_episodes_json, is_consolidated
+                    FROM lessons
+                ''')
+                rows = cursor.fetchall()
+                results = []
+                for row in rows:
+                    d = dict(row)
+                    try:
+                        d["keywords"] = json.loads(d.pop("keywords_json") or "[]")
+                    except Exception:
+                        d["keywords"] = []
+                    try:
+                        d["source_episodes"] = json.loads(d.pop("source_episodes_json") or "[]")
+                    except Exception:
+                        d["source_episodes"] = []
+                    results.append(d)
+                return results
+        except Exception as e:
+            Logger.error(f"[LessonStore] Erreur get_all_lessons : {e}")
+            return []
+
+    def clear_all_lessons(self) -> int:
+        """Supprime toutes les leçons et retourne le nombre supprimé."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM lessons')
+                count = cursor.rowcount
+                try:
+                    cursor.execute('DELETE FROM vec_lessons')
+                except Exception:
+                    pass
+                conn.commit()
+                Logger.info(f"[LessonStore] Base de leçons purgée ({count} règles supprimées).")
+                return count
+        except Exception as e:
+            Logger.error(f"[LessonStore] Erreur suppression leçons : {e}")
+            return 0
+

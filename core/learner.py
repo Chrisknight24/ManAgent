@@ -296,7 +296,14 @@ class Advisor:
             
         effective_env = getattr(self.runtime_state, "environment", "simulated")
         
-        goal_emb = await embed_text(goal)
+        goal_emb = None
+        if hasattr(self.runtime_state, "embedding_manager") and self.runtime_state.embedding_manager:
+            try:
+                goal_emb = await self.runtime_state.embedding_manager.embed(goal)
+            except Exception as emb_err:
+                Logger.warning(f"[Advisor] Utilisation du fallback embed_text suite à : {emb_err}")
+        if goal_emb is None:
+            goal_emb = await embed_text(goal)
         
         selected = self.lesson_store.get_similar_lessons(goal_emb, entity_types, effective_env, top_k=3)
         
@@ -355,11 +362,12 @@ class Advisor:
 
 class Learner(Entity):
     def __init__(self, name: str, mission_store: MissionStore, runtime_state,
-                 llm: Optional[Llm] = None, parent: Optional[Entity] = None):
+                 llm: Optional[Llm] = None, parent: Optional[Entity] = None,
+                 lesson_store: Optional[LessonStore] = None):
         super().__init__(name=name, role="learner", llm=llm, parent=parent)
         self.mission_store = mission_store
         self.runtime_state = runtime_state
-        self.lesson_store = LessonStore()
+        self.lesson_store = lesson_store or LessonStore()
         self.analyzer = Analyzer(self.lesson_store, self.llm, self.runtime_state)
         self.advisor = Advisor(self.lesson_store, runtime_state, self.llm, cache_manager=self.runtime_state.cache_manager)
         self.entity_learner = EntityLearner(lesson_store=self.lesson_store, cache_manager=self.runtime_state.cache_manager)

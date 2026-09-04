@@ -37,6 +37,9 @@ class MissionCache:
         # Résumé (sera rempli en Phase 5)
         self.summary: str = ""
 
+        # Profil canonique (Skill Engine)
+        self.profile_id: Optional[int] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """Retourne un dictionnaire léger pour le logging / debug."""
         return {
@@ -49,6 +52,7 @@ class MissionCache:
             "presentator_result": self.presentator_result,
             "resolved_keys": list(self.resolved_data.keys()),
             "summary": self.summary,
+            "profile_id": self.profile_id,
         }
 
 

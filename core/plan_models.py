@@ -172,6 +172,8 @@ class SolverResult(BaseModel):
     error_reason: Optional[str] = None
     resolved_data: Optional[Dict[str, Any]] = Field(default_factory=dict, description=_("Données du registre local renvoyées au parent."))
     execution_tree: Optional[ExecutionTree] = None
+    failure_bundle: Optional[Any] = None
+    breakout_report: Optional[Any] = None
     failure_class: Optional[FailureClass] = Field(
         None,
         description=_("Classe d'échec détectée par l'Executor (EXECUTION_FAILURE ou CONVERGENCE_FAILURE).")
@@ -182,10 +184,117 @@ class SolverResult(BaseModel):
     )
 
 
+import re
+import hashlib
+from typing import List, Optional, Dict, Any
+
+FR_TO_EN_ACTIONS = {
+    "ouvrir": "open",
+    "fermer": "close",
+    "lancer": "launch",
+    "demarrer": "start",
+    "démarrer": "start",
+    "cliquer": "click",
+    "taper": "type",
+    "ecrire": "type",
+    "écrire": "type",
+    "saisir": "type",
+    "appuyer": "press",
+    "presser": "press",
+    "creer": "create",
+    "créer": "create",
+    "supprimer": "delete",
+    "rechercher": "search",
+    "chercher": "search",
+    "telecharger": "download",
+    "télécharger": "download",
+    "executer": "execute",
+    "exécuter": "execute",
+    "afficher": "show",
+    "masquer": "hide",
+    "lire": "read",
+    "copier": "copy",
+    "coller": "paste",
+}
+
+FR_TO_EN_OBJECTS = {
+    "boite de dialogue executer": "run dialog box",
+    "boîte de dialogue exécuter": "run dialog box",
+    "boite de dialogue \"executer\"": "run dialog box",
+    "boîte de dialogue \"exécuter\"": "run dialog box",
+    "dialogue executer": "run dialog box",
+    "dialogue exécuter": "run dialog box",
+    "dialogue 'executer'": "run dialog box",
+    "dialogue 'exécuter'": "run dialog box",
+    "menu demarrer": "start menu",
+    "menu démarrer": "start menu",
+    "menu demarrer - executer": "run dialog box",
+    "menu démarrer - exécuter": "run dialog box",
+    "navigateur": "browser",
+    "navigateur web": "web browser",
+    "calculatrice": "calculator",
+    "bloc-notes": "notepad",
+    "bloc notes": "notepad",
+    "explorateur de fichiers": "file explorer",
+    "gestionnaire de taches": "task manager",
+    "gestionnaire de tâches": "task manager",
+    "invite de commandes": "command prompt",
+}
+
+def clean_signature_str(val: Optional[str]) -> str:
+    if not val:
+        return ""
+    # Strip quotes, backticks, parenthesis, braces, brackets
+    cleaned = re.sub(r'["\'`«»()\[\]{}]', '', val)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip().lower()
+    return cleaned
+
 class MissionSignature(BaseModel):
-    action: str = Field(..., description="L'action à effectuer (ex: ouvrir, fermer, lancer)")
-    object: str = Field(..., description="L'objet de l'action (ex: chrome, excel, notepad)")
-    desired_state: Optional[str] = Field(None, description="État final souhaité (optionnel, ex: ouvert, fermé)")
+    action: str = Field(..., description="The action to perform in English, infinitive verb without punctuation (e.g. open, close, launch, click, type, press)")
+    object: str = Field(..., description="The target entity/object in English without quotes (e.g. run dialog box, start menu, notepad, browser)")
+    desired_state: Optional[str] = Field(None, description="Desired final state in English (optional, e.g. open, closed, focused, active)")
+
+    @model_validator(mode='after')
+    def normalize_signature(self) -> 'MissionSignature':
+        """Nettoie et normalise en anglais canonique la signature."""
+        cleaned_act = clean_signature_str(self.action)
+        cleaned_obj = clean_signature_str(self.object)
+        
+        # Fallback automatique traduction FR -> EN si le LLM a produit du français
+        if cleaned_act in FR_TO_EN_ACTIONS:
+            cleaned_act = FR_TO_EN_ACTIONS[cleaned_act]
+            
+        if cleaned_obj in FR_TO_EN_OBJECTS:
+            cleaned_obj = FR_TO_EN_OBJECTS[cleaned_obj]
+            
+        self.action = cleaned_act
+        self.object = cleaned_obj
+        
+        if self.desired_state:
+            cleaned_state = clean_signature_str(self.desired_state)
+            if cleaned_state in {"ouvert", "ouverte"}:
+                cleaned_state = "open"
+            elif cleaned_state in {"fermé", "fermée"}:
+                cleaned_state = "closed"
+            self.desired_state = cleaned_state
+            
+        return self
+
+    def to_hash(self) -> str:
+        """Génère un hash/signature canonique normalisé pour l'indexation et le retrieval de Skills."""
+        act = clean_signature_str(self.action)
+        obj = clean_signature_str(self.object)
+        if self.desired_state:
+            state = clean_signature_str(self.desired_state)
+            return f"sig:{act}:{obj}:{state}"
+        return f"sig:{act}:{obj}"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "action": self.action,
+            "object": self.object,
+            "desired_state": self.desired_state
+        }
 
 class AssetInjection(BaseModel):
     uri: str = Field(..., description="L'URI exact de la ressource (ex: inputs://turn_1, files://photo.jpg)")

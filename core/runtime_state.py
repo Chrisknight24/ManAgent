@@ -23,6 +23,7 @@ class RuntimeState:
         # --- PHASE 3 & 4 : Apprentissage et environnement ---
         self.learner = None
         self.environment: str = "simulated"  # 'simulated' ou 'real'
+        self.host_manifest: Optional[Any] = None  # Instance de HostManifest annoncée dynamiquement par l'hôte
         self.session_memory = None
         self.presentator_detail_level = "brief"   # "brief" ou "detailed"
         self.current_signatures = []
@@ -35,6 +36,10 @@ class RuntimeState:
 
         self.auto_learn_enabled = True
 
+        # --- HITL (Human-In-The-Loop) POLICY & ACTIONS CACHE ---
+        self.hitl_policy: str = "balanced"  # "strict", "balanced", "autonomous"
+        self.approved_human_actions_by_mission: Dict[str, List[Dict[str, Any]]] = {}
+
         self.execution_markers = {
             "execution_attempt": 0,
             "has_abstract_task": False,
@@ -46,6 +51,11 @@ class RuntimeState:
         self.cache_manager = None
         self.discovery_llm = None
         self.discovery_engine = None            
+        
+        # --- SKILL MANAGEMENT (STACK INTEGRATION) ---
+        self.skill_registry = None
+        self.host_skill_executor = None
+        self.host_environment = None
         
     def reset_execution_markers(self):
         """Réinitialise les marqueurs d'exécution pour une nouvelle mission."""

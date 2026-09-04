@@ -31,6 +31,8 @@ class MissionDataAsset(DataAsset):
         except Exception as e:
             return f"[Erreur de sérialisation: {e}]"
 
+from memory.mission_profile_store import MissionProfileStore
+
 class MissionHistoryProvider(DataProvider):
     """
     Fournit l'accès à l'historique des missions de la session courante.
@@ -39,9 +41,10 @@ class MissionHistoryProvider(DataProvider):
     - Un mission_id direct (ex: "abc123").
     """
 
-    def __init__(self, session_id: str, mission_store: MissionStore):
+    def __init__(self, session_id: str, mission_store: MissionStore, profile_store: Optional[MissionProfileStore] = None):
         self.session_id = session_id
         self.mission_store = mission_store
+        self.profile_store = profile_store
         self._cache: Optional[List[Dict[str, Any]]] = None
         self._cached_targets: Optional[List[str]] = None
 
@@ -63,11 +66,22 @@ class MissionHistoryProvider(DataProvider):
         if not episode:
             return MissionDataAsset(target_id=target, metadata={}, data={})
         
+        mid = episode.get("mission_id", "")
+        sigs = []
+        if self.profile_store and mid:
+            profs = self.profile_store.get_profiles_by_mission(mid)
+            for p in profs:
+                act = p.get("action", "")
+                obj = p.get("object", "")
+                if act and obj:
+                    sigs.append(f"{act} {obj}")
+
         metadata = {
-            "mission_id": episode.get("mission_id"),
+            "mission_id": mid,
             "goal": episode.get("goal", ""),
             "status": episode.get("status", ""),
             "summary": episode.get("summary", "Résumé non disponible"),
+            "signatures": sigs,
             "created_at": episode.get("created_at", ""),
             "finished_at": episode.get("finished_at", ""),
             "environment": episode.get("environment", ""),

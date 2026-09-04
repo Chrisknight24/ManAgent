@@ -47,6 +47,8 @@ class OpenAIProvider(BaseProvider):
         attempts = 0
 
         while attempts < total_keys:
+            self.check_cancelled()
+
             active_key = self.get_active_api_key()
             if not active_key:
                 raise ProviderQuotaExhaustedError(_("[OpenAIProvider] Aucune clé API active ou disponible."))
@@ -60,7 +62,9 @@ class OpenAIProvider(BaseProvider):
                 async with aiohttp.ClientSession() as session:
                     async with session.post(endpoint, headers=headers, json=payload) as response:
                         if response.status == 200:
-                            return await response.json()
+                            res_data = await response.json()
+                            self.promote_key(active_key)
+                            return res_data
 
                         error_text = await response.text()
                         masked_key = active_key[:8] if len(active_key) >= 8 else active_key
@@ -79,6 +83,8 @@ class OpenAIProvider(BaseProvider):
                         else:
                             raise ProviderError(_("OpenAI API error {}: {}").format(response.status, error_text))
 
+            except asyncio.CancelledError:
+                raise
             except aiohttp.ClientError as ce:
                 attempts += 1
                 self.mark_key_in_cooldown(active_key, 30.0)

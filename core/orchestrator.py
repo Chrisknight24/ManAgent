@@ -8,6 +8,7 @@ RÔLE (Le PDG) : Centre de validation, de routage des paquets C++ et Superviseur
 import asyncio
 import re
 import time
+import json
 from providers.provider_manager import ProviderManager
 from core.event_bus import EventBus
 from core.runtime_state import RuntimeState
@@ -23,6 +24,7 @@ from providers.deepseek_provider import DeepSeekProvider
 from providers.anthropic_provider import AnthropicProvider
 
 from transport.packet_models import RequestPacket, ResponsePacket, ErrorPacket
+from core.host_manifest import HostManifest
 from utils.logger import Logger
 
 # Nouveaux imports pour l'architecture HTN (Hierarchical Task Network)
@@ -45,13 +47,13 @@ import copy
 from datetime import datetime
 from memory.session_memory import SessionMemory, MissionCache
 from memory.mission_store import MissionStore
-from core.learner import Learner
-
-import json
 from memory.session_store import SessionStore
+from memory.lesson_store import LessonStore
+from core.learner import Learner
 
 from core.embedding_service import get_embedding_service
 from memory.mission_profile_store import MissionProfileStore
+from core.skills.registry import SkillRegistry
 
 from core.markers.manager import MarkerManager
 from memory.fingerprint_store import FingerprintStore
@@ -93,7 +95,11 @@ class Orchestrator(Supervisor, Entity):
         self._heartbeat_task: Optional[asyncio.Task] = None
         self.session_memories: Dict[str, SessionMemory] = {}
         self.mission_store = MissionStore()
+        self.mission_profile_store = MissionProfileStore()
+        self.skill_registry = SkillRegistry()
         self.session_store = SessionStore()
+        self.lesson_store = LessonStore()
+        self.runtime_state.lesson_store = self.lesson_store
         self.marker_manager = MarkerManager()
         self.fingerprint_store = FingerprintStore()
         self.input_ingestor = InputIngestor()
@@ -146,6 +152,27 @@ class Orchestrator(Supervisor, Entity):
                 return await self._handle_chat_stop()
             elif packet.action == Actions.CHAT_RESET:
                 return await self._handle_chat_reset()
+            elif packet.action == Actions.HOST_MANIFEST_REGISTER:
+                manifest_payload = packet.payload.get("host_manifest", packet.payload)
+                if not self.runtime_state.tools_manager:
+                    self.runtime_state.tools_manager = ToolsManager(
+                        name="tools_manager",
+                        llm=None,
+                        parent=self,
+                        runtime_state=self.runtime_state
+                    )
+                manifest_obj = self.runtime_state.tools_manager.register_host_manifest(manifest_payload)
+                await self.propagate_event(Events.HOST_MANIFEST_UPDATED, {
+                    "host_name": manifest_obj.host_name,
+                    "host_version": manifest_obj.host_version,
+                    "os": manifest_obj.os,
+                    "capabilities": manifest_obj.capabilities,
+                    "tools_count": len(manifest_obj.tools)
+                })
+                return ResponsePacket(type="response", status="success", payload={
+                    "message": "Host manifest registered successfully.",
+                    "host_manifest": manifest_obj.to_dict()
+                })
             elif packet.action == Actions.LEARNER_ANALYZE:
                 if not self.runtime_state.learner:
                     return ErrorPacket(type="error", message="Learner non initialisé. Envoyez un message d'abord.")
@@ -159,6 +186,73 @@ class Orchestrator(Supervisor, Entity):
                 await self.propagate_event(Events.LEARNER_ANALYZE_FINISHED, {"count": analyzed})
                 return ResponsePacket(type="response", status="success",
                                       payload={"message": f"Analyse terminée : {analyzed} épisodes traités."})
+            elif packet.action == Actions.SYSTEM_WARMUP:
+                Logger.info("[Orchestrator] 🚀 Exécution du Warm-up IA en arrière-plan...")
+                async def _bg_warmup():
+                    try:
+                        # 1. Modèle d'embeddings & JIT inference warmup
+                        emb_mgr = getattr(self.runtime_state, "embedding_manager", None)
+                        if emb_mgr and emb_mgr.active_provider:
+                            await emb_mgr.active_provider.initialize()
+                            try:
+                                if hasattr(emb_mgr.active_provider, "embed"):
+                                    await emb_mgr.active_provider.embed("warmup test")
+                                elif hasattr(emb_mgr.active_provider, "get_embedding"):
+                                    await emb_mgr.active_provider.get_embedding("warmup test")
+                            except Exception as emb_e:
+                                Logger.warning(f"[Orchestrator] Inférence test warmup embedding : {emb_e}")
+                            Logger.info(f"[Orchestrator] ✅ Modèle d'embeddings actif ({emb_mgr.active_provider_id}) préchargé en RAM.")
+                        else:
+                            from core.embedding_service import EmbeddingService
+                            emb = EmbeddingService()
+                            await emb._ensure_loaded()
+                            try:
+                                await emb.embed_text("warmup test")
+                            except Exception:
+                                pass
+                            Logger.info("[Orchestrator] ✅ Modèle d'embeddings par défaut préchargé en RAM.")
+
+                        # 2. Initialisation des bases de données et schémas
+                        if hasattr(self, "mission_store") and self.mission_store:
+                            count = await asyncio.to_thread(self.mission_store.get_episodes_count)
+                            Logger.info(f"[Orchestrator] ✅ Base de mémoire initialisée ({count} épisodes existants).")
+
+                        if hasattr(self, "lesson_store") and self.lesson_store:
+                            await asyncio.to_thread(self.lesson_store.get_lessons_count)
+
+                        try:
+                            from core.skills.registry import SkillRegistry
+                            reg = SkillRegistry()
+                            await asyncio.to_thread(reg.get_skills_count)
+                        except Exception:
+                            pass
+
+                        # 3. Pré-chargement des templates Jinja2 (PromptLoader)
+                        try:
+                            from core.prompt_loader import PromptLoader
+                            loader = PromptLoader()
+                            loader._get_env("fr")
+                            loader._get_env("en")
+                            Logger.info("[Orchestrator] ✅ Cache de templates Jinja2 pré-compilé.")
+                        except Exception:
+                            pass
+
+                        # 4. Pré-import des modules d'orchestration pour éliminer la latence du 1er message
+                        try:
+                            import core.solver
+                            import core.planner
+                            import core.signature_extractor
+                            import core.skills.engine
+                            import core.skills.synthesizer
+                            Logger.info("[Orchestrator] ✅ Modules IA pré-importés en mémoire.")
+                        except Exception:
+                            pass
+
+                    except Exception as e:
+                        Logger.warning(f"[Orchestrator] Warm-up partiel ou ignoré: {e}")
+                asyncio.create_task(_bg_warmup())
+                return ResponsePacket(type="response", status="success",
+                                      payload={"message": "Warm-up task started in background."})
             elif packet.action == Actions.SESSION_DELETE:
                 session_id = packet.payload.get("session_id")
                 if session_id:
@@ -171,6 +265,93 @@ class Orchestrator(Supervisor, Entity):
                     Logger.info(f"[Orchestrator] Session supprimée (RAM + base) : {session_id}")
                 return ResponsePacket(type="response", status="success",
                                       payload={"message": _("Session purged")})
+            elif packet.action == Actions.DATA_STATS:
+                episodes_count = 0
+                lessons_count = 0
+                sessions_count = 0
+                cache_entries_count = 0
+                skills_count = 0
+                if hasattr(self, "mission_store") and self.mission_store:
+                    episodes_count = await asyncio.to_thread(self.mission_store.get_episodes_count)
+                if hasattr(self, "lesson_store") and self.lesson_store:
+                    lessons_count = await asyncio.to_thread(self.lesson_store.get_lessons_count)
+                elif self.runtime_state.learner and hasattr(self.runtime_state.learner, "lesson_store"):
+                    lessons_count = await asyncio.to_thread(self.runtime_state.learner.lesson_store.get_lessons_count)
+                if hasattr(self, "session_store") and self.session_store:
+                    sessions_count = await asyncio.to_thread(self.session_store.get_sessions_count)
+                if self.runtime_state.cache_manager:
+                    cache_entries_count = await asyncio.to_thread(self.runtime_state.cache_manager._count_entries)
+                try:
+                    from core.skills.registry import SkillRegistry
+                    reg = SkillRegistry()
+                    skills_count = await asyncio.to_thread(reg.get_skills_count)
+                except Exception:
+                    skills_count = 0
+
+                return ResponsePacket(type="response", status="success", payload={
+                    "episodes_count": episodes_count,
+                    "lessons_count": lessons_count,
+                    "sessions_count": sessions_count,
+                    "cache_entries_count": cache_entries_count,
+                    "skills_count": skills_count
+                })
+            elif packet.action in (Actions.DATA_PURGE, Actions.SYSTEM_RESET_DATA):
+                target = packet.payload.get("target", "all") if packet.payload else "all"
+                results = {}
+                if target in ("all", "cache"):
+                    if self.runtime_state.cache_manager:
+                        results["cache_cleared"] = await self.runtime_state.cache_manager.clear_all()
+                if target in ("all", "memory", "episodes"):
+                    if hasattr(self, "mission_store") and self.mission_store:
+                        results["episodes_cleared"] = await asyncio.to_thread(self.mission_store.clear_all_episodes)
+                if target in ("all", "profiles", "mission_profiles"):
+                    if hasattr(self, "mission_profile_store") and self.mission_profile_store:
+                        results["profiles_cleared"] = await asyncio.to_thread(self.mission_profile_store.clear_all_profiles)
+                if target in ("all", "lessons", "rules"):
+                    if hasattr(self, "lesson_store") and self.lesson_store:
+                        results["lessons_cleared"] = await asyncio.to_thread(self.lesson_store.clear_all_lessons)
+                    elif self.runtime_state.learner and hasattr(self.runtime_state.learner, "lesson_store"):
+                        results["lessons_cleared"] = await asyncio.to_thread(self.runtime_state.learner.lesson_store.clear_all_lessons)
+                if target in ("all", "skills"):
+                    if hasattr(self, "skill_registry") and self.skill_registry:
+                        results["skills_cleared"] = await asyncio.to_thread(self.skill_registry.clear_all_skills)
+                if target in ("all", "sessions"):
+                    self.session_memories.clear()
+                    self.asset_registries.clear()
+                    if hasattr(self, "session_store") and self.session_store:
+                        results["sessions_cleared"] = await asyncio.to_thread(self.session_store.clear_all_sessions)
+
+                Logger.info(f"[Orchestrator] Réinitialisation/Purge de données exécutée (action: {packet.action}, cible: {target}) : {results}")
+                return ResponsePacket(type="response", status="success", payload={
+                    "message": "Data purge completed successfully.",
+                    "action": packet.action,
+                    "target": target,
+                    "results": results
+                })
+            elif packet.action == Actions.DATA_EXPORT:
+                skills_data = []
+                try:
+                    from core.skills.registry import SkillRegistry
+                    skill_reg = SkillRegistry()
+                    skills_data = await asyncio.to_thread(skill_reg.export_all_packages)
+                except Exception as ex:
+                    Logger.warning(f"[Orchestrator] Erreur lors de l'export des skills: {ex}")
+
+                export_data = {
+                    "exported_at": datetime.utcnow().isoformat() + "Z",
+                    "version": "1.0",
+                    "episodes": [],
+                    "lessons": [],
+                    "skills": skills_data
+                }
+                if hasattr(self, "mission_store") and self.mission_store:
+                    export_data["episodes"] = await asyncio.to_thread(self.mission_store.get_all_episodes, 500)
+                if hasattr(self, "lesson_store") and self.lesson_store:
+                    export_data["lessons"] = await asyncio.to_thread(self.lesson_store.get_all_lessons)
+                elif self.runtime_state.learner and hasattr(self.runtime_state.learner, "lesson_store"):
+                    export_data["lessons"] = await asyncio.to_thread(self.runtime_state.learner.lesson_store.get_all_lessons)
+
+                return ResponsePacket(type="response", status="success", payload=export_data)
             else:
                 return ErrorPacket(type="error", message=_("Unknown action: {}").format(packet.action))
         except Exception as e:
@@ -206,11 +387,20 @@ class Orchestrator(Supervisor, Entity):
         for mid in session_memory.context.mission_history:
             ep = self.mission_store.get_episode(mid)
             if ep:
+                sigs = []
+                if self.mission_profile_store:
+                    profs = self.mission_profile_store.get_profiles_by_mission(mid)
+                    for p in profs:
+                        act = p.get("action", "")
+                        obj = p.get("object", "")
+                        if act and obj:
+                            sigs.append(f"{act} {obj}")
                 session_mission_list.append({
                     "mission_id": mid,
                     "goal": ep.get("goal", ""),
                     "status": ep.get("status", ""),
-                    "finished_at": ep.get("finished_at", "N/A")
+                    "finished_at": ep.get("finished_at", "N/A"),
+                    "signatures": sigs
                 })
 
         # Registre des DataAssets pour la session
@@ -219,7 +409,7 @@ class Orchestrator(Supervisor, Entity):
 
         # Enregistrer les DataProviders (Missions, Faits, Historique, Fichiers, Inputs) pour cette session
         if self.runtime_state.discovery_engine:
-            mission_history_provider = MissionHistoryProvider(session_id, self.mission_store)
+            mission_history_provider = MissionHistoryProvider(session_id, self.mission_store, self.mission_profile_store)
             self.register_data_provider("missions", mission_history_provider)
             Logger.debug(f"[Orchestrator] MissionHistoryProvider enregistré pour la session {session_id}")
 
@@ -352,6 +542,10 @@ class Orchestrator(Supervisor, Entity):
                     "session_mood": session_memory.context.mood,
                 }
                 session_context_vars["session_mission_list"] = session_mission_list
+                if self.mission_profile_store:
+                    session_context_vars["known_signatures"] = self.mission_profile_store.get_known_signatures(limit=15)
+                else:
+                    session_context_vars["known_signatures"] = []
 
                 # --- INVESTIGATION ACTIVE (multi-cibles) ---
                 active_targets = session_memory.context.active_investigation_targets
@@ -546,7 +740,8 @@ class Orchestrator(Supervisor, Entity):
                 mission_store=self.mission_store,
                 runtime_state=self.runtime_state,
                 llm=llm_for_learner,
-                parent=self
+                parent=self,
+                lesson_store=self.lesson_store
             )
             self.runtime_state.learner = self.learner
             Logger.info(f"[Orchestrator] Learner instancié avec {forced_provider}/{forced_model}.")
@@ -907,6 +1102,7 @@ class Orchestrator(Supervisor, Entity):
             runtime_state=self.runtime_state,
             provider_id=forced_provider,
             model_id=forced_model,
+            mission_store=self.mission_store,
         )
 
         # Injecter les assets déclarés par l'Orchestrateur dans le registre du Solver
@@ -1180,6 +1376,10 @@ class Orchestrator(Supervisor, Entity):
         # ============================================================
         if mission_cache:
             try:
+                if self.root_solver:
+                    prof_id = getattr(self.root_solver, "canonical_profile_id", None)
+                    if prof_id is not None and prof_id != -1:
+                        mission_cache.profile_id = prof_id
                 await asyncio.to_thread(
                     self.mission_store.save_episode,
                     mission_cache,
@@ -1281,7 +1481,7 @@ class Orchestrator(Supervisor, Entity):
         """
         # Si child_solver_id n'est pas le solver racine, son goal légitime est plan.goal
         # Si c'est le root_solver, target_goal est refined_goal s'il existe ou plan.goal
-        mission_id = self.current_execution_context.get("mission_id")
+        mission_id = self.current_execution_context.get("mission_id") or getattr(self.runtime_state, "current_mission_id", None) or "default_mission"
         is_root = (child_solver_id == mission_id)
         if is_root:
             target_goal = self.current_execution_context.get("refined_goal") or plan.goal or ""
@@ -1297,6 +1497,8 @@ class Orchestrator(Supervisor, Entity):
             rules_text=self._load_rules_md(),
             language=getattr(self.runtime_state, "language", "fr"),
             request_human_confirmation=self._request_human_confirmation,
+            hitl_policy=getattr(self.runtime_state, "hitl_policy", "balanced"),
+            human_validation_history=self.runtime_state.approved_human_actions_by_mission.get(mission_id, []),
         )
         outcome = await validator.validate(
             plan=plan,
@@ -1387,25 +1589,75 @@ class Orchestrator(Supervisor, Entity):
 
         try:
             raw_result = await future
-            if isinstance(raw_result, str):
+            parsed = raw_result
+            # Décodage JSON robuste (gère aussi le double stringified JSON)
+            if isinstance(parsed, str):
                 try:
-                    parsed = json.loads(raw_result)
-                    if isinstance(parsed, dict):
-                        confirmed = parsed.get("confirmed", parsed.get("result", False))
-                        user_feedback = parsed.get("user_feedback", "")
-                        if not confirmed and user_feedback:
-                            decision.reason = f"{decision.reason} | Feedback utilisateur: {user_feedback}"
-                        return bool(confirmed)
-                    return bool(parsed)
+                    parsed = json.loads(parsed)
+                    if isinstance(parsed, str):
+                        try:
+                            parsed = json.loads(parsed)
+                        except Exception:
+                            pass
                 except Exception:
-                    return raw_result.strip().lower() in ("true", "1", "yes", "oui", "approved")
-            elif isinstance(raw_result, dict):
-                confirmed = raw_result.get("confirmed", raw_result.get("result", False))
-                user_feedback = raw_result.get("user_feedback", "")
-                if not confirmed and user_feedback:
+                    pass
+
+            confirmed = False
+            user_feedback = ""
+            if isinstance(parsed, dict):
+                # Récupère l'approbation depuis "confirmed", "result", ou "approved"
+                if "confirmed" in parsed:
+                    confirmed = bool(parsed["confirmed"])
+                elif "result" in parsed:
+                    res_val = parsed["result"]
+                    if isinstance(res_val, str):
+                        confirmed = res_val.strip().lower() in ("true", "1", "yes", "oui", "approved", "ok")
+                    else:
+                        confirmed = bool(res_val)
+                elif "approved" in parsed:
+                    confirmed = bool(parsed["approved"])
+
+                user_feedback = str(parsed.get("user_feedback", "") or parsed.get("reason", "") or "").strip()
+                if parsed.get("cancelled", False):
+                    confirmed = False
+            elif isinstance(parsed, bool):
+                confirmed = parsed
+            elif isinstance(parsed, (int, float)):
+                confirmed = bool(parsed)
+            elif isinstance(parsed, str):
+                confirmed = parsed.strip().lower() in ("true", "1", "yes", "oui", "approved", "ok")
+
+            mission_id = self.current_execution_context.get("mission_id") or getattr(self.runtime_state, "current_mission_id", None) or "default_mission"
+            history_list = self.runtime_state.approved_human_actions_by_mission.setdefault(mission_id, [])
+
+            if confirmed:
+                history_entry = {
+                    "goal": plan.goal,
+                    "approved": True,
+                    "risk_level": risk_val,
+                    "irreversibility_flags": list(decision.irreversibility_flags),
+                    "steps": [s.description for s in plan.steps if s.id in decision.irreversibility_flags or getattr(s, "is_irreversible", False)],
+                    "tools": [getattr(s, "tool_name", "") for s in plan.steps if getattr(s, "tool_name", "")],
+                    "timestamp": time.time()
+                }
+                history_list.append(history_entry)
+                Logger.info(f"[Orchestrator] 🧑‍💻 Décision humaine reçue pour call_id {call_id}: APPROUVÉ (actions sensibles enregistrées pour la mission {mission_id})")
+                return True
+            else:
+                history_entry = {
+                    "goal": plan.goal,
+                    "approved": False,
+                    "risk_level": risk_val,
+                    "user_feedback": user_feedback,
+                    "steps": [s.description for s in plan.steps],
+                    "timestamp": time.time()
+                }
+                history_list.append(history_entry)
+                if user_feedback:
                     decision.reason = f"{decision.reason} | Feedback utilisateur: {user_feedback}"
-                return bool(confirmed)
-            return bool(raw_result)
+                Logger.info(f"[Orchestrator] 🧑‍💻 Décision humaine reçue pour call_id {call_id}: REFUSÉ (feedback: '{user_feedback}')")
+                return False
+
         except asyncio.CancelledError:
             Logger.warning(f"[Orchestrator] Validation humaine annulée pour call_id {call_id}")
             return False
@@ -1593,7 +1845,8 @@ class Orchestrator(Supervisor, Entity):
         self.runtime_state.system_prompt = payload.get("system_prompt", "")
         self.runtime_state.language = payload.get("language", "en")
         self.runtime_state.environment = payload.get("environment", "simulated")
-        Logger.info(f"[Orchestrator] Environnement = {self.runtime_state.environment}")
+        self.runtime_state.hitl_policy = payload.get("hitl_policy", "balanced")
+        Logger.info(f"[Orchestrator] Environnement = {self.runtime_state.environment}, HITL policy = {self.runtime_state.hitl_policy}")
         self.runtime_state.presentator_detail_level = payload.get("presentator_detail_level",
                                                                   "brief")
 
@@ -1613,8 +1866,11 @@ class Orchestrator(Supervisor, Entity):
         )
         self.runtime_state.tools_manager = tools_manager
 
-        # Charger les outils externes depuis le payload
-        if raw_tools:
+        # Charger les outils externes ou le HostManifest depuis le payload
+        host_manifest_payload = payload.get("host_manifest")
+        if host_manifest_payload:
+            self.runtime_state.tools_manager.register_host_manifest(host_manifest_payload)
+        elif raw_tools:
             self.runtime_state.tools_manager.load_tools_from_payload(raw_tools)
             Logger.info(f"[Orchestrator] {len(raw_tools)} outils externes chargés.")
 
@@ -1669,24 +1925,6 @@ class Orchestrator(Supervisor, Entity):
             self.runtime_state.embedding_manager.register_provider(default_provider)
             self.runtime_state.embedding_manager.set_active_provider("sentence-transformers/all-MiniLM-L6-v2")
 
-        def normalize_prov(name: str) -> str:
-            if not name:
-                return ""
-            n = name.lower().strip()
-            if "gemini" in n or "google" in n:
-                return "gemini"
-            if "groq" in n:
-                return "groq"
-            if "openai" in n:
-                return "openai"
-            if "openrouter" in n:
-                return "openrouter"
-            if "claude" in n or "anthropic" in n:
-                return "claude"
-            if "deepseek" in n:
-                return "deepseek"
-            return n
-
         api_keys = payload.get("api_keys", {})
         runtime_config = payload.get("runtime_configuration", {})
         routing_policy = runtime_config.get("routing_policy", {})
@@ -1699,30 +1937,53 @@ class Orchestrator(Supervisor, Entity):
 
         from providers.provider_manager import ModelMetadata
 
+        def _match_provider_config(cfg_item: dict, target_canonical: str) -> bool:
+            p_key = cfg_item.get("provider_key", "").lower().strip()
+            p_name = cfg_item.get("provider_name", "").lower().strip()
+            t = target_canonical.lower().strip()
+            if p_key == t or p_name == t:
+                return True
+            if t in p_key or t in p_name:
+                return True
+            if (t == "gemini" and "gemini" in p_name) or \
+               (t == "openai" and ("openai" in p_name or "gpt" in p_name)) or \
+               (t == "groq" and "groq" in p_name) or \
+               (t == "claude" and ("claude" in p_name or "anthropic" in p_name)) or \
+               (t == "deepseek" and "deepseek" in p_name) or \
+               (t == "openrouter" and "openrouter" in p_name):
+                return True
+            return False
+
         registry_providers = models_registry.get("providers", {})
         for provider_key, provider_data in registry_providers.items():
-            normalized_key = normalize_prov(provider_key)
-            api_key = api_keys.get(normalized_key, "")
+            canonical_key = provider_key.lower().strip() if provider_key else ""
+            api_key = api_keys.get(canonical_key, "")
+            provider_keys_pool = []
             
-            # Fallback extraction de la clé si api_keys[normalized_key] n'est pas rempli directement
-            if not api_key:
-                for cfg in providers_config:
-                    cfg_norm = normalize_prov(cfg.get("provider_name", ""))
-                    if cfg_norm == normalized_key:
-                        api_key = cfg.get("active_api_key", "")
-                        if not api_key:
-                            keys_list = cfg.get("keys", [])
-                            if keys_list and isinstance(keys_list, list):
-                                api_key = keys_list[0].get("key_value", keys_list[0].get("key", ""))
-                        if api_key:
-                            break
+            # Recherche de la configuration correspondante dans providers_config
+            matched_cfg = None
+            for cfg in providers_config:
+                if _match_provider_config(cfg, canonical_key):
+                    matched_cfg = cfg
+                    break
 
-            if not api_key:
+            if matched_cfg:
+                keys_list = matched_cfg.get("keys", [])
+                if keys_list and isinstance(keys_list, list):
+                    provider_keys_pool = keys_list
+                if not api_key:
+                    api_key = matched_cfg.get("active_api_key", "")
+                    if not api_key and keys_list:
+                        api_key = keys_list[0].get("key_value", keys_list[0].get("key", ""))
+
+            if not api_key and not provider_keys_pool:
                 continue
+
+            init_keys = provider_keys_pool if provider_keys_pool else api_key
 
             for model in provider_data.get("models", []):
                 enriched_model = dict(model)
-                enriched_model["provider_id"] = normalized_key
+                enriched_model["provider_id"] = canonical_key
                 if "display_name" not in enriched_model:
                     enriched_model["display_name"] = enriched_model["id"]
                 validated_models.append(enriched_model)
@@ -1744,40 +2005,34 @@ class Orchestrator(Supervisor, Entity):
                 self.provider_manager.register_model_metadata(meta)
 
             p = None
-            if normalized_key == Providers.GEMINI:
-                p = GeminiProvider(api_key, "default", self.runtime_state.system_prompt)
+            if canonical_key == Providers.GEMINI:
+                p = GeminiProvider(init_keys, "default", self.runtime_state.system_prompt)
                 p.provider_id = Providers.GEMINI
                 self.provider_manager.register_provider(p)
-            elif normalized_key == Providers.GROQ:
-                p = GroqProvider(api_key, "default", self.runtime_state.system_prompt)
+            elif canonical_key == Providers.GROQ:
+                p = GroqProvider(init_keys, "default", self.runtime_state.system_prompt)
                 p.provider_id = Providers.GROQ
                 self.provider_manager.register_provider(p)
-            elif normalized_key == Providers.OPENAI:
-                p = OpenAIProvider(api_key, "default", self.runtime_state.system_prompt)
+            elif canonical_key == Providers.OPENAI:
+                p = OpenAIProvider(init_keys, "default", self.runtime_state.system_prompt)
                 p.provider_id = Providers.OPENAI
                 self.provider_manager.register_provider(p)
-            elif normalized_key == Providers.OPENROUTER:
-                p = OpenRouterProvider(api_key, "default", self.runtime_state.system_prompt)
+            elif canonical_key == Providers.OPENROUTER:
+                p = OpenRouterProvider(init_keys, "default", self.runtime_state.system_prompt)
                 p.provider_id = Providers.OPENROUTER
                 self.provider_manager.register_provider(p)
-            elif normalized_key == Providers.CLAUDE:
-                p = AnthropicProvider(api_key, "default", self.runtime_state.system_prompt)
+            elif canonical_key == Providers.CLAUDE:
+                p = AnthropicProvider(init_keys, "default", self.runtime_state.system_prompt)
                 p.provider_id = Providers.CLAUDE
                 self.provider_manager.register_provider(p)
-            elif normalized_key == Providers.DEEPSEEK:
-                p = DeepSeekProvider(api_key, "default", self.runtime_state.system_prompt)
+            elif canonical_key == Providers.DEEPSEEK:
+                p = DeepSeekProvider(init_keys, "default", self.runtime_state.system_prompt)
                 p.provider_id = Providers.DEEPSEEK
                 self.provider_manager.register_provider(p)
 
-            # --- Injection du pool de clés API (Multi-keys Resilience) ---
-            if p is not None:
-                for cfg in providers_config:
-                    cfg_norm = normalize_prov(cfg.get("provider_name", ""))
-                    if cfg_norm == normalized_key:
-                        keys_arr = cfg.get("keys", [])
-                        if keys_arr:
-                            p.set_api_keys_pool(keys_arr)
-                        break
+            # --- Injection explicite du pool de clés API (Multi-keys Resilience) ---
+            if p is not None and provider_keys_pool:
+                p.set_api_keys_pool(provider_keys_pool)
 
         await self.provider_manager.initialize()
         self.runtime_state.is_configured = True

@@ -6,7 +6,7 @@
 # =====================================================
 
 from typing import List, Optional, Dict, Any, ForwardRef
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from enum import Enum
 import time
 import uuid
@@ -35,6 +35,8 @@ class ExecutionNode(BaseModel):
     Peut représenter une étape atomique (tool_call, direct_answer)
     ou une sous-tâche abstraite (abstract_task) qui aura son propre ExecutionTree.
     """
+    model_config = ConfigDict(extra='allow')
+
     # Identifiants
     node_id: str = Field(
         default_factory=lambda: str(uuid.uuid4()),
@@ -65,6 +67,10 @@ class ExecutionNode(BaseModel):
         None,
         description=_("Statut brut ('true'/'false'/etc.) renvoyé par l'outil C++.")
     )
+
+    # Métadonnées de diagnostic skill (failure_bundle & breakout_report)
+    failure_bundle: Optional[Any] = Field(None, description=_("Bundle d'échec de skill le cas échéant"))
+    breakout_report: Optional[Any] = Field(None, description=_("Rapport d'éruption de skill le cas échéant"))
 
     # Statut et erreur
     status: str = Field(..., description=_("Statut final de l'étape (success, failed, skipped, pending)"))
@@ -98,6 +104,8 @@ class PlanAttempt(BaseModel):
     Une tentative d'exécution d'un plan pour un Solver donné.
     Correspond à une itération de la boucle `for current_try in range(max_tries)`.
     """
+    model_config = ConfigDict(extra='allow')
+
     attempt_number: int = Field(..., description=_("Numéro de la tentative (1-indexé)"))
     started_at: Optional[float] = Field(None, description=_("Début de la tentative"))
     ended_at: Optional[float] = Field(None, description=_("Fin de la tentative"))
@@ -167,6 +175,8 @@ class ExecutionTree(BaseModel):
     Arbre d'exécution pour un Solver donné.
     Contient toutes les tentatives (PlanAttempt) de ce Solver.
     """
+    model_config = ConfigDict(extra='allow')
+
     solver_id: str = Field(..., description=_("ID du Solver"))
     goal: Optional[str] = Field(None, description=_("Objectif du solver"))
 

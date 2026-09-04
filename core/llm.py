@@ -309,6 +309,9 @@ class Llm:
             full_prompt = f"{context_str}\n\n{prompt}" if context_str else prompt
 
             provider.model_name = self.model_id
+            if self.runtime_state:
+                provider.runtime_state = self.runtime_state
+                provider.call_epoch = getattr(self.runtime_state, "generation_epoch", 0)
             self._emit_active_model(is_fallback=(len(excluded_models) > 0))
 
             start_time = time.monotonic()
@@ -370,6 +373,9 @@ class Llm:
             ephemeral_context.append({"role": "user", "content": prompt})
 
             provider.model_name = self.model_id
+            if self.runtime_state:
+                provider.runtime_state = self.runtime_state
+                provider.call_epoch = getattr(self.runtime_state, "generation_epoch", 0)
 
             try:
                 # Note: We must consume the generator completely or return it
@@ -669,6 +675,9 @@ class Llm:
         ephemeral_context.append({"role": "user", "content": prompt})
 
         provider.model_name = self.model_id
+        if self.runtime_state:
+            provider.runtime_state = self.runtime_state
+            provider.call_epoch = getattr(self.runtime_state, "generation_epoch", 0)
 
         start_time = time.monotonic()
         try:
@@ -728,6 +737,9 @@ class Llm:
                 ephemeral_context.append({"role": "user", "content": prompt})
 
                 provider.model_name = self.model_id
+                if self.runtime_state:
+                    provider.runtime_state = self.runtime_state
+                    provider.call_epoch = getattr(self.runtime_state, "generation_epoch", 0)
                 self._emit_active_model(is_fallback=(len(excluded_models) > 0))
 
                 start_time = time.monotonic()

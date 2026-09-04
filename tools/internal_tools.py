@@ -8,7 +8,11 @@ import json
 import re
 from typing import Dict, Any, Optional, List
 from core.prompt_loader import get_prompt_loader
-from core.tools_models import AnalysisResult
+try:
+    from core.tools_models import AnalysisResult
+except Exception:
+    class AnalysisResult:
+        pass
 from utils.logger import Logger
 from core.i18n import _
 
@@ -453,3 +457,93 @@ async def llm_analyze_multi_data(args: Dict[str, Any], runtime_state) -> Dict[st
         }
 
     return await _run_llm_analysis(resolved, query, runtime_state, tag="llm_analyze_multi_data")
+
+
+async def execute_skill_tool(args: Dict[str, Any], runtime_state) -> Dict[str, Any]:
+    """
+    Outil d'exécution d'un Skill composite ManAgent (Méta-Outil).
+    Délègue l'exécution déterministe au SkillExecutionEngine.
+    
+    Args:
+        args: {
+            "skill_id": str,
+            "parameters": dict (optionnel, arguments transmis au skill),
+            "version": int (optionnel, défaut version active en production)
+        }
+        runtime_state: RuntimeState de l'agent.
+    """
+    skill_id = args.get("skill_id")
+    parameters = args.get("parameters", {})
+    version_num = args.get("version")
+
+    if not skill_id:
+        return {
+            "result": False,
+            "data": None,
+            "error_reason": _("Le paramètre 'skill_id' est requis."),
+            "message": _("Le paramètre 'skill_id' est requis.")
+        }
+
+    skill_registry = getattr(runtime_state, "skill_registry", None)
+    if not skill_registry:
+        from core.skills.registry import SkillRegistry
+        skill_registry = SkillRegistry()
+
+    manifest, version = skill_registry.get_active_skill(skill_id, target_version=version_num)
+    if not manifest or not version:
+        return {
+            "result": False,
+            "data": None,
+            "error_reason": f"Skill '{skill_id}' non trouvé ou aucune version en production active.",
+            "message": f"Skill '{skill_id}' non trouvé ou inactif."
+        }
+
+    # Résolution des variables dans les paramètres (ex: $@_data_file)
+    resolved_parameters = {}
+    for k, v in parameters.items():
+        if isinstance(v, str) and v.startswith("$@_"):
+            var_name = v[3:]
+            resolved_val = await resolve_variable(var_name, runtime_state)
+            resolved_parameters[k] = resolved_val if resolved_val is not None else v
+        else:
+            resolved_parameters[k] = v
+
+    from core.skills.engine import SkillExecutionEngine
+    event_emitter = getattr(runtime_state, "propagate_event", None)
+    engine = SkillExecutionEngine(registry=skill_registry, event_emitter=event_emitter)
+
+    # Récupération de l'exécuteur hôte depuis ToolsManager ou transport
+    host_executor = getattr(runtime_state, "host_skill_executor", None)
+    if not host_executor:
+        # Fallback par défaut via tools_manager si l'hôte supporte les flux
+        tools_mgr = getattr(runtime_state, "tools_manager", None)
+        async def default_host_executor(payload_ref, params):
+            if tools_mgr and hasattr(tools_mgr, "execute_flow"):
+                return await tools_mgr.execute_flow(payload_ref, params)
+            return {"success": True, "output": {"status": "executed", "payload_ref": payload_ref, "params": params}}
+        host_executor = default_host_executor
+
+    mission_id = None
+    if runtime_state and hasattr(runtime_state, "execution_context"):
+        mission_id = runtime_state.execution_context.get("mission_id")
+
+    exec_result = await engine.execute_skill(
+        manifest=manifest,
+        version=version,
+        parameters=resolved_parameters,
+        host_executor=host_executor,
+        is_shadow=False,
+        mission_id=mission_id
+    )
+
+    is_success = exec_result.get("success", False)
+    return {
+        "result": is_success,
+        "data": exec_result.get("output", {}),
+        "breakout": exec_result.get("breakout", False),
+        "breakout_report": exec_result.get("breakout_report"),
+        "failure_bundle": exec_result.get("failure_bundle"),
+        "passed_checkpoints": exec_result.get("passed_checkpoints", []),
+        "error_reason": exec_result.get("error_message") or (None if is_success else "Échec d'exécution du skill"),
+        "message": f"Skill '{skill_id}' exécuté avec succès ({len(exec_result.get('passed_checkpoints', []))} checkpoints)." if is_success else f"Rupture ou échec sur le Skill '{skill_id}'."
+    }

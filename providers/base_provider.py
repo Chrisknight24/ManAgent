@@ -53,11 +53,42 @@ class BaseProvider(ABC):
         self.provider_name: Optional[str] = None
         self.provider_id: Optional[str] = None
         self.model_name: Optional[str] = None
+        self.runtime_state: Any = None
+        self.call_epoch: Optional[int] = None
 
         # Pool de clés ordonnées
         self.api_keys_pool: List[Dict[str, Any]] = []
         self.active_key_index: int = 0
         self._key_cooldowns: Dict[str, float] = {}  # key_str -> timestamp expiration cooldown
+
+    def check_cancelled(self):
+        """
+        Vérifie de façon générique si la requête a été annulée ou si le tour de génération a changé (epoch).
+        Lève asyncio.CancelledError si annulé pour stopper immédiatement la rotation de clés / failover.
+        """
+        if not hasattr(self, "runtime_state") or not self.runtime_state:
+            return
+
+        is_cancelled = (
+            getattr(self.runtime_state, "cancel_requested", False)
+            or getattr(self.runtime_state, "cancel_requested_for_turn", False)
+        )
+
+        current_epoch = getattr(self.runtime_state, "generation_epoch", None)
+        call_epoch = getattr(self, "call_epoch", None)
+        epoch_mismatch = (
+            call_epoch is not None
+            and current_epoch is not None
+            and current_epoch != call_epoch
+        )
+
+        if is_cancelled or epoch_mismatch:
+            Logger.info(
+                f"[{getattr(self, 'provider_id', self.provider_name or 'Provider')}] "
+                f"Interruption détectée (cancel={is_cancelled}, epoch_mismatch={epoch_mismatch}) - arrêt immédiat du failover."
+            )
+            import asyncio
+            raise asyncio.CancelledError("Exécution annulée par l'utilisateur ou epoch périmé.")
 
     def set_api_keys_pool(self, keys: List[Any]):
         """
@@ -133,10 +164,48 @@ class BaseProvider(ABC):
         return None
 
     def mark_key_in_cooldown(self, key_str: str, cooldown_seconds: float = 60.0):
-        """Met une clé en quarantaine/cooldown après une erreur 429 ou 503."""
-        if key_str:
-            self._key_cooldowns[key_str] = time.time() + cooldown_seconds
-            Logger.warning(f"[{getattr(self, 'provider_id', self.provider_name)}] Clé API mise en cooldown pour {cooldown_seconds:.0f}s suite à saturation.")
+        """Met une clé en quarantaine/cooldown après une erreur (429, 401, 503) et la déplace en fin de pool."""
+        if not key_str:
+            return
+
+        self._key_cooldowns[key_str] = time.time() + cooldown_seconds
+
+        # Rétrograder la clé défaillante en dernière position du pool
+        for idx, k_info in enumerate(self.api_keys_pool):
+            if k_info.get("key") == key_str:
+                item = self.api_keys_pool.pop(idx)
+                self.api_keys_pool.append(item)
+                break
+
+        masked_key = key_str[:8] if len(key_str) >= 8 else key_str
+        Logger.warning(
+            f"[{getattr(self, 'provider_id', self.provider_name)}] "
+            f"Clé API [{masked_key}...] mise en cooldown pour {cooldown_seconds:.0f}s et rétrogradée en fin de pool."
+        )
+
+    def promote_key(self, key_str: str):
+        """
+        Promeut une clé fonctionnelle en première position du pool (index 0)
+        afin que tous les appels suivants réutilisent directement la dernière clé ayant réussi.
+        """
+        if not key_str or not self.api_keys_pool:
+            return
+
+        if self.api_keys_pool[0].get("key") == key_str:
+            self.active_key_index = 0
+            return
+
+        for idx, k_info in enumerate(self.api_keys_pool):
+            if k_info.get("key") == key_str:
+                item = self.api_keys_pool.pop(idx)
+                self.api_keys_pool.insert(0, item)
+                self.active_key_index = 0
+                masked_key = key_str[:8] if len(key_str) >= 8 else key_str
+                Logger.info(
+                    f"[{getattr(self, 'provider_id', self.provider_name)}] "
+                    f"Clé API [{masked_key}...] promue en tête de pool (dernière clé fonctionnelle)."
+                )
+                break
 
     def has_available_keys(self) -> bool:
         """Indique si au moins une clé active n'est pas en cooldown."""

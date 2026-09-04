@@ -208,7 +208,9 @@ class Executor:
                             final_context=final_context,
                             error_reason=_("Échec à l'étape {} : {}").format(step.id, step.result_context),
                             failure_class=FailureClass.EXECUTION_FAILURE,
-                            target_entity="Executor"
+                            target_entity="Executor",
+                            failure_bundle=getattr(node, "failure_bundle", None),
+                            breakout_report=getattr(node, "breakout_report", None)
                         )
 
                     convergence = await self._check_convergence(step, execution_output, supplemental_data, node=node)
@@ -284,7 +286,9 @@ class Executor:
                             final_context=final_context,
                             error_reason=_("Divergence détectée à l'étape {} : {}").format(step.id, convergence.reason),
                             failure_class=FailureClass.CONVERGENCE_FAILURE,
-                            target_entity="Executor"
+                            target_entity="Executor",
+                            failure_bundle=getattr(node, "failure_bundle", None),
+                            breakout_report=getattr(node, "breakout_report", None)
                         )
 
             final_user_text = "\n\n".join([r for r in user_responses if r])
@@ -550,7 +554,8 @@ class Executor:
             llm=self.solver.llm,
             depth=self.solver.depth + 1,
             context=dynamic_context,
-            parent_step_id=step.id
+            parent_step_id=step.id,
+            mission_store=getattr(self.solver, "mission_store", None)
         )
 
         child_result = await child_solver.run()
@@ -821,6 +826,10 @@ class Executor:
             if node:
                 node.raw_success_flag = is_success_flag
                 node.raw_tool_success = (is_success_flag == "true")
+                if "failure_bundle" in parsed_result:
+                    node.failure_bundle = parsed_result.get("failure_bundle")
+                if "breakout_report" in parsed_result:
+                    node.breakout_report = parsed_result.get("breakout_report")
 
             if is_success_flag == "true":
                 if actual_data is not None:

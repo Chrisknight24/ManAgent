@@ -259,3 +259,22 @@ class CacheManager:
         except Exception as e:
             Logger.error(f"[CacheManager] Erreur cleanup : {e}")
             return 0
+
+    async def clear_all(self) -> int:
+        """Purger l'intégralité du cache."""
+        def _clear():
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM cache_entries")
+                count = cursor.rowcount
+                conn.commit()
+                return count
+
+        try:
+            deleted = await asyncio.to_thread(_clear)
+            Logger.info(f"[CacheManager] Cache entièrement vidé ({deleted} entrées supprimées).")
+            return deleted
+        except Exception as e:
+            Logger.error(f"[CacheManager] Erreur purge complète : {e}")
+            return 0
+

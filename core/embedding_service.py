@@ -39,7 +39,10 @@ class EmbeddingService:
 
         Logger.info(f"[EmbeddingService] Chargement du modèle {self.model_name} (asynchrone)...")
         try:
-            self._model = _SentenceTransformer(self.model_name)
+            try:
+                self._model = _SentenceTransformer(self.model_name, local_files_only=True)
+            except Exception:
+                self._model = _SentenceTransformer(self.model_name)
             self._loaded = True
             try:
                 dim = self._model.get_embedding_dimension()
@@ -76,28 +79,28 @@ class EmbeddingService:
         if not self._loaded:
             raise RuntimeError("Le modèle n'a pas pu être chargé.")
 
+    def _encode_no_grad(self, texts: List[str]):
+        try:
+            import torch
+            with torch.no_grad():
+                return self._model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
+        except Exception:
+            return self._model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
+
     async def embed(self, text: str) -> List[float]:
         if not text or not text.strip():
             Logger.warning("[EmbeddingService] Texte vide reçu, retour d'un vecteur nul.")
             return [0.0] * 384
 
         await self._ensure_loaded()
-        embedding = self._model.encode(
-            [text],
-            convert_to_numpy=True,
-            normalize_embeddings=True
-        )[0]
+        embedding = self._encode_no_grad([text])[0]
         return embedding.tolist()
 
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
         if not texts:
             return []
         await self._ensure_loaded()
-        embeddings = self._model.encode(
-            texts,
-            convert_to_numpy=True,
-            normalize_embeddings=True
-        )
+        embeddings = self._encode_no_grad(texts)
         return [emb.tolist() for emb in embeddings]
 
     @property

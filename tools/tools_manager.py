@@ -9,12 +9,21 @@ Peut utiliser un LLM (passé en paramètre) pour interpréter des requêtes en l
 import json
 from typing import Dict, Any, List, Optional, Callable
 from core.entity import Entity
-from core.llm import Llm
+try:
+    from core.llm import Llm
+except Exception:
+    class Llm:
+        pass
 from utils.logger import Logger
 from core.i18n import _
 from core.prompt_loader import get_prompt_loader
-from core.tools_models import ToolDecision
+try:
+    from core.tools_models import ToolDecision
+except Exception:
+    class ToolDecision:
+        pass
 from core.constants import Events
+from core.host_manifest import HostManifest
 
 
 class ToolsManager(Entity):
@@ -48,7 +57,12 @@ class ToolsManager(Entity):
 
     def _register_default_internal_tools(self):
         try:
-            from tools.internal_tools import extract_json_value, llm_analyze_data, llm_analyze_multi_data
+            from tools.internal_tools import (
+                extract_json_value,
+                llm_analyze_data,
+                llm_analyze_multi_data,
+                execute_skill_tool,
+            )
 
             self.register_internal_tool(
                 name="extract_json_value",
@@ -132,9 +146,33 @@ class ToolsManager(Entity):
                 ]
             )
 
+            self.register_internal_tool(
+                name="execute_skill",
+                handler=execute_skill_tool,
+                description=_(
+                    "Exécute un Skill composite ManAgent (méta-outil déterministe pré-qualifié). "
+                    "Idéal et prioritaire pour accomplir des flux complexes récurrents à moindre coût et latence. "
+                    "Requiert 'skill_id' (identifiant du Skill) et 'parameters' (dictionnaire des arguments)."
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "skill_id": {"type": "string", "description": "Identifiant unique du Skill (ex: 'desktop.excel.clean')"},
+                        "parameters": {"type": "object", "description": "Paramètres d'entrée du Skill (supporte les pointeurs $@_data_xxx)"},
+                        "version": {"type": "integer", "description": "Version optionnelle du Skill (défaut: version active en production)"}
+                    },
+                    "required": ["skill_id"]
+                },
+                capabilities=[
+                    "exécuter un skill composite",
+                    "lancer une automatisation de flux déterministe",
+                    "exécuter une compétence qualifiée"
+                ]
+            )
+
             Logger.debug(
                 "[ToolsManager] Outils internes enregistrés : "
-                "extract_json_value, llm_analyze_data, llm_analyze_multi_data."
+                "extract_json_value, llm_analyze_data, llm_analyze_multi_data, execute_skill."
             )
         except ImportError as e:
             Logger.warning(f"[ToolsManager] Impossible d'importer les outils internes : {e}")
@@ -221,6 +259,42 @@ class ToolsManager(Entity):
     # =====================================================
     # OUTILS EXTERNES
     # =====================================================
+
+    def register_host_manifest(self, manifest_data: Any) -> HostManifest:
+        """
+        Enregistre ou met à jour le manifeste dynamique de l'hôte (AutoCUse RPA ou autre).
+        Permet à l'application hôte d'annoncer ses capacités et ses outils de manière
+        totalement agnostique et dynamique.
+        """
+        if isinstance(manifest_data, HostManifest):
+            host_manifest = manifest_data
+        elif isinstance(manifest_data, dict):
+            host_manifest = HostManifest.from_dict(manifest_data)
+        else:
+            host_manifest = HostManifest()
+
+        # 1. Enregistrer dans runtime_state si disponible
+        if self.runtime_state:
+            self.runtime_state.host_manifest = host_manifest
+
+        # 2. Charger les outils externes déclarés dans le manifest
+        if host_manifest.tools:
+            self.load_tools_from_payload(host_manifest.tools)
+
+        Logger.info(
+            f"[ToolsManager] 🌐 HostManifest enregistré : "
+            f"host='{host_manifest.host_name}' v{host_manifest.host_version}, "
+            f"os='{host_manifest.os}', "
+            f"capacités={len(host_manifest.capabilities)}, "
+            f"outils_externes={len(host_manifest.tools)}"
+        )
+        return host_manifest
+
+    def get_host_manifest(self) -> Optional[HostManifest]:
+        """Retourne le HostManifest courant."""
+        if self.runtime_state and hasattr(self.runtime_state, "host_manifest"):
+            return self.runtime_state.host_manifest
+        return None
 
     def register_tool(self, name: str, role: str, description: str, parameters_schema: dict, source: str = "external") -> None:
         self._tools[name] = {

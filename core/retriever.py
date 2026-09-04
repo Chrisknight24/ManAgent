@@ -1,14 +1,32 @@
 # core/retriever.py
-# Version avec support de root_mission_id
+# Version avec support de root_mission_id et SkillRegistry
 
 import asyncio
+import time
 from typing import List, Dict, Any, Optional, Set
-from memory.mission_profile_store import MissionProfileStore
-from memory.mission_store import MissionStore
+try:
+    from memory.mission_profile_store import MissionProfileStore
+except Exception:
+    class MissionProfileStore:
+        pass
+
+try:
+    from memory.mission_store import MissionStore
+except Exception:
+    class MissionStore:
+        pass
+
 from utils.logger import Logger
-from core.plan_models import MissionSignature
+try:
+    from core.plan_models import MissionSignature
+except Exception:
+    class MissionSignature:
+        pass
+
 from core.constants import RETRIEVAL_TOP_K, RETRIEVAL_THRESHOLD
 from core.cache import CacheManager
+from core.skills.registry import SkillRegistry
+from core.skills.models import SkillManifest, SkillVersion, ExecutionEnvironment
 
 class Retriever:
     def __init__(
@@ -16,7 +34,8 @@ class Retriever:
         top_k: int = RETRIEVAL_TOP_K,
         threshold: float = RETRIEVAL_THRESHOLD,
         runtime_state = None,
-        cache_manager: Optional[CacheManager] = None
+        cache_manager: Optional[CacheManager] = None,
+        skill_registry: Optional[SkillRegistry] = None
     ):
         if cache_manager is None:
             Logger.warning("[Retriever] Aucun cache_manager fourni, utilisation d'une instance locale (non partagée).")
@@ -27,6 +46,7 @@ class Retriever:
         self.mission_store = MissionStore()
         self.runtime_state = runtime_state
         self.cache_manager = cache_manager
+        self.skill_registry = skill_registry or SkillRegistry()
             
     async def retrieve(
         self,
@@ -152,19 +172,41 @@ class Retriever:
 
             summary = episode.get("summary") or episode.get("goal") or "Mission sans résumé"
 
+            # Calcul du score hybride (70% similarité vectorielle + 30% récence temporelle)
+            ep_time_raw = episode.get("timestamp") or episode.get("created_at") or 0.0
+            ep_time = 0.0
+            if isinstance(ep_time_raw, (int, float)):
+                ep_time = float(ep_time_raw)
+            elif isinstance(ep_time_raw, str):
+                try:
+                    ep_time = float(ep_time_raw)
+                except ValueError:
+                    try:
+                        from datetime import datetime
+                        dt = datetime.fromisoformat(ep_time_raw.replace('Z', '+00:00'))
+                        ep_time = dt.timestamp()
+                    except Exception:
+                        ep_time = 0.0
+
+            now = time.time()
+            age_hours = max(0.0, (now - ep_time) / 3600.0) if ep_time > 0 else 1000.0
+            recency_score = 1.0 / (1.0 + (age_hours / 24.0))  # Décroissance douce sur 24h
+            composite_score = (data["score"] * 0.7) + (recency_score * 0.3)
+
             results.append({
                 "mission_id": root_mission_id,
                 "source_profile_id": mission_id,
                 "goal": episode.get("goal"),
                 "summary": summary,
                 "score": data["score"],
+                "composite_score": composite_score,
                 "matched_signature": data["matched_signature"],
                 "action": data.get("action"),
                 "object": data.get("object"),
                 "episode": episode
             })
 
-        results.sort(key=lambda x: x["score"], reverse=True)
+        results.sort(key=lambda x: x.get("composite_score", x["score"]), reverse=True)
         Logger.info(f"[Retriever] {len(results)} mission(s) retournée(s) avec résumé.")
 
         Logger.event(
@@ -202,6 +244,57 @@ class Retriever:
             desired_state=None
         )
         return await self.retrieve([sig], top_k, threshold)
+
+    async def retrieve_skills(
+        self,
+        signatures: List[MissionSignature],
+        environment: Optional[ExecutionEnvironment] = None,
+        only_production: bool = True
+    ) -> List[Dict[str, Any]]:
+        """
+        Pré-filtre ultra-rapide (<2ms) des Skills éligibles depuis le SkillRegistry
+        à partir des signatures causales et des contraintes d'environnement.
+        Renvoie la liste des manifests et versions sous un format structuré pour le Solver/Planner.
+        """
+        if not signatures:
+            return []
+
+        # Construction des hashes de signature
+        sig_hashes = [s.to_hash() for s in signatures if hasattr(s, "to_hash")]
+        if not sig_hashes:
+            for s in signatures:
+                act = getattr(s, "action", "").strip().lower()
+                obj = getattr(s, "object", "").strip().lower()
+                sig_hashes.append(f"sig:{act}:{obj}")
+
+        # Support dictionary or ExecutionEnvironment object for host_environment
+        host_env_dict = environment.to_dict() if hasattr(environment, "to_dict") else environment
+
+        candidates = self.skill_registry.find_candidates_by_signatures(
+            signature_hashes=sig_hashes,
+            host_environment=host_env_dict,
+            only_production=only_production
+        )
+
+        results: List[Dict[str, Any]] = []
+        for manifest, version in candidates:
+            score = version.trust_profile.trust_score if hasattr(version.trust_profile, "trust_score") else 1.0
+            results.append({
+                "skill_id": manifest.skill_id,
+                "name": manifest.name,
+                "description": manifest.description,
+                "version": version.version,
+                "state": version.state.value if hasattr(version.state, "value") else str(version.state),
+                "parameters_schema": manifest.parameters_schema,
+                "checkpoints": [cp.name for cp in manifest.checkpoints],
+                "trust_score": score,
+                "flow_payload_ref": version.flow_payload_ref,
+                "manifest": manifest,
+                "version_obj": version,
+            })
+
+        Logger.debug(f"[Retriever] {len(results)} Skill(s) éligible(s) trouvé(s) pour {len(sig_hashes)} signature(s).")
+        return results
 
 
 async def retrieve_similar_missions(

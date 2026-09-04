@@ -42,6 +42,7 @@ class MissionStore:
                         presentator_result_json TEXT NULL,
                         summary TEXT NULL,
                         schema_version INTEGER DEFAULT 1,
+                        profile_id INTEGER NULL,
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         finished_at DATETIME,
                         analyzed_at DATETIME NULL
@@ -51,12 +52,14 @@ class MissionStore:
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_episodes_analyzed ON episodes(analyzed_at)')
 
                 # --- MIGRATIONS SILENCIEUSES ---
-                for col in ['analyzed_at', 'presentator_result_json', 'summary']:
+                for col in ['analyzed_at', 'presentator_result_json', 'summary', 'profile_id']:
                     try:
                         cursor.execute(f'ALTER TABLE episodes ADD COLUMN {col} TEXT NULL')
                         Logger.info(f"[MissionStore] Migration: colonne '{col}' ajoutée.")
                     except sqlite3.OperationalError:
                         pass  # colonne existe déjà
+
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_episodes_profile ON episodes(profile_id)')
 
                 conn.commit()
                 Logger.info("[MissionStore] Base et table 'episodes' prêtes (avec colonne summary).")
@@ -78,6 +81,7 @@ class MissionStore:
             )
             finished_at_iso = mission_cache.finished_at.isoformat() if mission_cache.finished_at else None
             summary = mission_cache.summary or ""
+            profile_id = getattr(mission_cache, "profile_id", None)
 
             with self._get_connection() as conn:
                 cursor = conn.cursor()
@@ -85,17 +89,55 @@ class MissionStore:
                     INSERT OR REPLACE INTO episodes (
                         mission_id, session_id, goal, environment, status,
                         execution_tree_json, resolved_data_json, presentator_result_json,
-                        summary, schema_version, finished_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        summary, schema_version, finished_at, profile_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     mission_cache.mission_id, session_id, mission_cache.goal,
                     environment, mission_cache.status, tree_json, resolved_json, presentator_json,
-                    summary, 1, finished_at_iso
+                    summary, 1, finished_at_iso, profile_id
                 ))
                 conn.commit()
                 Logger.info(f"[MissionStore] 💾 Épisode sauvegardé (avec résumé) : {mission_cache.mission_id}")
         except Exception as e:
             Logger.error(f"[MissionStore] Erreur sauvegarde {mission_cache.mission_id} : {e}")
+
+    def link_episode_to_profile(self, mission_id: str, profile_id: int) -> None:
+        """Lier un épisode à un canonical_profile_id (Phase 6 - Skill Engine)."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE episodes SET profile_id = ? WHERE mission_id = ?",
+                    (profile_id, mission_id)
+                )
+                conn.commit()
+                Logger.debug(f"[MissionStore] Épisode {mission_id} lié au profil {profile_id}.")
+        except Exception as e:
+            Logger.error(f"[MissionStore] Erreur link_episode_to_profile {mission_id} : {e}")
+
+    def get_recent_trees_by_profile_id(self, profile_id: int, limit: int = 3) -> List[Dict[str, Any]]:
+        """Récupère les N derniers arbres d'exécution réussis liés à un canonical_profile_id."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT execution_tree_json 
+                    FROM episodes
+                    WHERE profile_id = ? AND status = 'success'
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                ''', (profile_id, limit))
+                rows = cursor.fetchall()
+                trees = []
+                for row in rows:
+                    try:
+                        trees.append(json.loads(row[0]))
+                    except Exception:
+                        pass
+                return trees
+        except Exception as e:
+            Logger.error(f"[MissionStore] Erreur get_recent_trees_by_profile_id {profile_id} : {e}")
+            return []
 
     def get_unanalyzed_episodes(self) -> List[Dict[str, Any]]:
         try:
@@ -204,3 +246,42 @@ class MissionStore:
         except Exception as e:
             Logger.error(f"[MissionStore] Erreur de lecture des épisodes pour session {session_id} : {e}")
             return []
+
+    def get_all_episodes(self, limit: int = 500) -> List[Dict[str, Any]]:
+        """Retourne la liste des derniers épisodes pour export JSON."""
+        try:
+            with self._get_connection() as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute('SELECT mission_id, session_id, solver_id, status, error, duration_ms, cost, turn_id, created_at, summary FROM episodes ORDER BY created_at DESC LIMIT ?', (limit,))
+                rows = cursor.fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            Logger.error(f"[MissionStore] Erreur lecture get_all_episodes : {e}")
+            return []
+
+    def get_episodes_count(self) -> int:
+        """Retourne le nombre total d'épisodes stockés."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT COUNT(*) FROM episodes')
+                row = cursor.fetchone()
+                return int(row[0]) if row else 0
+        except Exception as e:
+            Logger.error(f"[MissionStore] Erreur comptage épisodes : {e}")
+            return 0
+
+    def clear_all_episodes(self) -> int:
+        """Supprime tous les épisodes et retourne le nombre supprimé."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM episodes')
+                count = cursor.rowcount
+                conn.commit()
+                Logger.info(f"[MissionStore] Base d'épisodes purgée ({count} épisodes supprimés).")
+                return count
+        except Exception as e:
+            Logger.error(f"[MissionStore] Erreur suppression épisodes : {e}")
+            return 0

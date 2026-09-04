@@ -121,6 +121,64 @@ def load_lessons(db_path: str) -> List[Dict[str, Any]]:
         lessons.append({**row, "keywords": keywords, "source_episodes": source_episodes})
     return lessons
 
+def load_skills(db_path: str) -> List[Dict[str, Any]]:
+    if not os.path.exists(db_path):
+        return []
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT 
+                s.skill_id, s.namespace, s.name, s.description, s.parameters_schema,
+                s.environment_json, s.checkpoints_json, s.risk_level, s.current_production_version,
+                v.version, v.parent_version, v.state, v.creator_model, v.provenance,
+                v.repair_reason, v.flow_payload_ref, v.payload_content, v.trust_profile_json,
+                v.created_at, v.updated_at
+            FROM skill_versions v
+            JOIN skills s ON s.skill_id = v.skill_id
+            ORDER BY v.updated_at DESC
+        """)
+        rows = [dict(r) for r in cur.fetchall()]
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+
+    skills = []
+    for row in rows:
+        try:
+            checkpoints = json.loads(row.get("checkpoints_json") or "[]")
+        except Exception:
+            checkpoints = []
+        try:
+            trust_profile = json.loads(row.get("trust_profile_json") or "{}")
+        except Exception:
+            trust_profile = {}
+        
+        skills.append({
+            "skill_id": row.get("skill_id"),
+            "namespace": row.get("namespace"),
+            "name": row.get("name"),
+            "description": row.get("description"),
+            "parameters_schema": row.get("parameters_schema"),
+            "environment_json": row.get("environment_json"),
+            "checkpoints": checkpoints,
+            "risk_level": row.get("risk_level"),
+            "current_production_version": row.get("current_production_version"),
+            "version": row.get("version"),
+            "parent_version": row.get("parent_version"),
+            "state": row.get("state"),
+            "creator_model": row.get("creator_model"),
+            "provenance": row.get("provenance"),
+            "repair_reason": row.get("repair_reason"),
+            "flow_payload_ref": row.get("flow_payload_ref"),
+            "payload_content": row.get("payload_content"),
+            "trust_profile": trust_profile,
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at")
+        })
+    return skills
+
 def load_events(events_path: str) -> List[Dict[str, Any]]:
     if not os.path.exists(events_path):
         return []
@@ -507,10 +565,16 @@ def attach_llm_calls_by_mission(episodes, llm_calls, events):
 
         # 8. Convergence
         if tag in CONVERGENCE_TAGS:
+            step_id = call.get("step_id")
             if solver_id is not None and attempt_num is not None:
                 attempt = attempt_index_global.get((solver_id, attempt_num))
                 if attempt:
                     attempt.setdefault("_convergence_calls", []).append(call)
+                    if step_id:
+                        for node in attempt.get("nodes", []):
+                            if node.get("step_id") == step_id:
+                                node.setdefault("_convergence_calls", []).append(call)
+                                break
                     continue
             call_ts = _parse_ts(call.get("ts"))
             if call_ts is not None:
@@ -526,6 +590,11 @@ def attach_llm_calls_by_mission(episodes, llm_calls, events):
                     break
                 if matched:
                     matched.setdefault("_convergence_calls", []).append(call)
+                    if step_id:
+                        for node in matched.get("nodes", []):
+                            if node.get("step_id") == step_id:
+                                node.setdefault("_convergence_calls", []).append(call)
+                                break
                     continue
             continue
 
@@ -533,6 +602,14 @@ def attach_llm_calls_by_mission(episodes, llm_calls, events):
         if tag in PRESENTATOR_TAGS:
             if ep:
                 ep.setdefault("_presentator_calls", []).append(call)
+            continue
+
+        # 9.5 Skill Engine (Synthesis & Repair)
+        if tag in {"SkillSynthesis", "SkillRepair"}:
+            if ep and solver_id:
+                ep.setdefault("_solver_skills", {}).setdefault(solver_id, []).append(call)
+            elif ep:
+                ep.setdefault("_solver_skills", {}).setdefault("root_solver", []).append(call)
             continue
 
         # 10. Steps & fallback
@@ -609,6 +686,7 @@ def build_data(
 ) -> Dict[str, Any]:
     episodes = load_episodes(db_path)
     lessons = load_lessons(db_path)
+    skills = load_skills(db_path)
     events = load_events(events_path)
 
     session_turns = [e for e in events if e.get("event") == "session_turn"]
@@ -651,13 +729,18 @@ def build_data(
                 ep["_solver_retrieval"].setdefault(target_mid, []).append(ev)
                 ep["_solver_retrieval"].setdefault("root_solver", []).append(ev)
 
-    # Solver Registries
+    # Solver Registries & Skill Lifecycle Events
     solver_registries = {}
     for ev in events:
         if ev.get("event") == "solver_registry":
             solver_id = ev.get("solver_id")
             if solver_id:
                 solver_registries[solver_id] = ev.get("registry", {})
+        elif ev.get("event") == "skill_lifecycle":
+            mid = ev.get("mission_id")
+            if mid and mid in ep_index:
+                ep_index[mid].setdefault("_skill_lifecycle", []).append(ev)
+
     for ep in episodes:
         ep["_registries"] = solver_registries
 
@@ -730,6 +813,7 @@ def build_data(
     return {
         "episodes": episodes,
         "lessons": lessons,
+        "skills": skills,
         "sessions": sorted_session_list,
         "discovery_registry": discovery_data.get("by_run", {}),
         "target_session_id": target_session_id,
@@ -1312,7 +1396,6 @@ body {
   border: 1px solid var(--purple-border);
   border-radius: 8px;
   cursor: pointer;
-  user-select: none;
   font-weight: 700;
   font-size: 12.5px;
   margin-bottom: 8px;
@@ -1336,7 +1419,6 @@ body {
   background: var(--surface-alt);
   border-radius: 8px;
   cursor: pointer;
-  user-select: none;
   font-weight: 700;
   font-size: 12.5px;
   margin-bottom: 8px;
@@ -1457,6 +1539,27 @@ body {
 .lesson-box.polarity-prefer { border-top: 4px solid var(--success); }
 .lesson-box.polarity-avoid { border-top: 4px solid var(--failure); }
 
+.skills-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 16px;
+  padding: 24px;
+}
+.skill-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 20px;
+  box-shadow: var(--shadow-xs);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.skill-box.state-production { border-top: 4px solid var(--success); }
+.skill-box.state-shadow { border-top: 4px solid var(--primary); }
+.skill-box.state-quarantine { border-top: 4px solid var(--failure); }
+.skill-box.state-draft { border-top: 4px solid var(--warning); }
+
 </style>
 </head>
 <body>
@@ -1476,6 +1579,7 @@ body {
     <div class="nav-tabs">
       <div class="nav-tab active" data-nav="sessions">Sessions</div>
       <div class="nav-tab" data-nav="lessons">Leçons & Mémoire</div>
+      <div class="nav-tab" data-nav="skills">Skill Engine</div>
     </div>
     <div class="session-list" id="session-list"></div>
   </div>
@@ -1519,6 +1623,15 @@ body {
           <div style="display:flex; gap:10px; margin-bottom:16px;" id="lessons-filter-bar"></div>
         </div>
         <div class="lesson-grid" id="lesson-grid-content"></div>
+      </div>
+
+      <!-- VIEW SKILLS -->
+      <div class="view-container" id="view-skills">
+        <div style="padding:24px 32px 0; max-width:1200px; margin:0 auto;">
+          <h2 style="font-size:22px; font-weight:800; margin-bottom:16px;">Registre des Compétences (Skill Engine)</h2>
+          <div style="display:flex; gap:10px; margin-bottom:16px;" id="skills-filter-bar"></div>
+        </div>
+        <div class="skills-grid" id="skills-grid-content"></div>
       </div>
     </div>
 
@@ -1616,11 +1729,67 @@ let selectedInspectorData = null;
 let activeInspectorTab = 'overview';
 
 
+function findSolverTree(rootTree, solverId) {
+  if (!rootTree) return null;
+  const s1 = String(solverId || '');
+  const s2 = s1.replace(/^solver_/, '');
+  const t1 = String(rootTree.solver_id || '');
+  const t2 = t1.replace(/^solver_/, '');
+  if (t1 === s1 || t2 === s2 || (!s1 && !t1)) {
+    return rootTree;
+  }
+  for (const att of (rootTree.attempts || [])) {
+    for (const stp of (att.nodes || [])) {
+      if (stp.child_execution_tree) {
+        const found = findSolverTree(stp.child_execution_tree, solverId);
+        if (found) return found;
+      }
+    }
+  }
+  return null;
+}
+
+function findAttemptInEpisode(ep, solverId, attNum) {
+  if (!ep || !ep.execution_tree) return null;
+  const solverTree = findSolverTree(ep.execution_tree, solverId);
+  if (solverTree && solverTree.attempts) {
+    const att = solverTree.attempts.find(a => (a.attempt_number ?? 0) === attNum);
+    if (att) return att;
+    if (solverTree.attempts[attNum]) return solverTree.attempts[attNum];
+    if (solverTree.attempts[attNum - 1]) return solverTree.attempts[attNum - 1];
+  }
+  // Fallback: search recursively across all attempts in the hierarchy
+  function searchAny(tree) {
+    if (!tree) return null;
+    if (tree.attempts) {
+      const match = tree.attempts.find(a => (a.attempt_number ?? 0) === attNum);
+      const s1 = String(solverId || '').replace(/^solver_/, '');
+      const t1 = String(tree.solver_id || '').replace(/^solver_/, '');
+      if (match && (!s1 || t1 === s1)) return match;
+    }
+    for (const a of (tree.attempts || [])) {
+      for (const stp of (a.nodes || [])) {
+        if (stp.child_execution_tree) {
+          const res = searchAny(stp.child_execution_tree);
+          if (res) return res;
+        }
+      }
+    }
+    return null;
+  }
+  return searchAny(ep.execution_tree);
+}
+
 function inspectAttemptPlanningCall(missionId, solverId, attNum, idx) {
   const ep = findEpisode(missionId);
-  const node = (ep.execution_tree?.attempts || []).find(a => a.attempt_number === attNum);
-  const calls = node?._planning_calls || [];
-  const call = calls[idx];
+  if (!ep) return;
+  const att = findAttemptInEpisode(ep, solverId, attNum);
+  let call = att?._planning_calls ? att._planning_calls[idx] : null;
+  if (!call && ep._solver_planning) {
+    const sClean = String(solverId || '').replace(/^solver_/, '');
+    const calls = ep._solver_planning[solverId] || ep._solver_planning[sClean] || [];
+    call = calls[idx];
+  }
   if (!call) return;
   const resp = call?.response || {};
   const plan = resp.plan || resp.steps || (Array.isArray(resp) ? resp : []);
@@ -1652,11 +1821,11 @@ function inspectAttemptPlanningCall(missionId, solverId, attNum, idx) {
   updateInspector(`Planner - ${solverId}`, 'Planner', overview, call ? [call] : [], call);
 }
 
-
 function inspectAttemptConvergenceCall(missionId, solverId, attNum, idx) {
   const ep = findEpisode(missionId);
-  const node = (ep.execution_tree?.attempts || []).find(a => a.attempt_number === attNum);
-  const calls = node?._convergence_calls || [];
+  if (!ep) return;
+  const att = findAttemptInEpisode(ep, solverId, attNum);
+  const calls = att?._convergence_calls || [];
   const call = calls[idx];
   if (!call) return;
   const resp = call?.response || {};
@@ -1679,11 +1848,54 @@ function inspectAttemptConvergenceCall(missionId, solverId, attNum, idx) {
   </div>`;
   updateInspector(`Convergence - ${solverId}`, 'Convergence', overview, call ? [call] : [], call);
 }
+
+function inspectStepConvergenceCall(missionId, solverId, attNum, stepId, idx) {
+  const ep = findEpisode(missionId);
+  if (!ep) return;
+  const att = findAttemptInEpisode(ep, solverId, attNum);
+  let call = null;
+  if (att) {
+    const stepNode = (att.nodes || []).find(n => n.step_id === stepId);
+    if (stepNode && stepNode._convergence_calls && stepNode._convergence_calls[idx]) {
+      call = stepNode._convergence_calls[idx];
+    }
+  }
+  if (!call && att) {
+    const calls = att._convergence_calls || [];
+    call = calls[idx];
+  }
+  if (!call) return;
+  const resp = call?.response || {};
+  const isConv = resp.is_convergent;
+
+  let overview = `<div style="display:flex; flex-direction:column; gap:14px;">
+    <div>
+      <div style="font-size:11px; font-weight:700; color:var(--text-faint); text-transform:uppercase;">Évaluation de Convergence · Étape ${esc(stepId)} (Tentative #${attNum})</div>
+      <div style="font-size:14px; margin-top:4px;">Validation sémantique pour vérifier si l'exécution de l'étape <b>${esc(stepId)}</b> a atteint l'objectif technique attendu.</div>
+    </div>
+      
+    <div style="background:var(--surface-alt); padding:12px; border-radius:10px; border-left:4px solid ${isConv ? 'var(--success)' : 'var(--failure)'}; border:1px solid var(--border);">
+      <div style="font-weight:800; font-size:13.5px;">Statut : ${isConv ? '✅ CONVERGENCE ATTEINTE' : '❌ CONVERGENCE ÉCHOUÉE'}</div>
+      ${resp.reason ? `
+        <div style="font-size:12.5px; margin-top:6px; color:${isConv ? 'var(--text-muted)' : 'var(--failure)'};">
+          <b>Raisonnement :</b> ${esc(resp.reason)}
+        </div>
+      ` : ''}
+    </div>
+  </div>`;
+  updateInspector(`Convergence - ${stepId}`, 'Convergence', overview, call ? [call] : [], call);
+}
+
 function inspectAttemptValidationCall(missionId, solverId, attNum, idx) {
   const ep = findEpisode(missionId);
-  const node = (ep.execution_tree?.attempts || []).find(a => a.attempt_number === attNum);
-  const calls = node?._validation_calls || [];
-  const call = calls[idx];
+  if (!ep) return;
+  const att = findAttemptInEpisode(ep, solverId, attNum);
+  let call = att?._validation_calls ? att._validation_calls[idx] : null;
+  if (!call && ep._solver_validation) {
+    const sClean = String(solverId || '').replace(/^solver_/, '');
+    const calls = ep._solver_validation[solverId] || ep._solver_validation[sClean] || [];
+    call = calls[idx];
+  }
   if (!call) return;
   const resp = call?.response || {};
   const isAppr = resp.is_conformant !== false && resp.approved !== false && resp.is_valid !== false;
@@ -1691,7 +1903,7 @@ function inspectAttemptValidationCall(missionId, solverId, attNum, idx) {
   let overview = `<div style="display:flex; flex-direction:column; gap:14px;">
     <div>
       <div style="font-size:11px; font-weight:700; color:var(--text-faint); text-transform:uppercase;">Supervision & Juge (Tentative #${attNum})</div>
-      <div style="font-size:14px; margin-top:4px;">Validation formelle du plan par le Superviseur avant toute exécution.</div>
+      <div style="font-size:14px; margin-top:4px;">Validation formelle du plan par le Superviseur avant toute exécution pour <b>${esc(solverId)}</b>.</div>
     </div>
       
     <div style="background:var(--surface-alt); padding:12px; border-radius:10px; border-left:4px solid ${isAppr ? 'var(--success)' : 'var(--failure)'}; border:1px solid var(--border);">
@@ -1764,6 +1976,9 @@ function setView(viewName) {
   } else if (viewName === 'lessons') {
     document.getElementById('view-lessons').classList.add('active');
     renderLessonsView('all');
+  } else if (viewName === 'skills') {
+    document.getElementById('view-skills').classList.add('active');
+    renderSkillsView('all');
   }
 }
 
@@ -1776,6 +1991,8 @@ document.querySelectorAll('.nav-tab').forEach(tab => {
       if (currentSessionId) renderSessionThread(currentSessionId);
     } else if (nav === 'lessons') {
       setView('lessons');
+    } else if (nav === 'skills') {
+      setView('skills');
     }
   });
 });
@@ -2310,40 +2527,45 @@ function renderSolverNodeModern(ep, treeNode, depth) {
 
         <div id="${attemptId}" style="display:block;">`;
 
-      // Affichage du Planner et du Validator pour CETTE tentative
+      // Affichage du Planner et du Validator pour CETTE tentative (Structuré par passe)
       const attPlanning = att._planning_calls || [];
       const attValidation = att._validation_calls || [];
       
       if (attPlanning.length > 0 || attValidation.length > 0) {
-        html += `<div style="margin-left:8px; margin-bottom:12px; display:flex; flex-direction:column; gap:6px;">
-          <div style="display:flex; gap:8px; flex-wrap:wrap;">
-          ${attPlanning.map((c, pIdx) => `
-            <button class="tree-node-card tree-node-card--plan" style="padding:6px 12px; font-size:11px; font-weight:700; cursor:pointer;" onclick="event.stopPropagation(); inspectAttemptPlanningCall('${esc(ep.mission_id)}', '${esc(solverId)}', ${attNum}, ${pIdx})">
-              📐 Planner LLM (${formatDuration(c.duration_ms)})
-            </button>
-          `).join('')}
-          ${attValidation.map((c, vIdx) => {
-            const resp = c.response || {};
+        html += `<div style="margin-left:8px; margin-bottom:12px; display:flex; flex-direction:column; gap:8px;">`;
+        const maxPasses = Math.max(attPlanning.length, attValidation.length);
+        for (let p = 0; p < maxPasses; p++) {
+          const planCall = attPlanning[p];
+          const valCall = attValidation[p];
+          html += `<div style="display:flex; flex-direction:column; gap:6px; background:var(--surface-alt); padding:8px 12px; border-radius:8px; border:1px solid var(--border);">`;
+          html += `<div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">`;
+          if (maxPasses > 1) {
+            html += `<span style="font-size:11px; font-weight:800; color:var(--text-faint); font-family:var(--mono); text-transform:uppercase;">Passe ${p + 1}</span>`;
+          }
+          if (planCall) {
+            html += `<button class="tree-node-card tree-node-card--plan" style="padding:5px 10px; font-size:11px; font-weight:700; cursor:pointer;" onclick="event.stopPropagation(); inspectAttemptPlanningCall('${esc(ep.mission_id)}', '${esc(solverId)}', ${attNum}, ${p})">
+              📐 Planner LLM (${formatDuration(planCall.duration_ms)})
+            </button>`;
+          }
+          if (valCall) {
+            const resp = valCall.response || {};
             const isAppr = resp.is_conformant !== false && resp.approved !== false && resp.is_valid !== false;
-            return `
-              <button class="tree-node-card ${isAppr ? 'tree-node-card--validation' : 'tree-node-card--rejected'}" style="padding:6px 12px; font-size:11px; font-weight:700; cursor:pointer;" onclick="event.stopPropagation(); inspectAttemptValidationCall('${esc(ep.mission_id)}', '${esc(solverId)}', ${attNum}, ${vIdx})">
-                ${isAppr ? '⚖️ Supervisor: Plan Validé' : '❌ Supervisor: REJET'} (${formatDuration(c.duration_ms)})
-              </button>
-            `;
-          }).join('')}
-          </div>`;
-          
-          // Si le superviseur a rejeté, afficher directement la raison
-          attValidation.forEach(c => {
-             const resp = c.response || {};
-             const isAppr = resp.is_conformant !== false && resp.approved !== false && resp.is_valid !== false;
-             if (!isAppr && (resp.critique || resp.reason || resp.feedback)) {
-                html += `<div style="background:var(--surface-alt); padding:8px 12px; border-radius:6px; border-left:3px solid var(--failure); font-size:12px; color:var(--text); margin-top:4px;">
-                  <b>Raison du rejet :</b> ${esc(resp.critique || resp.reason || resp.feedback)}
-                </div>`;
-             }
-          });
-          
+            html += `<button class="tree-node-card ${isAppr ? 'tree-node-card--validation' : 'tree-node-card--rejected'}" style="padding:5px 10px; font-size:11px; font-weight:700; cursor:pointer;" onclick="event.stopPropagation(); inspectAttemptValidationCall('${esc(ep.mission_id)}', '${esc(solverId)}', ${attNum}, ${p})">
+              ${isAppr ? '⚖️ Supervisor: Plan Validé' : '❌ Supervisor: REJET'} (${formatDuration(valCall.duration_ms)})
+            </button>`;
+          }
+          html += `</div>`;
+          if (valCall) {
+            const resp = valCall.response || {};
+            const isAppr = resp.is_conformant !== false && resp.approved !== false && resp.is_valid !== false;
+            if (!isAppr && (resp.critique || resp.reason || resp.feedback)) {
+              html += `<div style="background:var(--surface); padding:8px 12px; border-radius:6px; border-left:3px solid var(--failure); font-size:12px; color:var(--text); margin-top:2px;">
+                <b>Raison du rejet :</b> ${esc(resp.critique || resp.reason || resp.feedback)}
+              </div>`;
+            }
+          }
+          html += `</div>`;
+        }
         html += `</div>`;
       }
 
@@ -2372,6 +2594,20 @@ function renderSolverNodeModern(ep, treeNode, depth) {
                     🔍 Discovery: ${esc(sd.entity_name)} (${(sd.steps || []).length} étapes)
                   </span>
                 `;
+              }).join('')}
+            </div>
+          ` : ''}
+
+          ${(node._convergence_calls || []).length > 0 ? `
+            <div style="margin-top:6px; display:flex; align-items:center; gap:6px;" onclick="event.stopPropagation();">
+              ${node._convergence_calls.map((c, cIdx) => {
+                 const resp = c.response || {};
+                 const isConv = resp.is_convergent;
+                 return `
+                  <button class="tree-node-card ${isConv ? 'tree-node-card--validation' : 'tree-node-card--rejected'}" style="padding:4px 8px; font-size:11px; font-weight:700; cursor:pointer;" onclick="event.stopPropagation(); inspectStepConvergenceCall('${esc(ep.mission_id)}', '${esc(solverId)}', ${attNum}, '${esc(node.step_id)}', ${cIdx})">
+                    ${isConv ? '🎯 Convergence OK' : '🎯 Convergence ÉCHOUÉE'} (${formatDuration(c.duration_ms)})
+                  </button>
+                 `;
               }).join('')}
             </div>
           ` : ''}
@@ -2406,11 +2642,14 @@ function renderSolverNodeModern(ep, treeNode, depth) {
         }
       });
 
-      // 4. Convergence Calls pour cette tentative
-      const attConvergence = att._convergence_calls || [];
-      if (attConvergence.length > 0) {
+      // 4. Convergence Calls pour cette tentative (non rattachés à une étape précise)
+      const unattachedConvergence = (att._convergence_calls || []).filter(c => {
+        const sid = c.step_id;
+        return !sid || !nodes.some(n => n.step_id === sid);
+      });
+      if (unattachedConvergence.length > 0) {
         html += `<div style="margin-left:8px; margin-top:12px; margin-bottom:12px; display:flex; gap:8px; flex-wrap:wrap;">
-          ${attConvergence.map((c, cIdx) => {
+          ${unattachedConvergence.map((c, cIdx) => {
              const resp = c.response || {};
              const isConv = resp.is_convergent;
              return `
@@ -2426,7 +2665,7 @@ function renderSolverNodeModern(ep, treeNode, depth) {
     });
   }
 
-  // 4. Post-Exécution (Learner & Synthèse)
+  // 4. Post-Exécution (Learner & Skill Engine)
   if (learnerCalls.length > 0) {
     html += `<div style="margin-left:14px; margin-top:6px; display:flex; gap:8px; flex-wrap:wrap;">
       ${learnerCalls.map((c, lIdx) => `
@@ -2435,6 +2674,70 @@ function renderSolverNodeModern(ep, treeNode, depth) {
         </button>
       `).join('')}
     </div>`;
+  }
+
+  html += renderSkillLifecycleImpact(ep, solverId);
+
+  html += `</div>`;
+  return html;
+}
+
+function renderSkillLifecycleImpact(ep, solverId) {
+  const lifecycleEvents = ep._skill_lifecycle || [];
+  const sigs = ep.signatures || [];
+  
+  let matchedSkill = null;
+  if (sigs.length > 0) {
+    for (const s of sigs) {
+      if (s.action && s.object) {
+        const expectedId = `desktop.${s.action}.${s.object}`.replace(/\s+/g, '_');
+        matchedSkill = (DATA.skills || []).find(sk => sk.skill_id === expectedId || sk.name === expectedId);
+        if (matchedSkill) break;
+      }
+    }
+  }
+
+  if (lifecycleEvents.length === 0 && !matchedSkill) {
+    return '';
+  }
+
+  let html = `<div style="margin-left:14px; margin-top:8px; margin-bottom:8px; background:var(--surface-alt); border:1px solid var(--border); border-left:4px solid #2563eb; border-radius:8px; padding:10px 14px; font-size:12.5px;">`;
+  html += `<div style="font-weight:800; color:var(--text); display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;">`;
+  html += `<span>⚡ Impact Skill Engine & Cycle de Vie</span>`;
+  if (matchedSkill) {
+    let badgeColor = 'badge--success';
+    if (matchedSkill.state === 'SHADOW') badgeColor = 'badge--primary';
+    if (matchedSkill.state === 'QUARANTINE') badgeColor = 'badge--failed';
+    if (matchedSkill.state === 'DRAFT') badgeColor = 'badge--purple';
+    html += `<span class="badge ${badgeColor}">${esc(matchedSkill.state)} (v${matchedSkill.version})</span>`;
+  } else {
+    html += `<span class="badge badge--purple">Accumulation Récurrence</span>`;
+  }
+  html += `</div>`;
+
+  if (lifecycleEvents.length > 0) {
+    lifecycleEvents.forEach(ev => {
+      const canonId = ev.canonical_profile_id;
+      const count = ev.consecutive_count;
+      const thresh = ev.threshold || 2;
+      const skId = ev.skill_id;
+      html += `<div style="margin-top:4px; color:var(--text-muted); font-size:12px;">`;
+      html += `🎯 <b>Profil Canonique #${canonId}</b> : <strong>${count} / ${thresh}</strong> succès consécutifs.<br/>`;
+      if (matchedSkill) {
+        html += `🚀 <b>Skill Associé</b> : <code>${esc(skId || matchedSkill.skill_id)}</code> — Métrique d'exécution validée.<br/>`;
+      } else if (count >= thresh) {
+        html += `🚀 <b>Seuil Atteint (${count} >= ${thresh})</b> : Synthèse d'un nouveau Skill Méta-Plan déclenchée.<br/>`;
+      } else {
+        html += `⏳ <b>Progression Discontinative</b> : Encore <strong>${thresh - count}</strong> succès consécutif(s) requis pour synthétiser un Skill.<br/>`;
+      }
+      html += `</div>`;
+    });
+  } else if (matchedSkill) {
+    const tp = matchedSkill.trust_profile || {};
+    html += `<div style="margin-top:4px; color:var(--text-muted); font-size:12px;">`;
+    html += `🚀 <b>Skill Qualifié en Production</b> : <code>${esc(matchedSkill.skill_id)}</code><br/>`;
+    html += `📊 Exécutions Réussies : <strong>${tp.successful_executions || 0} / ${tp.total_executions || 0}</strong> | Taux : <strong>${tp.total_executions > 0 ? ((tp.successful_executions/tp.total_executions)*100).toFixed(0) : 100}%</strong>`;
+    html += `</div>`;
   }
 
   html += `</div>`;
@@ -2668,7 +2971,8 @@ function inspectSolver(missionId, solverId) {
   const sigCalls = (ep._solver_signatures && (ep._solver_signatures[solverId] || ep._solver_signatures[cleanSid])) || [];
   const compactorCalls = (ep._solver_compactor && (ep._solver_compactor[solverId] || ep._solver_compactor[cleanSid])) || [];
   const learnerCalls = (ep._solver_learner && (ep._solver_learner[solverId] || ep._solver_learner[cleanSid])) || [];
-  const allCalls = [...sigCalls, ...compactorCalls, ...prepCalls, ...planningCalls, ...validationCalls, ...learnerCalls];
+  const skillCalls = (ep._solver_skills && (ep._solver_skills[solverId] || ep._solver_skills[cleanSid])) || [];
+  const allCalls = [...sigCalls, ...compactorCalls, ...prepCalls, ...planningCalls, ...validationCalls, ...learnerCalls, ...skillCalls];
 
   const feasCalls = prepCalls.filter(c => c.tag === 'FeasibilityDecision');
   const registry = (ep._registries && (ep._registries[solverId] || ep._registries[cleanSid])) || {};
@@ -2690,6 +2994,27 @@ function inspectSolver(missionId, solverId) {
     </div>`;
   }
 
+  // Section dédiée au Skill Engine si des appels ont eu lieu
+  if (skillCalls.length > 0) {
+    overview += `
+    <div style="background:rgba(124, 58, 237, 0.08); padding:12px; border-radius:10px; border:1px solid rgba(124, 58, 237, 0.2); border-left:4px solid var(--purple);">
+      <div style="font-weight:800; font-size:13px; color:var(--purple); display:flex; align-items:center; gap:6px;">
+        ⚙️ Skill Engine Activé (${skillCalls.length} appel(s))
+      </div>
+      <div style="font-size:12px; margin-top:4px; color:var(--text-muted);">
+        Le moteur de compétences a exécuté des processus de synthèse ou d'auto-réparation au cours de cette mission.
+      </div>
+      <div style="display:flex; flex-direction:column; gap:6px; margin-top:8px;">
+        ${skillCalls.map(sc => `
+          <div style="font-size:11.5px; background:var(--surface); padding:4px 8px; border-radius:4px; border:1px solid var(--border); display:flex; justify-content:space-between; align-items:center;">
+            <span style="font-family:var(--mono); font-weight:700;">${esc(sc.tag)}</span>
+            <span class="badge ${sc.success ? 'badge--success' : 'badge--failed'}">${sc.success ? 'Succès' : 'Échec'} (${sc.duration_ms}ms)</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>`;
+  }
+
   if (Object.keys(registry).length > 0) {
     overview += `<div>
       <div style="font-size:11px; font-weight:700; color:var(--text-faint); text-transform:uppercase; margin-bottom:4px;">Registre des Variables Déclarées</div>
@@ -2699,7 +3024,7 @@ function inspectSolver(missionId, solverId) {
 
   overview += `</div>`;
 
-  updateInspector(`Solver: ${solverId}`, 'Solver', overview, allCalls, { solverId, sigCalls, compactorCalls, prepCalls, planningCalls, validationCalls, learnerCalls, registry });
+  updateInspector(`Solver: ${solverId}`, 'Solver', overview, allCalls, { solverId, sigCalls, compactorCalls, prepCalls, planningCalls, validationCalls, learnerCalls, skillCalls, registry });
 }
 
 function inspectSignatureCalls(missionId, solverId) {
@@ -3179,6 +3504,92 @@ function renderLessonsView(filter) {
       </div>
     </div>
   `).join('');
+}
+
+// ==========================================
+// VUE COMPÉTENCES (SKILLS)
+// ==========================================
+function renderSkillsView(filter) {
+  const container = document.getElementById('skills-grid-content');
+  const bar = document.getElementById('skills-filter-bar');
+  if (!DATA.skills || DATA.skills.length === 0) {
+    container.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-faint);">Aucune compétence enregistrée dans le Skill Engine.</div>';
+    return;
+  }
+
+  const productionCount = DATA.skills.filter(s => s.state === 'PRODUCTION').length;
+  const shadowCount = DATA.skills.filter(s => s.state === 'SHADOW').length;
+  const quarantineCount = DATA.skills.filter(s => s.state === 'QUARANTINE').length;
+  const draftCount = DATA.skills.filter(s => s.state === 'DRAFT').length;
+  const total = DATA.skills.length;
+
+  bar.innerHTML = `
+    <button class="badge ${filter==='all'?'badge--primary':'badge--pending'}" style="cursor:pointer;padding:6px 12px;" onclick="renderSkillsView('all')">Toutes (${total})</button>
+    <button class="badge ${filter==='PRODUCTION'?'badge--success':'badge--pending'}" style="cursor:pointer;padding:6px 12px;" onclick="renderSkillsView('PRODUCTION')">🚀 Production (${productionCount})</button>
+    <button class="badge ${filter==='SHADOW'?'badge--primary':'badge--pending'}" style="cursor:pointer;padding:6px 12px;" onclick="renderSkillsView('SHADOW')">👥 Shadow (${shadowCount})</button>
+    <button class="badge ${filter==='QUARANTINE'?'badge--failed':'badge--pending'}" style="cursor:pointer;padding:6px 12px;" onclick="renderSkillsView('QUARANTINE')">⚠️ Quarantine (${quarantineCount})</button>
+    <button class="badge ${filter==='DRAFT'?'badge--purple':'badge--pending'}" style="cursor:pointer;padding:6px 12px;" onclick="renderSkillsView('DRAFT')">📝 Draft (${draftCount})</button>
+  `;
+
+  const filtered = filter === 'all' ? DATA.skills : DATA.skills.filter(s => s.state === filter);
+
+  container.innerHTML = filtered.map(s => {
+    const tp = s.trust_profile || {};
+    const successRate = tp.total_executions > 0 ? ((tp.successful_executions / tp.total_executions) * 100).toFixed(0) : 0;
+    
+    let stateBadgeColor = 'badge--primary';
+    if (s.state === 'PRODUCTION') stateBadgeColor = 'badge--success';
+    if (s.state === 'QUARANTINE') stateBadgeColor = 'badge--failed';
+    if (s.state === 'DRAFT') stateBadgeColor = 'badge--purple';
+
+    return `
+    <div class="skill-box state-${(s.state || 'DRAFT').toLowerCase()}">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+        <span class="badge badge--purple" style="font-size:10px;">${esc(s.namespace || 'desktop')}</span>
+        <span class="badge ${stateBadgeColor}">${esc(s.state)} (v${s.version})</span>
+      </div>
+      <div style="font-size:15px; font-weight:800; color:var(--text); font-family:var(--mono); line-height:1.3;">
+        ${esc(s.skill_id)}
+      </div>
+      <div style="font-size:12.5px; font-weight:500; color:var(--text-muted); line-height:1.45; min-height:36px;">
+        ${esc(s.description)}
+      </div>
+      
+      <!-- Metrics -->
+      <div style="background:var(--surface-alt); padding:10px 12px; border-radius:8px; display:grid; grid-template-columns:1fr 1fr; gap:8px; font-size:11.5px; margin-top:4px;">
+        <div>🔥 Taux Succès: <strong style="color:var(--success); font-family:var(--mono);">${successRate}%</strong></div>
+        <div>📊 Total Exéc: <strong style="font-family:var(--mono);">${tp.total_executions || 0}</strong></div>
+        <div>✅ Succès: <strong style="font-family:var(--mono);">${tp.successful_executions || 0}</strong></div>
+        <div>❌ Échecs: <strong style="color:var(--failure); font-family:var(--mono);">${tp.consecutive_failures || 0} consécutifs</strong></div>
+      </div>
+      
+      <!-- Provenance and reason -->
+      <div style="display:flex; align-items:center; justify-content:space-between; font-size:11px; color:var(--text-faint); font-family:var(--mono); margin-top:4px;">
+        <span>Origine: <strong>${esc(s.provenance || 'DISTILLED')}</strong></span>
+        <span>Créateur: <strong>${esc(s.creator_model || 'Solver')}</strong></span>
+      </div>
+
+      ${s.repair_reason ? `
+      <div style="color:var(--failure); font-weight:600; background:var(--failure-bg); border:1px solid var(--failure-border); padding:8px 10px; border-radius:6px; margin-top:4px; font-size:11.5px; line-height:1.4;">
+        ⚠️ <strong>Raison de mise en quarantaine / réparation:</strong><br/>
+        ${esc(s.repair_reason)}
+      </div>` : ''}
+
+      <!-- Checkpoints list -->
+      ${s.checkpoints && s.checkpoints.length > 0 ? `
+      <div style="margin-top:6px;">
+        <div style="font-size:11px; font-weight:700; color:var(--text-faint); text-transform:uppercase; margin-bottom:4px;">Checkpoints de validation (${s.checkpoints.length})</div>
+        <div style="display:flex; flex-direction:column; gap:4px; max-height:80px; overflow-y:auto; padding-right:4px;">
+          ${s.checkpoints.map(cp => `
+            <div style="font-size:11.5px; background:var(--surface); border:1px solid var(--border); padding:3px 6px; border-radius:4px; display:flex; align-items:center; justify-content:space-between;">
+              <span style="font-weight:600; font-family:var(--mono); color:var(--text-muted);">${esc(cp.name)}</span>
+              <span class="badge ${cp.assertion === 'must_exist' ? 'badge--success' : 'badge--primary'}" style="font-size:9.5px; padding:1px 4px;">${esc(cp.assertion)}</span>
+            </div>
+          `).join('')}
+        </div>
+      </div>` : ''}
+    </div>`;
+  }).join('');
 }
 
 // ==========================================

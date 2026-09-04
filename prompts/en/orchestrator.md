@@ -58,6 +58,14 @@ Rédige une réponse naturelle, fluide et claire pour l'utilisateur sans énumé
   - `type` : `"mission"`
   - `output` : **L'objectif raffiné complet (refined_goal)** respectant scrupuleusement la règle cardinale ci-dessus.
   - `signatures` : Liste d'au moins une signature d'intention formelle (`action`, `object`, `desired_state`).
+    
+    ⚠️ **RÈGLES STRICTES POUR LES SIGNATURES (`signatures`)** :
+    1. **ANGLAIS OBLIGATOIRE** : Les valeurs de `action`, `object` et `desired_state` DOIVENT ÊTRE EXCLUSIVEMENT EN ANGLAIS (ex: `action: "open"`, `object: "run dialog box"`).
+    2. **FORMAT CANONIQUE SANS PONCTUATION** :
+       - `action` : Verbe simple à l'infinitif minuscule (ex: `open`, `close`, `launch`, `click`, `type`, `press`, `create`, `delete`, `search`).
+       - `object` : Cible directe simple sans guillemets, sans parenthèses et sans fioritures (ex: `run dialog box`, `start menu`, `notepad`, `calculator`, `chrome browser`).
+    3. **RÉUTILISATION PRIORITAIRE DES TERMES CONNUS** :
+       - Si l'action correspond à une mission passée dans la session ou à une signature connue listée ci-dessous, **tu DOIS réutiliser EXACTEMENT la même formulation mot pour mot**. Cette constance est cruciale pour la découverte et la promotion automatique des compétences (Skills).
   - `injected_assets` : Si la mission nécessite l'utilisation d'un DataAsset (un fichier `files://...`, une image passée en input `inputs://...`), tu DOIS injecter cet asset sous forme de variable. Chaque variable doit avoir un `variable_name` commençant par `data_` (ex: `data_user_photo`). **CRUCIAL** : Tu dois ensuite obligatoirement utiliser ce nom de variable exact (ex: `data_user_photo`) dans le champ `output` (le `refined_goal`) pour informer le Solver qu'elle est présente dans son registre.
   - `discovery_request` : `null`
 
@@ -115,7 +123,15 @@ Les formats et usages suivants ne sont **PAS** supportés pour le modèle actuel
 {% if session_mission_list %}
 ### Missions passées dans cette session :
 {% for m in session_mission_list %}
-- **Mission `{{ m.mission_id }}`** : {{ m.goal }} (Statut : {{ m.status }})
+- **Mission `{{ m.mission_id }}`** : {{ m.goal }} (Statut : {{ m.status }}{% if m.signatures %}, Signatures : `{{ m.signatures | join(', ') }}`{% endif %})
+{% endfor %}
+{% endif %}
+
+{% if known_signatures %}
+### 🎯 Signatures déjà maîtrisées par le système :
+Si l'intention actuelle correspond à l'une de ces actions, réutilise EXACTEMENT ces mêmes mots en anglais :
+{% for s in known_signatures %}
+- `action: "{{ s.action }}"`, `object: "{{ s.object }}"` (Succès : {{ s.consecutive_successes }})
 {% endfor %}
 {% endif %}
 

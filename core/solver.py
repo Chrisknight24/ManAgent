@@ -4,7 +4,8 @@ core/solver.py
 Solver – exécute une mission en orchestrant Planner et Executor.
 Version avec enregistrement d'un DataProvider pour le registre,
 activation explicite de la Progressive Disclosure,
-et vue normalisée du registre utilisant les types stockés (bool/data).
+vue normalisée du registre utilisant les types stockés (bool/data),
+et intégration du Skill Engine (Auto-Discovery, Auto-Healing).
 """
 
 from typing import Optional, Any, Dict, List
@@ -41,6 +42,7 @@ from core.signature_extractor import SignatureExtractor
 from core.mission_compactor import MissionCompactor
 from core.runtime_state import RuntimeState
 from memory.mission_profile_store import MissionProfileStore
+from memory.mission_store import MissionStore
 from core.discovery.providers.registry_provider import SolverRegistryProvider
 
 MAX_DEPTH = SOLVER_MAX_DEPTH
@@ -67,7 +69,8 @@ class Solver(Supervisor, Entity):
         llm: Optional[Llm] = None,
         depth: int = 0,
         context: str = "",
-        parent_step_id: str = None
+        parent_step_id: str = None,
+        mission_store: Optional[MissionStore] = None
     ):
         Supervisor.__init__(self)
         Entity.__init__(
@@ -85,6 +88,7 @@ class Solver(Supervisor, Entity):
         self.context = context
         self.id = solver_id
         self.parent_step_id = parent_step_id
+        self.mission_store = mission_store or MissionStore()
         self._preexecution_failures = 0
         self.execution_tree = None
         self.current_attempt = None
@@ -258,6 +262,7 @@ class Solver(Supervisor, Entity):
                         else:
                             similar = None
                     else:
+                        similar = None
                         try:
                             await self.propagate_event(Events.STATUS_UPDATE, {"message": _("Le Solver recherche des expériences similaires dans la mémoire...")})
                             retriever = Retriever(
@@ -281,6 +286,27 @@ class Solver(Supervisor, Entity):
                             Logger.error(f"[Solver:{self.id}] Échec du retrieval : {e}")
 
                     self._similar_missions = similar
+                    self._candidate_skills = None
+
+                    # Retrieval des Skills en parallèle / complément
+                    try:
+                        retriever = Retriever(
+                            runtime_state=self.runtime_state,
+                            top_k=RETRIEVAL_TOP_K,
+                            threshold=RETRIEVAL_THRESHOLD,
+                            cache_manager=self.runtime_state.cache_manager,
+                            skill_registry=getattr(self.runtime_state, "skill_registry", None)
+                        )
+                        skills_found = await retriever.retrieve_skills(
+                            signatures=self.signatures,
+                            environment=getattr(self.runtime_state, "host_environment", None),
+                            only_production=True
+                        )
+                        self._candidate_skills = skills_found
+                        if skills_found:
+                            Logger.info(f"[Solver:{self.id}] ⚡ {len(skills_found)} Skill(s) de production qualifié(s) identifié(s).")
+                    except Exception as e:
+                        Logger.error(f"[Solver:{self.id}] Échec du retrieval de Skills : {e}")
 
                     if similar:
                         try:
@@ -364,7 +390,8 @@ class Solver(Supervisor, Entity):
                                     goal=self.goal,
                                     context=self.context,
                                     strategy=decision.refined_strategy,
-                                    variable_registry=self.variable_registry
+                                    variable_registry=self.variable_registry,
+                                    candidate_skills=getattr(self, "_candidate_skills", []) or []
                                 )
                             self.current_attempt.proposed_plan = proposed_plan.model_dump(mode='json')
                             self.current_attempt.advice_injected = getattr(self.planner, "_cached_advice", None) or None
@@ -529,6 +556,8 @@ class Solver(Supervisor, Entity):
                                 self.current_attempt.failure_class = FailureClass.EXECUTION_FAILURE
                             self.current_attempt.failure_reason = result.error_reason or _("Échec d'exécution")
                             self.current_attempt.target_entity = result.target_entity or "Executor"
+                            self.last_failure_bundle = getattr(result, "failure_bundle", None)
+                            self.last_breakout_report = getattr(result, "breakout_report", None)
                             Logger.warning(f"[Solver:{self.id}] 🔄 Échec exécution (Tentative {execution_attempt}/{MAX_EXECUTION_TRIES}). Raison : {result.error_reason}")
                             self.context += _("\n[Raison de l'échec] {}. Vous devez adapter le prochain plan.").format(result.error_reason)
 
@@ -555,6 +584,8 @@ class Solver(Supervisor, Entity):
                         else:
                             Logger.debug(f"[Solver:{self.id}] Stockage MissionProfiles ignoré (mission non nouvelle).")
 
+                    await self._handle_skill_lifecycle_post_execution(is_success=True)
+
                     final_result.execution_tree = self.execution_tree
                     return final_result
 
@@ -568,6 +599,8 @@ class Solver(Supervisor, Entity):
                     else:
                         self.current_attempt.failure_class = FailureClass.MAX_RETRIES_REACHED
                         self.current_attempt.failure_reason = _("Échec définitif : impossible d'accomplir la tâche après plusieurs tentatives.")
+
+                await self._handle_skill_lifecycle_post_execution(is_success=False)
 
                 error_msg = self.current_attempt.failure_reason if self.current_attempt else _("Échec inconnu")
                 result = SolverResult(
@@ -636,12 +669,29 @@ class Solver(Supervisor, Entity):
             lines.append(f"   Score : {sm.get('score', 0):.2f}")
         return "\n".join(lines)
 
+    def _format_candidate_skills(self, skills: List[Dict[str, Any]]) -> str:
+        if not skills:
+            return ""
+        lines = []
+        for idx, sk in enumerate(skills, 1):
+            s_id = sk.get("skill_id", "")
+            desc = sk.get("description", "")
+            ver = sk.get("version", 1)
+            trust = sk.get("trust_score", 1.0)
+            cps = ", ".join(sk.get("checkpoints", [])) or "aucun"
+            lines.append(f"{idx}. Skill ID : `{s_id}` (v{ver}, Score Confiance : {trust:.2f})")
+            lines.append(f"   Description : {desc}")
+            lines.append(f"   Checkpoints vérifiables : {cps}")
+        return "\n".join(lines)
+
     async def _check_feasibility(self, similar_missions_context: Optional[List[Dict]] = None) -> FeasibilityDecision:
         await self.propagate_event(Events.STATUS_UPDATE, {"message": _("Le Solver évalue la faisabilité technique de la mission...")})
         Logger.info(f"[Solver:{self.id}] 🤔 Évaluation de la faisabilité...")
 
         tools_view = await self.runtime_state.tools_manager.get_tools_view(goal_query=self.goal)
         formatted_tools = [f"- {t['name']} ({t['role']}): {t['description']}" for t in tools_view]
+
+        skills_text = self._format_candidate_skills(getattr(self, "_candidate_skills", []) or [])
 
         registry_view = self._get_registry_metadata_view()
         registry_text = self._format_registry_metadata(registry_view)
@@ -666,6 +716,7 @@ class Solver(Supervisor, Entity):
             goal=self.goal,
             context=self.context,
             tools="\n".join(formatted_tools),
+            skills=skills_text,
             similar_missions=similar_missions_context,
             registry=registry_text,
             advice=advice
@@ -792,3 +843,157 @@ class Solver(Supervisor, Entity):
 
     async def process(self, *args, **kwargs) -> Any:
         return await self.run()
+
+    async def _handle_skill_lifecycle_post_execution(self, is_success: bool):
+        """
+        Évalue la récurrence et orchestre le cycle de vie du Skill Engine à la fin de chaque tâche Solver.
+        """
+        if not self.signatures:
+            return
+
+        try:
+            from memory.mission_profile_store import MissionProfileStore
+            from core.skills.registry import SkillRegistry
+            from core.skills.models import SkillManifest, SkillState, ExecutionEnvironment
+            from core.embedding_service import EmbeddingService
+            from core.constants import (
+                SKILL_DISCOVERY_THRESHOLD,
+                SKILL_SHADOW_SUCCESS_THRESHOLD,
+                SKILL_CIRCUIT_BREAKER_MAX_FAILURES
+            )
+
+            profile_store = MissionProfileStore()
+            registry = SkillRegistry()
+
+            # Concaténation de toutes les signatures de l'intention globale
+            signature_parts = []
+            primary_action = None
+            primary_obj = None
+            
+            for sig in self.signatures:
+                action = getattr(sig, "action", "").strip().lower()
+                obj = getattr(sig, "object", "").strip().lower()
+                if action and obj:
+                    if not primary_action:
+                        primary_action = action
+                        primary_obj = obj
+                    signature_parts.append(f"{action} {obj}")
+            
+            if not signature_parts:
+                return
+                
+            combined_signature_text = ", ".join(signature_parts)
+            
+            # Embed the combined signature text
+            embedding_service = EmbeddingService()
+            try:
+                embedding = await embedding_service.embed(combined_signature_text)
+            except Exception as e:
+                Logger.warning(f"[Solver:{self.id}] Échec de l'embedding, fallback sur mock. {e}")
+                embedding = [0.0] * 384
+                
+            # 1. Enregistrer le résultat (vectoriel) et obtenir l'ID canonique et le compte
+            canonical_profile_id, consecutive_count = profile_store.record_execution_result_vectorial(
+                signature_text=combined_signature_text,
+                embedding=embedding,
+                is_success=is_success,
+                action=primary_action,
+                object_name=primary_obj
+            )
+            self.canonical_profile_id = canonical_profile_id
+            
+            if canonical_profile_id != -1 and hasattr(self, "mission_store") and self.mission_store and getattr(self.execution_tree, "mission_id", None):
+                self.mission_store.link_episode_to_profile(self.execution_tree.mission_id, canonical_profile_id)
+
+            if is_success and canonical_profile_id != -1:
+                skill_id = f"desktop.{primary_action}.{primary_obj}".replace(" ", "_")
+                Logger.info(f"[Solver:{self.id}] 🎯 Succès enregistré pour profil {canonical_profile_id} (succès consécutifs: {consecutive_count}).")
+
+                existing = registry.get_skill(skill_id)
+                if not existing:
+                    # CAS A: Seuil de découverte atteint -> Synthèse & Création Candidate Skill (DRAFT -> SHADOW)
+                    if consecutive_count >= SKILL_DISCOVERY_THRESHOLD:
+                        Logger.info(f"[Solver:{self.id}] 🚀 SEUIL DE DÉCOUVERTE ATTEINT ({consecutive_count} >= {SKILL_DISCOVERY_THRESHOLD} succès) ! Synthèse du Méta-Plan pour '{skill_id}'.")
+                        
+                        recent_trees = self.mission_store.get_recent_trees_by_profile_id(canonical_profile_id, limit=SKILL_DISCOVERY_THRESHOLD) if hasattr(self, "mission_store") and self.mission_store else []
+                        if not recent_trees and hasattr(self, "execution_tree") and self.execution_tree:
+                            tree_dict = self.execution_tree.model_dump(mode="json") if hasattr(self.execution_tree, "model_dump") else (self.execution_tree.to_dict() if hasattr(self.execution_tree, "to_dict") else self.execution_tree)
+                            recent_trees = [tree_dict]
+                        
+                        from core.skills.synthesizer import SkillSynthesizer
+                        if hasattr(self, "llm") and self.llm:
+                            synthesizer = SkillSynthesizer(llm=self.llm)
+                            await synthesizer.synthesize(
+                                skill_id=skill_id,
+                                combined_signature=combined_signature_text,
+                                primary_action=primary_action,
+                                primary_object=primary_obj,
+                                recent_trees=recent_trees
+                            )
+                        else:
+                            Logger.warning(f"[Solver:{self.id}] Impossible de lancer le Synthesizer : LLM non disponible.")
+                else:
+                    # CAS B: Le skill existe déjà -> Le Skill Engine gère l'évaluation / shadow
+                    active_info = registry.get_active_version(skill_id)
+                    if active_info:
+                        ver, state, trust = active_info
+                        if state == SkillState.SHADOW:
+                            updated_trust = registry.record_run_metric(skill_id, ver, success=True, is_shadow=True)
+                            shadow_successes = updated_trust.shadow_validation_count
+                            Logger.info(f"[Solver:{self.id}] 🛡️ Validation Shadow pour '{skill_id}' v{ver} (exécutions shadow réussies: {shadow_successes}/{SKILL_SHADOW_SUCCESS_THRESHOLD}).")
+                            if shadow_successes >= SKILL_SHADOW_SUCCESS_THRESHOLD:
+                                Logger.info(f"[Solver:{self.id}] 🎉 PROMOTION EN PRODUCTION: Skill '{skill_id}' v{ver} qualifié !")
+                                registry.transition_state(
+                                    skill_id=skill_id,
+                                    version=ver,
+                                    target_state=SkillState.PRODUCTION,
+                                    reason=f"Validation shadow réussie ({shadow_successes} exécutions passives sans échec)."
+                                )
+                        elif state == SkillState.PRODUCTION:
+                            registry.record_run_metric(skill_id, ver, success=True)
+                            Logger.info(f"[Solver:{self.id}] 📊 Métrique d'exécution en Production enregistrée pour '{skill_id}' v{ver}.")
+
+            elif not is_success and canonical_profile_id != -1:
+                # ÉCHEC: reset consecutive_successes
+                Logger.warning(f"[Solver:{self.id}] ⚠️ Échec enregistré pour profil {canonical_profile_id}. Succès consécutifs réinitialisés à 0.")
+                skill_id = f"desktop.{primary_action}.{primary_obj}".replace(" ", "_")
+                active_info = registry.get_active_version(skill_id)
+                if active_info:
+                    ver, state, trust = active_info
+                    if state == SkillState.PRODUCTION:
+                        updated_trust = registry.record_run_metric(skill_id, ver, success=False)
+                        if updated_trust.consecutive_failures >= SKILL_CIRCUIT_BREAKER_MAX_FAILURES:
+                            Logger.error(f"[Solver:{self.id}] 🚨 CIRCUIT BREAKER: Passage de '{skill_id}' v{ver} en QUARANTINE.")
+                            registry.transition_state(
+                                skill_id=skill_id,
+                                version=ver,
+                                target_state=SkillState.QUARANTINE,
+                                reason=f"{SKILL_CIRCUIT_BREAKER_MAX_FAILURES} échecs consécutifs en production."
+                            )
+                            # --- LANCEMENT DE L'AUTO-REPARATION ---
+                            from core.skills.repair_engine import SkillRepairEngine
+                            if hasattr(self, "llm") and self.llm:
+                                repair_engine = SkillRepairEngine(llm=self.llm)
+                                await repair_engine.repair_skill(
+                                    skill_id=skill_id,
+                                    failed_version=ver,
+                                    failure_bundle=getattr(self, "last_failure_bundle", None),
+                                    breakout_report=getattr(self, "last_breakout_report", None)
+                                )
+
+            # Propagation de l'événement de cycle de vie du skill pour l'observabilité HTML / UI
+            if hasattr(self, "propagate_event"):
+                await self.propagate_event("skill_lifecycle", {
+                    "solver_id": self.id,
+                    "mission_id": getattr(self.execution_tree, "mission_id", None) if hasattr(self, "execution_tree") else None,
+                    "canonical_profile_id": canonical_profile_id,
+                    "consecutive_count": consecutive_count,
+                    "threshold": SKILL_DISCOVERY_THRESHOLD,
+                    "skill_id": f"desktop.{primary_action}.{primary_obj}".replace(" ", "_") if primary_action and primary_obj else None,
+                    "is_success": is_success,
+                    "signature": combined_signature_text,
+                })
+
+        except Exception as e:
+            Logger.error(f"[Solver:{self.id}] Erreur post-exécution dans _handle_skill_lifecycle_post_execution: {e}")
+

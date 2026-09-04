@@ -86,10 +86,16 @@ class SentenceTransformerProvider(EmbeddingProvider):
 
         try:
             loop = asyncio.get_running_loop()
-            # On utilise _SentenceTransformer (l'alias) pour le runtime
+            def _load_st_safely(model_id: str):
+                try:
+                    # Tenter d'abord en local_files_only pour éviter les timeouts et blocages réseau
+                    return _SentenceTransformer(model_id, local_files_only=True)  # type: ignore
+                except Exception:
+                    return _SentenceTransformer(model_id)  # type: ignore
+
             self._model = await loop.run_in_executor(
                 None,
-                lambda: _SentenceTransformer(self._model_id)  # type: ignore
+                lambda: _load_st_safely(self._model_id)
             )
 
             try:
@@ -121,6 +127,15 @@ class SentenceTransformerProvider(EmbeddingProvider):
                 })
             raise
 
+    def _encode_no_grad(self, texts: List[str]):
+        """Encode les textes sans accumuler d'autograd pour préserver la RAM."""
+        try:
+            import torch
+            with torch.no_grad():
+                return self._model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
+        except Exception:
+            return self._model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
+
     async def embed(self, text: str) -> List[float]:
         if not self._loaded:
             await self.initialize()
@@ -132,11 +147,7 @@ class SentenceTransformerProvider(EmbeddingProvider):
         loop = asyncio.get_running_loop()
         embedding = await loop.run_in_executor(
             None,
-            lambda: self._model.encode(  # type: ignore
-                [prefixed_text],
-                convert_to_numpy=True,
-                normalize_embeddings=True
-            )[0]
+            lambda: self._encode_no_grad([prefixed_text])[0]
         )
         return embedding.tolist()
 
@@ -154,10 +165,6 @@ class SentenceTransformerProvider(EmbeddingProvider):
         loop = asyncio.get_running_loop()
         embeddings = await loop.run_in_executor(
             None,
-            lambda: self._model.encode(  # type: ignore
-                prefixed_texts,
-                convert_to_numpy=True,
-                normalize_embeddings=True
-            )
+            lambda: self._encode_no_grad(prefixed_texts)
         )
         return [emb.tolist() for emb in embeddings]

@@ -15,6 +15,12 @@ class Actions:
     # NOUVEAU : Quand le C++ a fini d'exécuter un outil physique et renvoie le résultat
     TOOL_RESULT = "tool.result" 
     LEARNER_ANALYZE = "learner.analyze"   # <--- NOUVEAU
+    HOST_MANIFEST_REGISTER = "host.manifest.register"  # <--- Enregistrement dynamique du HostManifest
+    SYSTEM_WARMUP = "system.warmup"
+    SYSTEM_RESET_DATA = "system.reset_data"
+    DATA_STATS = "data.stats"
+    DATA_PURGE = "data.purge"
+    DATA_EXPORT = "data.export"
 
 class Events:
     RUNTIME_READY = "runtime.ready"
@@ -27,6 +33,13 @@ class Events:
     RESPONSE_COMPLETED = "response.completed"
     CONVERSATION_RESET = "conversation.reset"
     REQUEST_RECEIVED = "request.received"
+
+    # Événements du cycle de vie des Skills & Host Protocol
+    HOST_MANIFEST_UPDATED = "host.manifest_updated"
+    CHECKPOINT_REACHED = "checkpoint.reached"
+    BREAKOUT_OCCURRED = "breakout.occurred"
+    EXECUTION_COMPLETED = "execution.completed"
+    SKILL_STATE_CHANGED = "skill.state_changed"
 
     # NOUVEAUX : Le workflow interne de l'Entreprise Agentique (Hub & Spoke)
     PLANNER_START = "planner.start"           # PDG -> Stratège : "Analyse cette demande"
@@ -135,6 +148,13 @@ SOLVER_MAX_EXECUTION_TRIES = 3       # Nombre maximal de tentatives d'exécution
 SOLVER_MAX_PREEXECUTION_FAILURES = 3 # Nombre maximal d'échecs de validation de plan consécutifs
 MAX_DEPTH_EXTENSIONS = 5             # Plafond d'extensions de profondeur accordées par mission (arbitrées par le Superviseur)
 MAX_INSIGHTS_PER_TARGET = 5          # Nombre max d'insights mémorisés par cible
+
+# =====================================================
+# SKILL ENGINE
+# =====================================================
+SKILL_DISCOVERY_THRESHOLD = 2        # Nombre de succès consécutifs requis pour déclencher la création d'un Skill (DRAFT -> SHADOW)
+SKILL_SHADOW_SUCCESS_THRESHOLD = 1   # Nombre de validations passives en SHADOW requises pour la promotion en PRODUCTION (Total = 3 répétitions réussies)
+SKILL_CIRCUIT_BREAKER_MAX_FAILURES = 3 # Nombre d'échecs consécutifs en PRODUCTION avant QUARANTINE
 
 # =====================================================
 # LLM & CONTEXT BUDGETS

@@ -47,7 +47,8 @@ class GeminiProvider(BaseProvider):
     def _get_clean_model_id(self) -> str:
         model = self.model_name.strip() if self.model_name else ""
         if not model or model.lower() == "default":
-            raise ValueError(_("CRASH PRÉVENTIF : Aucun modèle valide fourni pour Gemini (Reçu: '{}').").format(model))
+            Logger.info("[GeminiProvider] Modèle 'default' ou vide reçu : utilisation du modèle standard recommandé 'gemini-2.5-flash'.")
+            return "gemini-2.5-flash"
         return model
 
     async def _get_or_create_client(self, force_new_key: bool = False) -> genai.Client:
@@ -96,6 +97,8 @@ class GeminiProvider(BaseProvider):
         attempts = 0
 
         while attempts < total_keys:
+            self.check_cancelled()
+
             current_key = self.get_active_api_key()
             if not current_key:
                 raise ProviderQuotaExhaustedError(
@@ -104,8 +107,12 @@ class GeminiProvider(BaseProvider):
 
             try:
                 await self._get_or_create_client()
-                return await func(*args, **kwargs)
+                result = await func(*args, **kwargs)
+                self.promote_key(current_key)
+                return result
 
+            except asyncio.CancelledError:
+                raise
             except APIError as e:
                 masked_key = current_key[:8] if len(current_key) >= 8 else current_key
                 # 429: Too Many Requests / Resource Exhausted, 503: Service Unavailable
@@ -119,6 +126,8 @@ class GeminiProvider(BaseProvider):
                         f"[Gemini Failover] Code {e.code} sur clé [{masked_key}...]. "
                         f"Rotation de clé (Essai {attempts}/{total_keys})..."
                     )
+
+                    self.check_cancelled()
 
                     if self.has_available_keys():
                         await asyncio.sleep(0.5)
@@ -259,6 +268,8 @@ class GeminiProvider(BaseProvider):
         attempts = 0
 
         while attempts < total_keys:
+            self.check_cancelled()
+
             current_key = self.get_active_api_key()
             if not current_key:
                 raise ProviderQuotaExhaustedError(
@@ -304,6 +315,8 @@ class GeminiProvider(BaseProvider):
                 )
 
                 async for chunk in response_stream:
+                    self.check_cancelled()
+
                     if chunk.function_calls:
                         for fc in chunk.function_calls:
                             args = dict(fc.args) if fc.args else {}
@@ -316,6 +329,9 @@ class GeminiProvider(BaseProvider):
 
                 return
 
+            except asyncio.CancelledError:
+                Logger.info("[Gemini Stream] Annulation reçue - arrêt immédiat sans rotation.")
+                raise
             except APIError as e:
                 if e.code in [429, 503] or "RESOURCE_EXHAUSTED" in str(e) or "429" in str(e):
                     attempts += 1

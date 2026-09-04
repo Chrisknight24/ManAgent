@@ -1,321 +1,126 @@
 """
-packet_models.py
-================
+transport/packet_models.py
+==========================
+Modèles de paquets de transport (Request, Response, Error) et paquets d'événements normalisés.
+Garantit que les échanges entre l'Hôte (ex: AutoCUse RPA ou autre) et ManAgent sont structurés,
+agnostiques et typés.
 
-Ce fichier définit TOUS les formats de packets JSON
-utilisés dans le runtime agentique.
-
-IMPORTANT :
--------------
-Un "packet" = un message structuré échangé
-entre :
-    - le client (Qt, app externe, etc.)
-    - le runtime Python
-
-Exemple :
-----------
-Client Qt  --->  Runtime Python
-
-{
-    "id": "msg_001",
-    "type": "request",
-    "action": "chat.send",
-    "payload": {
-        "content": "Bonjour"
-    }
-}
-
-Pourquoi ce fichier est IMPORTANT ?
------------------------------------
-Parce qu'il définit le "langage officiel"
-du runtime.
-
-Tous les modules dépendront de ces structures :
-    - transport
-    - orchestrator
-    - planner
-    - tools
-    - memory
-    - providers
-    - etc.
-
-Donc :
-si les packets sont propres,
-tout le système devient propre.
+Utilise pydantic si disponible, avec fallback gracieux sur dataclasses en environnement sans dépendance externe.
 """
 
+from typing import Optional, Dict, Any, List
+import json
 
-# =========================================================
-# IMPORTS
-# =========================================================
+try:
+    from pydantic import BaseModel, Field
 
-# Optional :
-# ----------
-# Permet d'indiquer qu'une valeur peut être :
-#     - un type donné
-#     - OU None
-#
-# Exemple :
-# id: Optional[str]
-#
-# signifie :
-#     soit une string
-#     soit None
-#
-from typing import Optional
+    class RequestPacket(BaseModel):
+        """Paquet de requête envoyé par l'hôte à ManAgent."""
+        action: str
+        payload: Dict[str, Any] = Field(default_factory=dict)
 
+    class ResponsePacket(BaseModel):
+        """Paquet de réponse synchrone de ManAgent à l'hôte."""
+        type: str = "response"
+        status: str = "success"
+        payload: Dict[str, Any] = Field(default_factory=dict)
 
-# Literal :
-# ----------
-# Permet de limiter une variable
-# à des valeurs précises.
-#
-# Exemple :
-# type: Literal["request"]
-#
-# signifie :
-# type DOIT être exactement "request"
-#
-from typing import Literal
+    class ErrorPacket(BaseModel):
+        """Paquet d'erreur de ManAgent vers l'hôte."""
+        type: str = "error"
+        message: str
 
+    class EventPacket(BaseModel):
+        """Paquet d'événement général émis vers l'hôte."""
+        type: str = "event"
+        event: str
+        payload: Dict[str, Any] = Field(default_factory=dict)
 
-# Dict :
-# -------
-# Représente un dictionnaire Python.
-#
-# Exemple :
-# {
-#     "content": "bonjour"
-# }
-#
-from typing import Dict
+    class CheckpointReachedEvent(BaseModel):
+        """Événement émis lors du franchissement validé d'un checkpoint sémantique."""
+        skill_id: str
+        version: int
+        checkpoint_id: str
+        checkpoint_name: str
+        is_critical: bool = True
+        reached_at: float
+        observed_state: Dict[str, Any] = Field(default_factory=dict)
 
+    class BreakoutOccurredEvent(BaseModel):
+        """Événement émis lorsqu'un écart ou une anomalie (Breakout) est détecté(e)."""
+        skill_id: str
+        version: int
+        step_id: Optional[str] = None
+        breakout_type: str = "UNKNOWN"
+        reason: str = ""
+        occurred_at: float
+        context_snapshot: Dict[str, Any] = Field(default_factory=dict)
+        suggested_action: Optional[str] = None
 
-# Any :
-# ------
-# Signifie :
-# "n'importe quel type"
-#
-# Très utile pour les payloads dynamiques.
-#
-from typing import Any
+    class ExecutionCompletedEvent(BaseModel):
+        """Événement émis à la fin d'une exécution de Skill ou de séquence d'outils."""
+        skill_id: Optional[str] = None
+        version: Optional[int] = None
+        success: bool
+        duration_ms: float
+        total_steps: int = 0
+        passed_checkpoints: List[str] = Field(default_factory=list)
+        output_data: Dict[str, Any] = Field(default_factory=dict)
+        error_message: Optional[str] = None
 
+except ImportError:
+    from dataclasses import dataclass, field, asdict
 
-# BaseModel :
-# ------------
-# Classe principale de Pydantic.
-#
-# Pydantic est une librairie ultra importante
-# dans les systèmes Python modernes.
-#
-# Elle sert à :
-#     - valider les données
-#     - parser automatiquement le JSON
-#     - vérifier les types
-#     - générer des erreurs propres
-#
-# Exemple :
-#
-# packet = RequestPacket(...)
-#
-# Pydantic vérifiera automatiquement :
-#     - les champs manquants
-#     - les mauvais types
-#     - les erreurs de structure
-#
-from pydantic import BaseModel
+    @dataclass
+    class RequestPacket:
+        action: str
+        payload: Dict[str, Any] = field(default_factory=dict)
 
+    @dataclass
+    class ResponsePacket:
+        type: str = "response"
+        status: str = "success"
+        payload: Dict[str, Any] = field(default_factory=dict)
 
-# =========================================================
-# BASE PACKET
-# =========================================================
+    @dataclass
+    class ErrorPacket:
+        type: str = "error"
+        message: str = ""
 
-class BasePacket(BaseModel):
-    """
-    Classe de base pour TOUS les packets.
+    @dataclass
+    class EventPacket:
+        type: str = "event"
+        event: str = ""
+        payload: Dict[str, Any] = field(default_factory=dict)
 
-    Toutes les autres classes hériteront de celle-ci.
+    @dataclass
+    class CheckpointReachedEvent:
+        skill_id: str
+        version: int
+        checkpoint_id: str
+        checkpoint_name: str
+        is_critical: bool = True
+        reached_at: float = 0.0
+        observed_state: Dict[str, Any] = field(default_factory=dict)
 
-    Héritage :
-    ----------
-    RequestPacket(BasePacket)
-    ResponsePacket(BasePacket)
-    etc.
+    @dataclass
+    class BreakoutOccurredEvent:
+        skill_id: str
+        version: int
+        step_id: Optional[str] = None
+        breakout_type: str = "UNKNOWN"
+        reason: str = ""
+        occurred_at: float = 0.0
+        context_snapshot: Dict[str, Any] = field(default_factory=dict)
+        suggested_action: Optional[str] = None
 
-    Champs :
-    --------
-    id :
-        identifiant unique optionnel du packet.
-
-        Exemple :
-            "msg_001"
-
-        Très utile plus tard pour :
-            - tracking
-            - réponses async
-            - observabilité
-            - corrélation request/response
-
-    type :
-        type principal du packet.
-
-        Exemple :
-            "request"
-            "response"
-            "event"
-            "error"
-    """
-
-    id: Optional[str] = None
-
-    type: str
-
-
-# =========================================================
-# REQUEST PACKET
-# =========================================================
-
-class RequestPacket(BasePacket):
-    """
-    Packet envoyé AU runtime.
-
-    Exemple :
-    ----------
-    {
-        "id":"msg_001",
-        "type":"request",
-        "action":"chat.send",
-        "payload":{
-            "content":"Bonjour"
-        }
-    }
-
-    action :
-    --------
-    Action demandée au runtime.
-
-    Exemple :
-        "chat.send"
-        "system.reset"
-        "tool.execute"
-
-    payload :
-    ----------
-    "charge utile" du packet.
-
-    Contient les vraies données.
-    """
-
-    # Literal force la valeur exacte.
-    # Donc :
-    # type DOIT être "request"
-    #
-    type: Literal["request"]
-
-    # Nom de l'action demandée
-    #
-    action: str
-
-    # Dictionnaire contenant les données utiles
-    #
-    payload: Dict[str, Any] = {}
-
-
-# =========================================================
-# RESPONSE PACKET
-# =========================================================
-
-class ResponsePacket(BasePacket):
-    """
-    Réponse officielle du runtime.
-
-    Exemple :
-    ----------
-    {
-        "id":"msg_001",
-        "type":"response",
-        "status":"success",
-        "payload":{
-            "content":"Salut"
-        }
-    }
-    """
-
-    type: Literal["response"]
-
-    # Indique si l'action a réussi ou échoué
-    #
-    status: Literal["success", "error"]
-
-    payload: Dict[str, Any] = {}
-
-
-# =========================================================
-# EVENT PACKET
-# =========================================================
-
-class EventPacket(BasePacket):
-    """
-    Packet événementiel.
-
-    IMPORTANT :
-    -------------
-    Les events sont très importants
-    dans les architectures modernes.
-
-    Exemple :
-    ----------
-    {
-        "type":"event",
-        "event":"agent.thinking"
-    }
-
-    Plus tard :
-    -----------
-    On pourra avoir :
-        - tool.started
-        - tool.finished
-        - agent.thinking
-        - memory.updated
-        - planner.created_plan
-    """
-
-    type: Literal["event"]
-
-    # Nom de l'événement
-    #
-    event: str
-
-    payload: Dict[str, Any] = {}
-
-
-# =========================================================
-# ERROR PACKET
-# =========================================================
-
-class ErrorPacket(BasePacket):
-    """
-    Packet d'erreur standardisé.
-
-    Exemple :
-    ----------
-    {
-        "type":"error",
-        "message":"Provider unavailable"
-    }
-
-    Pourquoi standardiser les erreurs ?
-    -----------------------------------
-    Parce que plus tard :
-        - UI
-        - logs
-        - observability
-        - debugger
-
-    pourront comprendre les erreurs
-    automatiquement.
-    """
-
-    type: Literal["error"]
-
-    message: str
+    @dataclass
+    class ExecutionCompletedEvent:
+        skill_id: Optional[str] = None
+        version: Optional[int] = None
+        success: bool = True
+        duration_ms: float = 0.0
+        total_steps: int = 0
+        passed_checkpoints: List[str] = field(default_factory=list)
+        output_data: Dict[str, Any] = field(default_factory=dict)
+        error_message: Optional[str] = None
