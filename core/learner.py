@@ -24,6 +24,12 @@ from core.embedding_service import embed_text
 # MODÈLES PYDANTIC POUR L'EXTRACTION DE LEÇON
 # =====================================================
 
+def is_anti_skill_lesson(recommendation: str, scope: str = "") -> bool:
+    """Ignore toute leçon d'évitement ciblant l'outil execute_skill."""
+    rec = (recommendation or "").lower()
+    sc = (scope or "").lower()
+    return "execute_skill" in sc or "execute_skill" in rec
+
 class ExtractedLesson(BaseModel):
     scope: str = Field(..., description="Identité STABLE et étroite de la leçon.")
     keywords: List[str] = Field(default_factory=list, description="Mots-clés LARGES de découvrabilité.")
@@ -180,6 +186,10 @@ class Analyzer:
             recommendation = self._generate_recommendation_fallback(failure_class, failure_reason)
             keywords = []
 
+        if is_anti_skill_lesson(recommendation, scope):
+            Logger.info(f"[Analyzer] Leçon anti-skill ignorée ({scope}) : {recommendation}")
+            return
+
         emb_text = f"{scope} {recommendation} {' '.join(keywords)}"
         embedding = await embed_text(emb_text)
 
@@ -192,15 +202,16 @@ class Analyzer:
 
         if failure_class in (FailureClass.EXECUTION_FAILURE, FailureClass.CONVERGENCE_FAILURE):
             for node in attempt.nodes:
-                if node.status == "failed" and node.tool_name:
+                if node.status == "failed" and node.tool_name and node.tool_name != "execute_skill":
                     tool_scope = f"{node.tool_name}:{failure_class.value}"
                     tool_recommendation = f"Échec de l'outil {node.tool_name}. {recommendation}"
-                    self.lesson_store.upsert_lesson(
-                        entity_type=entity_type, scope=tool_scope, recommendation=tool_recommendation,
-                        environment=environment, keywords=list(set(keywords + [node.tool_name])),
-                        mission_id=mission_id, polarity="avoid", embedding=embedding
-                    )
-                    await self._invalidate_advisor_cache(scope)
+                    if not is_anti_skill_lesson(tool_recommendation, tool_scope):
+                        self.lesson_store.upsert_lesson(
+                            entity_type=entity_type, scope=tool_scope, recommendation=tool_recommendation,
+                            environment=environment, keywords=list(set(keywords + [node.tool_name])),
+                            mission_id=mission_id, polarity="avoid", embedding=embedding
+                        )
+                        await self._invalidate_advisor_cache(scope)
                     break
                 
     async def _generate_prefer_lesson(self, attempt: PlanAttempt, goal: str, environment: str,
@@ -232,6 +243,10 @@ class Analyzer:
             scope = "success_contrast_fallback"
             recommendation = "Privilégier une approche alternative en cas d'échec répété."
             keywords = ["alternative", "retry", "success"]
+
+        if is_anti_skill_lesson(recommendation, scope):
+            Logger.info(f"[Analyzer] Leçon prefer anti-skill ignorée ({scope}) : {recommendation}")
+            return
 
         emb_text = f"{scope} {recommendation} {' '.join(keywords)}"
         embedding = await embed_text(emb_text)
@@ -305,7 +320,9 @@ class Advisor:
         if goal_emb is None:
             goal_emb = await embed_text(goal)
         
-        selected = self.lesson_store.get_similar_lessons(goal_emb, entity_types, effective_env, top_k=3)
+        selected = self.lesson_store.get_similar_lessons(goal_emb, entity_types, effective_env, top_k=5)
+        selected = [c for c in selected if not is_anti_skill_lesson(c.get("recommendation", ""), c.get("scope", ""))]
+        selected = selected[:3]
         
         if not selected:
             return "Aucun conseil historique ou sémantique pertinent disponible pour cette tâche."

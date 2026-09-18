@@ -128,12 +128,23 @@ def load_skills(db_path: str) -> List[Dict[str, Any]]:
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     try:
-        cur.execute("""
+        cur.execute("PRAGMA table_info(skill_versions)")
+        v_cols = [c[1] for c in cur.fetchall()]
+        cur.execute("PRAGMA table_info(skills)")
+        s_cols = [c[1] for c in cur.fetchall()]
+
+        variant_sel = "v.environment_variant_tag" if "environment_variant_tag" in v_cols else "NULL as environment_variant_tag"
+        pre_sel = "s.preconditions_json" if "preconditions_json" in s_cols else "NULL as preconditions_json"
+        post_sel = "s.postconditions_json" if "postconditions_json" in s_cols else "NULL as postconditions_json"
+
+        cur.execute(f"""
             SELECT 
                 s.skill_id, s.namespace, s.name, s.description, s.parameters_schema,
                 s.environment_json, s.checkpoints_json, s.risk_level, s.current_production_version,
+                {pre_sel}, {post_sel},
                 v.version, v.parent_version, v.state, v.creator_model, v.provenance,
                 v.repair_reason, v.flow_payload_ref, v.payload_content, v.trust_profile_json,
+                {variant_sel},
                 v.created_at, v.updated_at
             FROM skill_versions v
             JOIN skills s ON s.skill_id = v.skill_id
@@ -154,7 +165,26 @@ def load_skills(db_path: str) -> List[Dict[str, Any]]:
             trust_profile = json.loads(row.get("trust_profile_json") or "{}")
         except Exception:
             trust_profile = {}
-        
+        try:
+            env = json.loads(row.get("environment_json") or "{}")
+        except Exception:
+            env = {}
+        try:
+            preconditions = json.loads(row.get("preconditions_json") or "[]")
+        except Exception:
+            preconditions = []
+        try:
+            postconditions = json.loads(row.get("postconditions_json") or "[]")
+        except Exception:
+            postconditions = []
+        try:
+            flow_data = json.loads(row.get("payload_content") or "{}")
+        except Exception:
+            flow_data = {}
+
+        flow_steps = flow_data.get("meta_plan") or flow_data.get("plan_nodes") or flow_data.get("steps") or flow_data.get("nodes") or []
+        variant_tag = row.get("environment_variant_tag") or env.get("environment_variant_tag") or "DEFAULT"
+
         skills.append({
             "skill_id": row.get("skill_id"),
             "namespace": row.get("namespace"),
@@ -162,6 +192,11 @@ def load_skills(db_path: str) -> List[Dict[str, Any]]:
             "description": row.get("description"),
             "parameters_schema": row.get("parameters_schema"),
             "environment_json": row.get("environment_json"),
+            "environment": env,
+            "environment_variant_tag": variant_tag,
+            "preconditions": preconditions,
+            "postconditions": postconditions,
+            "flow_steps": flow_steps,
             "checkpoints": checkpoints,
             "risk_level": row.get("risk_level"),
             "current_production_version": row.get("current_production_version"),
@@ -606,10 +641,12 @@ def attach_llm_calls_by_mission(episodes, llm_calls, events):
 
         # 9.5 Skill Engine (Synthesis & Repair)
         if tag in {"SkillSynthesis", "SkillRepair"}:
-            if ep and solver_id:
-                ep.setdefault("_solver_skills", {}).setdefault(solver_id, []).append(call)
-            elif ep:
-                ep.setdefault("_solver_skills", {}).setdefault("root_solver", []).append(call)
+            if ep:
+                ep.setdefault("_skill_calls", []).append(call)
+                if solver_id:
+                    ep.setdefault("_solver_skills", {}).setdefault(solver_id, []).append(call)
+                else:
+                    ep.setdefault("_solver_skills", {}).setdefault("root_solver", []).append(call)
             continue
 
         # 10. Steps & fallback
@@ -736,10 +773,12 @@ def build_data(
             solver_id = ev.get("solver_id")
             if solver_id:
                 solver_registries[solver_id] = ev.get("registry", {})
-        elif ev.get("event") == "skill_lifecycle":
+        elif ev.get("event") in ("skill_lifecycle", "skill_created", "skill_shadow_validated", "skill_transition", "skill_repaired", "skill_execution_metric"):
             mid = ev.get("mission_id")
             if mid and mid in ep_index:
                 ep_index[mid].setdefault("_skill_lifecycle", []).append(ev)
+            elif not mid and ep_index:
+                list(ep_index.values())[-1].setdefault("_skill_lifecycle", []).append(ev)
 
     for ep in episodes:
         ep["_registries"] = solver_registries
@@ -2577,12 +2616,27 @@ function renderSolverNodeModern(ep, treeNode, depth) {
           <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px;">
             <div style="display:flex; align-items:center; gap:8px;">
               <span style="font-family:var(--mono); font-size:11.5px; font-weight:800; color:var(--primary);">#${nodeIdx + 1} · ${esc(node.step_id)}</span>
-              ${node.tool_name ? `<span class="badge badge--primary">🔧 ${esc(node.tool_name)}</span>` : ''}
+              ${node.tool_name === 'execute_skill' ? 
+                `<span class="badge" style="background:#7c3aed; color:#fff; font-weight:800; border:1px solid #6d28d9;">⚡ SKILL: ${esc(node.tool_arguments?.skill_id || (typeof node.tool_args === 'object' && node.tool_args?.skill_id) || 'Composite')}</span>` : 
+                (node.tool_name ? `<span class="badge badge--primary">🔧 ${esc(node.tool_name)}</span>` : '')
+              }
               <span style="font-size:11px; color:var(--text-faint); font-family:var(--mono);">${esc(node.step_type || '')}</span>
             </div>
             <div>${statusBadge(node.status)}</div>
           </div>
           <div style="font-size:13px; font-weight:600; color:var(--text); margin-top:6px;">${esc(node.description || 'Étape sans description')}</div>
+          
+          ${(node.result?.executed_steps || node.output?.executed_steps) ? `
+            <div style="margin-top:8px; background:rgba(124,58,237,0.06); border:1px solid rgba(124,58,237,0.2); border-radius:6px; padding:6px 10px; font-size:11.5px; font-family:var(--mono);" onclick="event.stopPropagation();">
+              <div style="font-weight:700; color:var(--purple); margin-bottom:4px;">↳ Déroulement Méta-Plan (${(node.result?.executed_steps || node.output?.executed_steps).length} sous-actions physiques) :</div>
+              ${(node.result?.executed_steps || node.output?.executed_steps).map(sub => `
+                <div style="display:flex; justify-content:space-between; margin-top:2px;">
+                  <span>${sub.success ? '✅' : '❌'} [${(sub.index !== undefined ? sub.index : 0) + 1}] <b>${esc(sub.tool)}</b> (${esc(JSON.stringify(sub.args || {}))})</span>
+                  <span style="color:var(--text-faint);">${sub.duration || 0}s</span>
+                </div>
+              `).join('')}
+            </div>
+          ` : ''}
           
           ${stepDisc.length > 0 ? `
             <div style="margin-top:6px; display:flex; align-items:center; gap:6px;" onclick="event.stopPropagation();">
@@ -2685,6 +2739,8 @@ function renderSolverNodeModern(ep, treeNode, depth) {
 function renderSkillLifecycleImpact(ep, solverId) {
   const lifecycleEvents = ep._skill_lifecycle || [];
   const sigs = ep.signatures || [];
+  const cleanSid = solverId ? solverId.replace(/^solver_/, '') : '';
+  const skillCalls = (ep._solver_skills && (ep._solver_skills[solverId] || ep._solver_skills[cleanSid] || ep._solver_skills['root_solver'])) || ep._skill_calls || [];
   
   let matchedSkill = null;
   if (sigs.length > 0) {
@@ -2697,26 +2753,64 @@ function renderSkillLifecycleImpact(ep, solverId) {
     }
   }
 
-  if (lifecycleEvents.length === 0 && !matchedSkill) {
+  if (lifecycleEvents.length === 0 && (!matchedSkill || solverId !== 'root_solver') && skillCalls.length === 0) {
     return '';
   }
 
-  let html = `<div style="margin-left:14px; margin-top:8px; margin-bottom:8px; background:var(--surface-alt); border:1px solid var(--border); border-left:4px solid #2563eb; border-radius:8px; padding:10px 14px; font-size:12.5px;">`;
-  html += `<div style="font-weight:800; color:var(--text); display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;">`;
-  html += `<span>⚡ Impact Skill Engine & Cycle de Vie</span>`;
-  if (matchedSkill) {
+  let html = `<div style="margin-left:14px; margin-top:8px; margin-bottom:8px; background:var(--surface-alt); border:1px solid var(--border); border-left:4px solid #7c3aed; border-radius:8px; padding:10px 14px; font-size:12.5px;">`;
+  html += `<div style="font-weight:800; color:var(--text); display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">`;
+  html += `<span style="display:flex; align-items:center; gap:6px;">⚡ Impact Skill Engine & Évolution</span>`;
+  if (matchedSkill && solverId === 'root_solver') {
     let badgeColor = 'badge--success';
     if (matchedSkill.state === 'SHADOW') badgeColor = 'badge--primary';
     if (matchedSkill.state === 'QUARANTINE') badgeColor = 'badge--failed';
     if (matchedSkill.state === 'DRAFT') badgeColor = 'badge--purple';
     html += `<span class="badge ${badgeColor}">${esc(matchedSkill.state)} (v${matchedSkill.version})</span>`;
+  } else if (skillCalls.length > 0) {
+    html += `<span class="badge badge--purple">Synthèse / Réparation Active</span>`;
   } else {
     html += `<span class="badge badge--purple">Accumulation Récurrence</span>`;
   }
   html += `</div>`;
 
+  // Appels LLM de Skills (Synthèse & Auto-Réparation)
+  if (skillCalls.length > 0) {
+    html += `<div style="margin-top:6px; margin-bottom:8px; display:flex; flex-wrap:wrap; gap:6px;">`;
+    skillCalls.forEach((c, scIdx) => {
+      const isRepair = c.tag === 'SkillRepair';
+      html += `<button class="tree-node-card tree-node-card--plan" style="padding:4px 10px; font-size:11.5px; font-weight:700; cursor:pointer;" onclick="event.stopPropagation(); inspectSkillCall('${esc(ep.mission_id)}', '${esc(solverId)}', ${scIdx})">
+        ${isRepair ? '🔧 Réparation Skill (LLM)' : '⚡ Synthèse Méta-Plan (LLM)'} (${formatDuration(c.duration_ms)})
+      </button>`;
+    });
+    html += `</div>`;
+  }
+
   if (lifecycleEvents.length > 0) {
     lifecycleEvents.forEach(ev => {
+      if (ev.event === 'skill_created') {
+        html += `<div style="margin-top:4px; color:var(--text); font-size:12px;">`;
+        html += `✨ <b>Compétence Auto-Synthétisée</b> : <code>${esc(ev.skill_id)}</code> v${ev.version || 1} en état <strong>${esc(ev.state || 'SHADOW')}</strong> (${ev.meta_plan_steps || 0} étapes de méta-plan).<br/>`;
+        html += `</div>`;
+        return;
+      }
+      if (ev.event === 'skill_shadow_validated') {
+        html += `<div style="margin-top:4px; color:var(--text); font-size:12px;">`;
+        html += `🛡️ <b>Validation Shadow (Concordance LCS)</b> : <code>${esc(ev.skill_id)}</code> v${ev.version} — Qualification <strong>${ev.shadow_successes} / ${ev.threshold || 2}</strong> (${esc(ev.concordance_reason || 'Trace alignée')}).<br/>`;
+        html += `</div>`;
+        return;
+      }
+      if (ev.event === 'skill_transition' && ev.target_state === 'PRODUCTION') {
+        html += `<div style="margin-top:4px; color:var(--success); font-size:12px; font-weight:700;">`;
+        html += `🎉 <b>Promotion en Production !</b> Le Skill <code>${esc(ev.skill_id)}</code> v${ev.version} est désormais qualifié pour exécution directe.<br/>`;
+        html += `</div>`;
+        return;
+      }
+      if (ev.event === 'skill_repaired') {
+        html += `<div style="margin-top:4px; color:var(--primary); font-size:12px;">`;
+        html += `🔧 <b>Auto-Réparation Réussie</b> : <code>${esc(ev.skill_id)}</code> v${ev.new_version} générée (Raison: ${esc(ev.repair_reason || 'Correction automatique')}).<br/>`;
+        html += `</div>`;
+        return;
+      }
       const canonId = ev.canonical_profile_id;
       const count = ev.consecutive_count;
       const thresh = ev.threshold || 2;
@@ -2732,7 +2826,7 @@ function renderSkillLifecycleImpact(ep, solverId) {
       }
       html += `</div>`;
     });
-  } else if (matchedSkill) {
+  } else if (matchedSkill && solverId === 'root_solver') {
     const tp = matchedSkill.trust_profile || {};
     html += `<div style="margin-top:4px; color:var(--text-muted); font-size:12px;">`;
     html += `🚀 <b>Skill Qualifié en Production</b> : <code>${esc(matchedSkill.skill_id)}</code><br/>`;
@@ -3430,6 +3524,68 @@ function inspectLearnerCall(missionId, solverId, idx) {
   updateInspector('Learner', 'Leçons', overview, call ? [call] : [], call);
 }
 
+function inspectSkillCall(missionId, solverId, idx) {
+  const ep = findEpisode(missionId);
+  const cleanSid = solverId ? solverId.replace(/^solver_/, '') : '';
+  const calls = (ep._solver_skills && (ep._solver_skills[solverId] || ep._solver_skills[cleanSid] || ep._solver_skills['root_solver'])) || ep._skill_calls || [];
+  const call = calls[idx];
+  if (!call) return;
+  
+  const resp = call.response || {};
+  const tag = call.tag || 'SkillEngine';
+  const metaPlan = resp.meta_plan || [];
+  const skillId = resp.skill_id || resp.name || (call.request && call.request.skill_id) || 'Non spécifié';
+  const rationale = resp.rationale || resp.reasoning || resp.explanation || resp.reason || '';
+
+  let overview = `<div style="display:flex; flex-direction:column; gap:14px;">
+    <div>
+      <div style="font-size:11px; font-weight:700; color:var(--text-faint); text-transform:uppercase;">Skill Engine · LLM Call</div>
+      <div style="font-family:var(--mono); font-weight:800; color:var(--purple); font-size:16px; margin-top:2px;">
+        ${tag === 'SkillRepair' ? '🔧 Auto-Réparation de Skill (Self-Healing)' : '⚡ Synthèse de Méta-Plan (Distillation)'}
+      </div>
+      <div style="font-size:12.5px; color:var(--text-muted); margin-top:4px;">
+        Identifiant Cible : <code>${esc(skillId)}</code>
+      </div>
+    </div>
+
+    ${rationale ? `
+      <div style="background:var(--surface-alt); padding:12px; border-radius:8px; border-left:4px solid var(--purple); border:1px solid var(--border);">
+        <div style="font-weight:700; font-size:12px; color:var(--purple); text-transform:uppercase; margin-bottom:4px;">Raisonnement Cognitif :</div>
+        <div style="font-size:13px; color:var(--text); line-height:1.4;">${esc(rationale)}</div>
+      </div>
+    ` : ''}
+
+    ${metaPlan.length > 0 ? `
+      <div>
+        <div style="font-size:11px; font-weight:700; color:var(--text-faint); text-transform:uppercase; margin-bottom:6px;">Méta-Plan Synthétisé (${metaPlan.length} étapes)</div>
+        <div style="display:flex; flex-direction:column; gap:6px;">
+          ${metaPlan.map((node, nIdx) => `
+            <div style="background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:8px 10px; font-size:12px;">
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <span style="font-family:var(--mono); font-weight:700; color:var(--primary);">#${nIdx + 1} · ${esc(node.tool_name || node.action || 'action')}</span>
+                ${node.step_id ? `<span style="font-size:10px; color:var(--text-faint); font-family:var(--mono);">${esc(node.step_id)}</span>` : ''}
+              </div>
+              <div style="margin-top:3px; color:var(--text);">${esc(node.description || '')}</div>
+              ${node.tool_args ? `
+                <div style="margin-top:4px; font-family:var(--mono); font-size:11px; color:var(--text-muted); background:var(--surface-alt); padding:4px 6px; border-radius:4px;">
+                  ${esc(JSON.stringify(node.tool_args))}
+                </div>
+              ` : ''}
+              ${node.expected_result ? `
+                <div style="margin-top:4px; font-size:11px; color:var(--success);">
+                  <b>Attendu :</b> ${esc(node.expected_result)}
+                </div>
+              ` : ''}
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    ` : ''}
+  </div>`;
+
+  updateInspector(`Skill LLM: ${tag}`, 'SkillEngine', overview, [call], call);
+}
+
 function inspectPresentator(missionId) {
   const ep = findEpisode(missionId);
   const calls = ep._presentator_calls || [];
@@ -3535,33 +3691,59 @@ function renderSkillsView(filter) {
 
   container.innerHTML = filtered.map(s => {
     const tp = s.trust_profile || {};
-    const successRate = tp.total_executions > 0 ? ((tp.successful_executions / tp.total_executions) * 100).toFixed(0) : 0;
+    const successCount = tp.success_count || tp.successful_executions || 0;
+    const failureCount = tp.failure_count || 0;
+    const totalExec = tp.total_executions || (successCount + failureCount);
+    const successRate = totalExec > 0 ? ((successCount / totalExec) * 100).toFixed(0) : 0;
+    const shadowCount = tp.shadow_validation_count || 0;
     
     let stateBadgeColor = 'badge--primary';
     if (s.state === 'PRODUCTION') stateBadgeColor = 'badge--success';
+    if (s.state === 'SHADOW') stateBadgeColor = 'badge--primary';
     if (s.state === 'QUARANTINE') stateBadgeColor = 'badge--failed';
     if (s.state === 'DRAFT') stateBadgeColor = 'badge--purple';
 
+    const env = s.environment || {};
+    const varTag = s.environment_variant_tag || env.variant_tag || 'DEFAULT';
+    const reqs = env.requirements && Object.keys(env.requirements).length > 0 ? env.requirements : env;
+    const reservedKeys = new Set(['requirements', 'variant_tag', 'preconditions', 'postconditions', 'metadata', 'environment_flags']);
+    const envEntries = Object.entries(reqs).filter(([k, v]) => !reservedKeys.has(k) && v != null && v !== '');
+
     return `
     <div class="skill-box state-${(s.state || 'DRAFT').toLowerCase()}">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-        <span class="badge badge--purple" style="font-size:10px;">${esc(s.namespace || 'desktop')}</span>
-        <span class="badge ${stateBadgeColor}">${esc(s.state)} (v${s.version})</span>
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+        <span class="badge badge--purple" style="font-size:10px;">${esc(s.namespace || 'skills')}</span>
+        <span class="badge ${stateBadgeColor}">[⚡ SKILL: v${s.version} / ${esc(varTag)}] ${esc(s.state)}</span>
       </div>
       <div style="font-size:15px; font-weight:800; color:var(--text); font-family:var(--mono); line-height:1.3;">
         ${esc(s.skill_id)}
       </div>
-      <div style="font-size:12.5px; font-weight:500; color:var(--text-muted); line-height:1.45; min-height:36px;">
+      <div style="font-size:12.5px; font-weight:500; color:var(--text-muted); line-height:1.45; min-height:28px; margin-top:2px;">
         ${esc(s.description)}
+      </div>
+
+      <!-- Empreinte d'Environnement Agnostique & Déterministe -->
+      <div style="background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:6px 10px; margin-top:6px; font-size:11px; font-family:var(--mono); color:var(--text-muted);">
+        <div style="font-weight:700; text-transform:uppercase; color:var(--text-faint); margin-bottom:2px;">⚙️ Profil d'Environnement Requis</div>
+        <div style="display:flex; flex-wrap:wrap; gap:8px;">
+          ${envEntries.length > 0 ? envEntries.map(([k, v]) => `<span>${esc(k)}: <strong style="color:var(--text);">${esc(Array.isArray(v) ? v.join(', ') : String(v))}</strong></span>`).join('') : '<span style="color:var(--text-faint);">Universel (sans contrainte d\'hôte spécifique)</span>'}
+        </div>
       </div>
       
       <!-- Metrics -->
-      <div style="background:var(--surface-alt); padding:10px 12px; border-radius:8px; display:grid; grid-template-columns:1fr 1fr; gap:8px; font-size:11.5px; margin-top:4px;">
+      ${s.state === 'SHADOW' ? `
+      <div style="background:var(--surface-alt); padding:10px 12px; border-radius:8px; display:grid; grid-template-columns:1fr 1fr; gap:8px; font-size:11.5px; margin-top:6px;">
+        <div>🛡️ Validation Shadow: <strong style="color:var(--primary); font-family:var(--mono);">${shadowCount} / 1 passive(s)</strong></div>
+        <div>🎯 Phase: <strong style="color:#2563eb; font-family:var(--mono);">Observation LCS</strong></div>
+        <div>📈 Score Confiance: <strong style="font-family:var(--mono);">${((tp.trust_score || 0.5) * 100).toFixed(0)}%</strong></div>
+        <div>📊 Total Exéc: <strong style="font-family:var(--mono);">${totalExec}</strong></div>
+      </div>` : `
+      <div style="background:var(--surface-alt); padding:10px 12px; border-radius:8px; display:grid; grid-template-columns:1fr 1fr; gap:8px; font-size:11.5px; margin-top:6px;">
         <div>🔥 Taux Succès: <strong style="color:var(--success); font-family:var(--mono);">${successRate}%</strong></div>
-        <div>📊 Total Exéc: <strong style="font-family:var(--mono);">${tp.total_executions || 0}</strong></div>
-        <div>✅ Succès: <strong style="font-family:var(--mono);">${tp.successful_executions || 0}</strong></div>
+        <div>📊 Total Exéc: <strong style="font-family:var(--mono);">${totalExec}</strong></div>
+        <div>✅ Succès: <strong style="font-family:var(--mono);">${successCount}</strong></div>
         <div>❌ Échecs: <strong style="color:var(--failure); font-family:var(--mono);">${tp.consecutive_failures || 0} consécutifs</strong></div>
-      </div>
+      </div>`}
       
       <!-- Provenance and reason -->
       <div style="display:flex; align-items:center; justify-content:space-between; font-size:11px; color:var(--text-faint); font-family:var(--mono); margin-top:4px;">
@@ -3570,9 +3752,24 @@ function renderSkillsView(filter) {
       </div>
 
       ${s.repair_reason ? `
-      <div style="color:var(--failure); font-weight:600; background:var(--failure-bg); border:1px solid var(--failure-border); padding:8px 10px; border-radius:6px; margin-top:4px; font-size:11.5px; line-height:1.4;">
+      <div style="color:var(--failure); font-weight:600; background:var(--failure-bg); border:1px solid var(--failure-border); padding:8px 10px; border-radius:6px; margin-top:6px; font-size:11.5px; line-height:1.4;">
         ⚠️ <strong>Raison de mise en quarantaine / réparation:</strong><br/>
         ${esc(s.repair_reason)}
+      </div>` : ''}
+
+      <!-- Préconditions & Postconditions (Contrat HTN Planner) -->
+      ${(s.preconditions && s.preconditions.length > 0) || (s.postconditions && s.postconditions.length > 0) ? `
+      <div style="margin-top:6px; display:grid; grid-template-columns:1fr 1fr; gap:6px; font-size:11px;">
+        ${s.preconditions && s.preconditions.length > 0 ? `
+        <div style="background:var(--surface); border:1px solid var(--border); border-radius:4px; padding:4px 6px;">
+          <div style="font-weight:700; color:#2563eb; margin-bottom:2px;">État A (Préconditions):</div>
+          ${s.preconditions.map(p => `<div style="font-family:var(--mono); color:var(--text-muted);">• ${esc(p.name || p.type || JSON.stringify(p))}</div>`).join('')}
+        </div>` : '<div></div>'}
+        ${s.postconditions && s.postconditions.length > 0 ? `
+        <div style="background:var(--surface); border:1px solid var(--border); border-radius:4px; padding:4px 6px;">
+          <div style="font-weight:700; color:#16a34a; margin-bottom:2px;">État B (Postconditions):</div>
+          ${s.postconditions.map(p => `<div style="font-family:var(--mono); color:var(--text-muted);">• ${esc(p.name || p.type || JSON.stringify(p))}</div>`).join('')}
+        </div>` : '<div></div>'}
       </div>` : ''}
 
       <!-- Checkpoints list -->
@@ -3588,6 +3785,33 @@ function renderSkillsView(filter) {
           `).join('')}
         </div>
       </div>` : ''}
+
+      <!-- Méta-Plan Déterministe (Micro-actions atomiques) -->
+      ${s.flow_steps && s.flow_steps.length > 0 ? `
+      <details style="margin-top:8px; font-size:11.5px; background:var(--surface-alt); border:1px solid var(--border); border-radius:6px; padding:6px 10px;">
+        <summary style="cursor:pointer; font-weight:700; color:var(--text); display:flex; align-items:center; justify-content:space-between;">
+          <span>⚡ Méta-Plan Déterministe (${s.flow_steps.length} micro-actions)</span>
+          <span style="font-size:10px; color:var(--text-faint);">Détails</span>
+        </summary>
+        <div style="margin-top:6px; display:flex; flex-direction:column; gap:4px; max-height:160px; overflow-y:auto;">
+          ${s.flow_steps.map((st, idx) => {
+            const actionName = st.tool_name || st.action || st.type || 'step';
+            const stepId = st.node_id || st.step_id || '';
+            const desc = st.action_description || st.description || '';
+            const args = st.args_schema || st.arguments || st.tool_args || st.args;
+            return `
+            <div style="background:var(--surface); border:1px solid var(--border); border-radius:4px; padding:4px 6px; font-family:var(--mono); font-size:11px;">
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <strong style="color:var(--primary);">#${idx+1} [${esc(actionName)}]</strong>
+                <span style="color:var(--text-faint); font-size:10px;">${esc(stepId)}</span>
+              </div>
+              ${desc ? `<div style="color:var(--text); margin-top:2px;">${esc(desc)}</div>` : ''}
+              ${args && Object.keys(args).length > 0 ? `<div style="color:var(--text-muted); font-size:10px; margin-top:2px; word-break:break-all;">args: ${esc(JSON.stringify(args))}</div>` : ''}
+            </div>
+            `;
+          }).join('')}
+        </div>
+      </details>` : ''}
     </div>`;
   }).join('');
 }

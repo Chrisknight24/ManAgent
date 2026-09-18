@@ -40,6 +40,7 @@ import sys
 import os
 import json
 import threading
+from typing import Any
 from datetime import datetime, timezone
 
 # =========================================================
@@ -47,18 +48,6 @@ from datetime import datetime, timezone
 # =========================================================
 
 _runtime_state_ref = None
-
-# NOTE (correctif observabilité) : il existait ici une fonction
-# `_get_current_mission_id()` qui lisait `runtime_state.current_mission_id`,
-# un attribut global JAMAIS remis à None après la fin d'une mission. Résultat :
-# une fois qu'une mission avait tourné, TOUT événement émis ensuite (y compris
-# pour des tours directs sans rapport) héritait silencieusement de l'ancien
-# mission_id. Elle est supprimée : `mission_id` est désormais injecté
-# exclusivement via `execution_context` ci-dessous (bloc "injection du
-# contexte d'exécution"), qui est correctement scopé et se nettoie tout seul
-# à la sortie de chaque `with execution_context.scope(...)`. Un événement émis
-# hors de tout scope portant mission_id aura donc, à juste titre, mission_id
-# absent plutôt qu'une valeur périmée.
 
 # =========================================================
 # LOGGER CLASS
@@ -92,36 +81,36 @@ class Logger:
             Logger._log("WARNING", f"[Logger] Impossible de préparer le sink JSON ({path}) : {e}")
 
     @staticmethod
-    def _log(level: str, message: str):
+    def _log(level: str, message: str, exc_info: Any = False, **kwargs):
         timestamp = datetime.now().strftime("%H:%M:%S")
         final_message = f"[{timestamp}] [{level}] {message}"
         print(final_message, file=sys.stderr, flush=True)
+        if exc_info:
+            import traceback
+            if isinstance(exc_info, BaseException):
+                traceback.print_exception(type(exc_info), exc_info, exc_info.__traceback__, file=sys.stderr)
+            else:
+                traceback.print_exc(file=sys.stderr)
 
     @staticmethod
-    def info(message: str):
-        Logger._log("INFO", message)
+    def info(message: str, *args, **kwargs):
+        Logger._log("INFO", message, **kwargs)
 
     @staticmethod
-    def warning(message: str):
-        Logger._log("WARNING", message)
+    def warning(message: str, *args, **kwargs):
+        Logger._log("WARNING", message, **kwargs)
 
     @staticmethod
-    def error(message: str):
-        Logger._log("ERROR", message)
+    def error(message: str, *args, **kwargs):
+        Logger._log("ERROR", message, **kwargs)
 
     @staticmethod
-    def debug(message: str):
-        Logger._log("DEBUG", message)
+    def debug(message: str, *args, **kwargs):
+        Logger._log("DEBUG", message, **kwargs)
 
     @staticmethod
     def event(event_type: str, **fields):
         # OBSERVABILITY : injection du contexte d'exécution.
-        # mission_id, turn_id, solver_id, attempt_number, step_id,
-        # discovery_run_id, entity_id, entity_name, entity_role, span_id,
-        # parent_span_id... tout ce qui a été posé par un `execution_context
-        # .scope(...)` ambiant est injecté ici automatiquement, SAUF si
-        # l'appelant a déjà fourni explicitement la même clé (auquel cas la
-        # valeur explicite gagne toujours).
         if _runtime_state_ref:
             ctx_dict = _runtime_state_ref.execution_context.to_dict()
             for key, value in ctx_dict.items():

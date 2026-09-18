@@ -1,0 +1,41 @@
+{
+  "host_name": "AutoCUse-Qt",
+  "host_version": "0.3.0",
+  "capabilities": ["mouse", "keyboard", "uia", "vision", "flow_engine", "embeddings-local"],
+  "tools": [
+    {
+      "name": "click",
+      "description": "Clique souris sur coordonnées",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "x": { "type": "integer" },
+          "y": { "type": "integer" }
+        },
+        "required": ["x", "y"]
+      }
+    },
+    {
+      "name": "type_text",
+      "description": "Frappe clavier",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string" }
+        },
+        "required": ["text"]
+      }
+    }
+  ],
+  "environment": {
+    "os": "windows-11",
+    "screen": "1920x1080",
+    "locale": "fr-FR"
+  },
+  "metadata": {
+    "managent_min_version": "0.1.0"
+  },
+  "embeddings": {
+    "mode": "lite"
+  }
+}

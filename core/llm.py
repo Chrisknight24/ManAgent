@@ -149,6 +149,51 @@ class Llm:
         Logger.warning(f"RÉGULATION STRICTE : Le modèle '{self.model_id}' n'a pas de carte d'identité (ModelMetadata) enregistrée. Toutes ses capacités sont désactivées par défaut.")
         return False
     
+    def clone(
+        self,
+        role_name: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+        clear_context: bool = True
+    ) -> 'Llm':
+        """
+        Crée une instance LLM vierge et cognitivement isolée avec les mêmes capacités,
+        fournisseur et configuration de modèle que l'instance source.
+        Ne copie PAS l'état de Progressive Disclosure (découverte vierge) ni l'historique de conversation.
+        """
+        req = None
+        if self.requirement:
+            req = ModelRequirement(
+                role_name=role_name or self.requirement.role_name,
+                preferred_provider=self.requirement.preferred_provider or self.provider_id,
+                preferred_model=self.requirement.preferred_model or self.model_id,
+                min_reasoning_score=getattr(self.requirement, "min_reasoning_score", 0.0),
+                min_speed_score=getattr(self.requirement, "min_speed_score", 0.0),
+                min_benchmark_score=getattr(self.requirement, "min_benchmark_score", 0.0),
+                max_cost_tier=getattr(self.requirement, "max_cost_tier", None),
+                required_capabilities=list(self.requirement.required_capabilities) if getattr(self.requirement, "required_capabilities", None) else [],
+                allow_cross_provider_fallback=getattr(self.requirement, "allow_cross_provider_fallback", True)
+            )
+        elif role_name or self.provider_id or self.model_id:
+            req = ModelRequirement(
+                role_name=role_name or "general",
+                preferred_provider=self.provider_id,
+                preferred_model=self.model_id
+            )
+
+        cloned = Llm(
+            provider_manager=self.provider_manager,
+            provider_id=self.provider_id,
+            model_id=self.model_id,
+            system_prompt=system_prompt if system_prompt is not None else self.system_prompt,
+            runtime_state=self.runtime_state,
+            requirement=req
+        )
+
+        if not clear_context:
+            cloned.context = list(self.context)
+
+        return cloned
+    
     def enable_discovery(self, engine, entity: 'Entity') -> None:
         """
         Active la Progressive Disclosure pour ce LLM.
@@ -172,6 +217,18 @@ class Llm:
             .format(entity_id=self._entity_id, count=len(providers))
         )
         Logger.debug(f"[Llm] Providers actifs : {list(providers.keys())}")
+
+    def disable_discovery(self) -> None:
+        """
+        Désactive la Progressive Disclosure pour ce LLM (utilisé pour les sous-agents/sous-solvers).
+        """
+        self._discovery_enabled = False
+        self._discovery_engine = None
+        self._entity = None
+        self._entity_id = None
+        self._entity_name = None
+        self._entity_role = None
+        self._data_context = None
 
     def _build_discovery_section(self, schema: Type[BaseModel], blocked_data_types: set = None) -> str:
         """
@@ -544,7 +601,7 @@ class Llm:
                 except Exception as e:
                     error_msg = f"⚠️ Erreur lors de l'investigation : {str(e)}. Veuillez répondre avec les données disponibles."
                     prompt_modified = prompt_modified + f"\n\n[ERREUR D'INVESTIGATION]\n{error_msg}"
-                    Logger.error(f"[LLM] Erreur lors de l'exécution de la découverte : {e}")
+                    Logger.error(f"[LLM] Erreur lors de l'exécution de la découverte ({type(e).__name__}) : {e}", exc_info=True)
                 continue
 
             Logger.debug(_("[LLM] Réponse finale reçue (type: {schema})").format(schema=schema.__name__))

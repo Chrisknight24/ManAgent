@@ -86,17 +86,37 @@ class PromptLoader:
     def load(self, template_name: str, lang: Optional[str] = None, **kwargs) -> str:
         """
         Charge un template et le rend avec les variables fournies.
+        Protège de façon agnostique le contexte contre les références circulaires.
         """
         if lang is None:
             lang = self.default_lang
+
+        # Assainissement préventif des variables de contexte
+        def _safe_ctx(val: Any, seen: set) -> Any:
+            v_id = id(val)
+            if v_id in seen:
+                return "[Circular Reference]"
+            if isinstance(val, dict):
+                seen.add(v_id)
+                res = {str(k): _safe_ctx(v, seen) for k, v in val.items()}
+                seen.remove(v_id)
+                return res
+            elif isinstance(val, (list, tuple, set)):
+                seen.add(v_id)
+                res = [_safe_ctx(item, seen) for item in val]
+                seen.remove(v_id)
+                return res
+            return val
+
+        safe_kwargs = {k: _safe_ctx(v, set()) for k, v in kwargs.items()}
             
         if not JINJA2_AVAILABLE:
             try:
-                return self._fallback_render(template_name, lang, kwargs)
+                return self._fallback_render(template_name, lang, safe_kwargs)
             except Exception as e:
                 if lang != self.default_lang:
                     try:
-                        return self._fallback_render(template_name, self.default_lang, kwargs)
+                        return self._fallback_render(template_name, self.default_lang, safe_kwargs)
                     except Exception:
                         pass
                 Logger.error(f"[PromptLoader] Impossible de charger '{template_name}' via fallback : {e}")
@@ -105,13 +125,13 @@ class PromptLoader:
         env = self._get_env(lang)
         try:
             template = env.get_template(template_name)
-            return template.render(**kwargs)
+            return template.render(**safe_kwargs)
         except Exception as e:
             if lang != self.default_lang:
                 try:
                     env_default = self._get_env(self.default_lang)
                     template = env_default.get_template(template_name)
-                    return template.render(**kwargs)
+                    return template.render(**safe_kwargs)
                 except Exception:
                     pass
             Logger.error(f"[PromptLoader] Impossible de charger '{template_name}' via jinja2 : {e}")

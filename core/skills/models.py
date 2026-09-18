@@ -7,8 +7,8 @@ Compatible Python standard (dataclasses) pour une exécution ultra-rapide et zé
 """
 
 from enum import Enum
-from typing import Dict, List, Optional, Any
-from dataclasses import dataclass, field, asdict
+from typing import Dict, List, Optional, Any, Tuple
+from dataclasses import dataclass, field, fields, asdict
 import time
 import json
 
@@ -41,7 +41,10 @@ class FailureClass(str, Enum):
     STATE_DRIFT = "STATE_DRIFT"              # État système inattendu
     PARAMETER_ERROR = "PARAMETER_ERROR"      # Paramètre invalide fourni au Skill
     HOST_CAPABILITY_ERROR = "HOST_CAPABILITY_ERROR" # Capacité requise absente sur l'hôte
+    PRECONDITION_FAILED = "PRECONDITION_FAILED"      # Précondition obligatoire non satisfaite (ex: app fermée)
+    POSTCONDITION_FAILED = "POSTCONDITION_FAILED"    # Postcondition non garantie à l'issue du flux
     SKILL_LOGIC_ERROR = "SKILL_LOGIC_ERROR"  # Erreur structurelle dans le graphe
+    EXECUTION_ERROR = "EXECUTION_ERROR"      # Échec d'exécution d'un outil sous-jacent
     UNKNOWN = "UNKNOWN"
 
 
@@ -69,47 +72,192 @@ class Checkpoint:
 @dataclass
 class ExecutionEnvironment:
     """
-    Matrice de compatibilité environnementale pour l'exécution d'un Skill.
-    Permet à ManAgent et à l'hôte de vérifier l'adéquation avant exécution.
+    Spécification agnostique de l'environnement d'exécution requis par un Skill.
+    ManAgent est 100% neutre et indépendant de l'hôte (qu'il s'agisse d'un PC client
+    avec AutoCUse, d'un serveur Linux distant, d'une machine virtuelle, d'un conteneur
+    headless ou d'un terminal mobile).
+    
+    L'hôte envoie son empreinte d'environnement (`host_env` sous forme de dictionnaire clé/valeur).
+    ManAgent procède à un filtrage rigide, froid et déterministe entre les exigences
+    déclarées dans `requirements` et les données fournies par l'hôte.
     """
-    target_os: List[str] = field(default_factory=lambda: ["windows", "linux", "macos"])
-    min_os_version: Optional[str] = None
-    min_resolution_width: Optional[int] = None
-    min_resolution_height: Optional[int] = None
-    supported_dpi_scale: List[float] = field(default_factory=lambda: [1.0, 1.25, 1.5, 2.0])
-    required_apps: List[str] = field(default_factory=list)
-    required_host_capabilities: List[str] = field(default_factory=list)
-    environment_flags: Dict[str, Any] = field(default_factory=dict)
+    requirements: Dict[str, Any] = field(default_factory=dict)
+    variant_tag: str = "DEFAULT"
+    preconditions: List[Dict[str, Any]] = field(default_factory=list)
+    postconditions: List[Dict[str, Any]] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __init__(
+        self,
+        requirements: Optional[Dict[str, Any]] = None,
+        variant_tag: str = "DEFAULT",
+        preconditions: Optional[List[Dict[str, Any]]] = None,
+        postconditions: Optional[List[Dict[str, Any]]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs
+    ):
+        self.requirements = dict(requirements or {})
+        self.variant_tag = variant_tag
+        self.preconditions = list(preconditions or [])
+        self.postconditions = list(postconditions or [])
+        self.metadata = dict(metadata or {})
+
+        # Intégrer tous les paramètres supplémentaires (ex: os, os_family, display_scale_dpi, locale, etc.)
+        # dans le dictionnaire de contraintes agnostique
+        for k, v in kwargs.items():
+            if v is not None:
+                self.requirements[k] = v
+
+    def __getattr__(self, item: str) -> Any:
+        if "requirements" in self.__dict__ and item in self.requirements:
+            return self.requirements[item]
+        return None
+
+    def calculate_compatibility(self, host_env: Dict[str, Any]) -> Tuple[bool, float, List[str]]:
+        """
+        Évaluation déterministe, rigide et froide de l'empreinte hôte.
+        ManAgent ne présuppose aucun OS ou matériel en dur : il compare froidement
+        les contraintes déclarées par le Skill avec les caractéristiques réelles de l'hôte.
+
+        Renvoie:
+            - is_match (bool): True si AUCUNE exigence requise n'est violée.
+            - specificity_score (float): Nombre d'exigences satisfaites. Plus le skill est ciblé
+              et correspond précisément à la machine de l'hôte, plus son score de spécificité est élevé.
+            - mismatch_reasons (List[str]): Raisons explicites en cas de rejet.
+        """
+        if not host_env:
+            if self.requirements:
+                return False, 0.0, ["Aucune empreinte d'environnement hôte fournie alors que le skill exige des prérequis."]
+            return True, 0.0, []
+
+        merged_host: Dict[str, Any] = dict(host_env)
+        if isinstance(host_env.get("metadata"), dict):
+            for mk, mv in host_env["metadata"].items():
+                if mk not in merged_host:
+                    merged_host[mk] = mv
+
+        mismatches: List[str] = []
+        specificity: float = 0.0
+
+        for req_key, req_val in self.requirements.items():
+            if req_val is None or req_val == "" or req_val == "any":
+                continue
+
+            # Recherche directe ou avec dérivation de préfixes génériques (target_, required_, min_, max_)
+            host_val = merged_host.get(req_key)
+            if host_val is None:
+                for prefix in ("target_", "required_host_", "required_", "min_", "max_"):
+                    if req_key.startswith(prefix):
+                        short_key = req_key[len(prefix):]
+                        if short_key in merged_host:
+                            host_val = merged_host[short_key]
+                            break
+
+            # RÈGLE AGNOSTIQUE : Si l'hôte n'a pas fourni cette clé d'environnement,
+            # elle ne bloque pas l'exécution (tolérance agnostique), mais ne donne pas de bonus de spécificité.
+            if host_val is None:
+                continue
+
+            # 1. Vérification de sous-ensemble de capacités ou listes
+            if isinstance(req_val, (list, set)):
+                if isinstance(host_val, (list, set)):
+                    host_items = set(str(c).lower().strip() for c in host_val)
+                    missing = [c for c in req_val if str(c).lower().strip() not in host_items]
+                    if missing:
+                        mismatches.append(f"Éléments hôte requis manquants pour '{req_key}': {missing}")
+                    else:
+                        specificity += float(len(req_val))
+                else:
+                    norm_host = str(host_val).lower().strip()
+                    norm_list = [str(x).lower().strip() for x in req_val]
+                    if norm_host not in norm_list and "any" not in norm_list:
+                        mismatches.append(f"Exigence '{req_key}' non satisfaite: hôte='{host_val}', autorisés={req_val}")
+                    else:
+                        specificity += 1.0
+
+            # 2. Booléen
+            elif isinstance(req_val, bool):
+                if bool(host_val) != req_val:
+                    mismatches.append(f"Exigence booléenne '{req_key}' non satisfaite: hôte={host_val}, requis={req_val}")
+                else:
+                    specificity += 1.0
+
+            # 4. Numérique (avec support min_ / _min et max_ / _max)
+            elif isinstance(req_val, (int, float)):
+                try:
+                    num_host = float(host_val)
+                    num_req = float(req_val)
+                    if req_key.endswith("_min") or req_key.startswith("min_"):
+                        if num_host < num_req:
+                            mismatches.append(f"Exigence minimale '{req_key}' non satisfaite: hôte={host_val} < requis={req_val}")
+                        else:
+                            specificity += 1.0
+                    elif req_key.endswith("_max") or req_key.startswith("max_"):
+                        if num_host > num_req:
+                            mismatches.append(f"Exigence maximale '{req_key}' non satisfaite: hôte={host_val} > requis={req_val}")
+                        else:
+                            specificity += 1.0
+                    else:
+                        if num_host != num_req:
+                            mismatches.append(f"Exigence numérique '{req_key}' non satisfaite: hôte={host_val} != requis={req_val}")
+                        else:
+                            specificity += 1.0
+                except (ValueError, TypeError):
+                    if str(host_val) != str(req_val):
+                        mismatches.append(f"Exigence '{req_key}' non satisfaite: hôte={host_val}, requis={req_val}")
+                    else:
+                        specificity += 1.0
+
+            # 4. Chaîne ou objet
+            else:
+                norm_req = str(req_val).strip().lower()
+                norm_host = str(host_val).strip().lower()
+                if norm_req != norm_host:
+                    # Tolérance de locale linguistique (ex: 'fr' matche 'fr_FR')
+                    if req_key in ("locale", "language") and (norm_host.startswith(norm_req) or norm_req.startswith(norm_host)):
+                        specificity += 1.0
+                    else:
+                        mismatches.append(f"Exigence '{req_key}' non satisfaite: hôte='{host_val}', requis='{req_val}'")
+                else:
+                    specificity += 1.0
+
+        is_match = (len(mismatches) == 0)
+        return is_match, specificity, mismatches
 
     def is_compatible(self, host_env: Dict[str, Any]) -> bool:
         """Vérifie de manière déterministe si l'environnement de l'hôte satisfait les exigences."""
-        # 1. Vérification OS
-        current_os = host_env.get("os", "").lower()
-        if current_os and current_os not in [o.lower() for o in self.target_os]:
-            return False
-
-        # 2. Vérification Capacités Hôte
-        host_caps = set(host_env.get("capabilities", []))
-        for cap in self.required_host_capabilities:
-            if cap not in host_caps:
-                return False
-
-        # 3. Vérification Résolution
-        w = host_env.get("resolution_width")
-        h = host_env.get("resolution_height")
-        if self.min_resolution_width and w and w < self.min_resolution_width:
-            return False
-        if self.min_resolution_height and h and h < self.min_resolution_height:
-            return False
-
-        return True
+        is_match, _, _ = self.calculate_compatibility(host_env)
+        return is_match
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        d = {
+            "requirements": self.requirements,
+            "variant_tag": self.variant_tag,
+            "preconditions": self.preconditions,
+            "postconditions": self.postconditions,
+            "metadata": self.metadata,
+        }
+        for k, v in self.requirements.items():
+            if k not in d:
+                d[k] = v
+        return d
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ExecutionEnvironment":
-        return cls(**data)
+        if not isinstance(data, dict):
+            return cls()
+        known = {"requirements", "variant_tag", "preconditions", "postconditions", "metadata"}
+        reqs = dict(data.get("requirements") or {})
+        for k, v in data.items():
+            if k not in known and v is not None:
+                reqs[k] = v
+        return cls(
+            requirements=reqs,
+            variant_tag=data.get("variant_tag", "DEFAULT"),
+            preconditions=data.get("preconditions", []),
+            postconditions=data.get("postconditions", []),
+            metadata=data.get("metadata", {})
+        )
 
 
 @dataclass
@@ -120,17 +268,22 @@ class TrustProfile:
     breakout_count: int = 0
     consecutive_failures: int = 0
     shadow_validation_count: int = 0
+    shadow_mismatch_count: int = 0
     distinct_context_count: int = 0
     last_success_timestamp: Optional[float] = None
     last_failure_timestamp: Optional[float] = None
     recent_execution_window: List[bool] = field(default_factory=list)
 
-    def record_run(self, success: bool, is_breakout: bool = False, is_shadow: bool = False, context_id: Optional[str] = None):
+    def record_run(self, success: bool, is_breakout: bool = False, is_shadow: bool = False, context_id: Optional[str] = None, shadow_mismatch: bool = False):
         """Enregistre le résultat d'une exécution et met à jour les indicateurs."""
         now = time.time()
         if is_shadow:
-            if success:
+            if shadow_mismatch:
+                self.shadow_mismatch_count += 1
+            elif success:
                 self.shadow_validation_count += 1
+                if self.shadow_mismatch_count > 0:
+                    self.shadow_mismatch_count = max(0, self.shadow_mismatch_count - 1)
             return
 
         if success:
@@ -172,7 +325,9 @@ class TrustProfile:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "TrustProfile":
-        return cls(**data)
+        valid_keys = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in (data or {}).items() if k in valid_keys}
+        return cls(**filtered)
 
 
 @dataclass
@@ -195,6 +350,7 @@ class SkillVersion:
     min_capability_tier: int = 1
     provenance: ProvenanceType = ProvenanceType.DISTILLED
     repair_reason: Optional[str] = None
+    environment_variant_tag: Optional[str] = None
     
     # Métriques
     trust_profile: TrustProfile = field(default_factory=TrustProfile)
@@ -242,6 +398,11 @@ class SkillManifest:
     checkpoints: List[Checkpoint] = field(default_factory=list)
     risk_level: str = "low"
     
+    # Contrat d'États pour le Planner HTN
+    preconditions: List[Dict[str, Any]] = field(default_factory=list)
+    postconditions: List[Dict[str, Any]] = field(default_factory=list)
+    environment_variant_tag: Optional[str] = None
+    
     # Version active
     current_production_version: Optional[int] = None
     created_at: float = field(default_factory=time.time)
@@ -256,7 +417,16 @@ class SkillManifest:
             d["environment"] = ExecutionEnvironment.from_dict(d["environment"])
         if isinstance(d.get("checkpoints"), list):
             d["checkpoints"] = [Checkpoint.from_dict(cp) if isinstance(cp, dict) else cp for cp in d["checkpoints"]]
-        return cls(**d)
+        
+        # Synchronisation bidirectionnelle pré/postconditions si stockées dans environment
+        if not d.get("preconditions") and getattr(d.get("environment"), "preconditions", None):
+            d["preconditions"] = list(d["environment"].preconditions)
+        if not d.get("postconditions") and getattr(d.get("environment"), "postconditions", None):
+            d["postconditions"] = list(d["environment"].postconditions)
+
+        known_fields = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in d.items() if k in known_fields}
+        return cls(**filtered)
 
 
 @dataclass
@@ -321,18 +491,29 @@ class SkillPackage:
     manifest: SkillManifest
     package_format_version: str = "1.0.0"
     versions: List[SkillVersion] = field(default_factory=list)
-    embedded_payloads: Dict[str, str] = field(default_factory=dict)
+    embedded_payloads: Dict[str, Any] = field(default_factory=dict)
     exported_at: float = field(default_factory=time.time)
     signature_checksum: Optional[str] = None
 
-    def export_json(self) -> str:
-        """Sérialise le package complet au format JSON."""
-        return json.dumps(asdict(self), indent=2)
+    def to_dict(self) -> Dict[str, Any]:
+        """Convertit le package complet en dictionnaire sérialisable avec payloads déballés."""
+        d = asdict(self)
+        if isinstance(d.get("embedded_payloads"), dict):
+            clean_payloads = {}
+            for k, v in d["embedded_payloads"].items():
+                if isinstance(v, str):
+                    try:
+                        clean_payloads[k] = json.loads(v)
+                    except Exception:
+                        clean_payloads[k] = v
+                else:
+                    clean_payloads[k] = v
+            d["embedded_payloads"] = clean_payloads
+        return d
 
     @classmethod
-    def import_json(cls, json_str: str) -> "SkillPackage":
-        """Désérialise et valide l'intégrité d'un package de Skill."""
-        data = json.loads(json_str)
+    def from_dict(cls, data: Dict[str, Any]) -> "SkillPackage":
+        """Reconstitue un SkillPackage depuis un dictionnaire."""
         manifest = SkillManifest.from_dict(data["manifest"])
         versions = [SkillVersion.from_dict(v) for v in data.get("versions", [])]
         return cls(
@@ -343,3 +524,13 @@ class SkillPackage:
             exported_at=data.get("exported_at", time.time()),
             signature_checksum=data.get("signature_checksum")
         )
+
+    def export_json(self) -> str:
+        """Sérialise le package complet au format JSON."""
+        return json.dumps(self.to_dict(), indent=2)
+
+    @classmethod
+    def import_json(cls, json_str: str) -> "SkillPackage":
+        """Désérialise et valide l'intégrité d'un package de Skill."""
+        data = json.loads(json_str)
+        return cls.from_dict(data)

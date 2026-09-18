@@ -2,7 +2,27 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional
 import hashlib
 import re
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
+try:
+    from pydantic import model_validator
+except ImportError:
+    from pydantic import root_validator
+    import inspect
+    def model_validator(mode="after"):
+        def decorator(func):
+            target_func = func.__func__ if isinstance(func, classmethod) else func
+            sig = inspect.signature(target_func)
+            params = list(sig.parameters.keys())
+            if mode == "before":
+                def wrapper(cls, values):
+                    res = target_func(cls, values) if (params and params[0] in ("cls", "self")) else target_func(values)
+                    return res
+                return root_validator(pre=True, allow_reuse=True)(wrapper)
+            else:
+                def wrapper(cls, values):
+                    return values
+                return root_validator(pre=False, allow_reuse=True)(wrapper)
+        return decorator
 
 
 class AssetMetadata(BaseModel):

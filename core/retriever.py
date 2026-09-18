@@ -279,6 +279,17 @@ class Retriever:
         results: List[Dict[str, Any]] = []
         for manifest, version in candidates:
             score = version.trust_profile.trust_score if hasattr(version.trust_profile, "trust_score") else 1.0
+            
+            # Enrichissement contextuel de la description pour le Planner HTN
+            desc = manifest.description
+            pre_summary = ", ".join([p.get("description") or p.get("type") or str(p) for p in manifest.preconditions]) if manifest.preconditions else ""
+            post_summary = ", ".join([p.get("description") or p.get("type") or str(p) for p in manifest.postconditions]) if manifest.postconditions else ""
+            
+            if pre_summary:
+                desc += f" [Prérequis/État Initial: {pre_summary}]"
+            if post_summary:
+                desc += f" [Garanties/État Final: {post_summary}]"
+
             results.append({
                 "skill_id": manifest.skill_id,
                 "name": manifest.name,
@@ -286,7 +297,10 @@ class Retriever:
                 "version": version.version,
                 "state": version.state.value if hasattr(version.state, "value") else str(version.state),
                 "parameters_schema": manifest.parameters_schema,
-                "checkpoints": [cp.name for cp in manifest.checkpoints],
+                "preconditions": [p.get("description") or str(p) for p in (manifest.preconditions or [])],
+                "postconditions": [p.get("description") or str(p) for p in (manifest.postconditions or [])],
+                "checkpoints": [cp.name if hasattr(cp, "name") else str(cp) for cp in (manifest.checkpoints or [])],
+                "environment_constraints": manifest.environment.to_dict(),
                 "trust_score": score,
                 "flow_payload_ref": version.flow_payload_ref,
                 "manifest": manifest,

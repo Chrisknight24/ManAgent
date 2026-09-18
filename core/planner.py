@@ -110,6 +110,12 @@ class Planner(Entity):
                     f"(PLANNER_PD_ENABLED=False)."
                 )
 
+    def get_data_providers(self) -> Dict[str, Any]:
+        """Retourne les DataProviders du Planner (exclut rigoureusement 'skills')."""
+        providers = super().get_data_providers()
+        providers.pop("skills", None)
+        return providers
+
     async def process(self, *args, **kwargs) -> Plan:
         goal = kwargs.get("goal", args[0] if args else "")
         context = kwargs.get("context", args[1] if len(args) > 1 else "")
@@ -162,10 +168,17 @@ class Planner(Entity):
                         desc = sk.get("description", "")
                         ver = sk.get("version", 1)
                         trust = sk.get("trust_score", 1.0)
-                        cps = ", ".join(sk.get("checkpoints", [])) or "aucun"
+                        preconds = sk.get("preconditions", [])
+                        postconds = sk.get("postconditions", [])
+                        
                         lines.append(f"{idx}. Skill ID : `{s_id}` (v{ver}, Score Confiance : {trust:.2f})")
                         lines.append(f"   Description : {desc}")
-                        lines.append(f"   Checkpoints vérifiables : {cps}")
+                        if preconds:
+                            pre_str = ", ".join([str(p.get("description") if isinstance(p, dict) else p) for p in preconds])
+                            lines.append(f"   ⚡ Préconditions : {pre_str}")
+                        if postconds:
+                            post_str = ", ".join([str(p.get("description") if isinstance(p, dict) else p) for p in postconds])
+                            lines.append(f"   🎯 Postconditions : {post_str}")
                     else:
                         lines.append(f"{idx}. {sk}")
                 skills_text = "\n".join(lines)
@@ -279,22 +292,26 @@ class Planner(Entity):
                     used_in_this_step.update(matches)
 
             # 2. Vérification de disponibilité / causalité
-            for var in used_in_this_step:
+            for raw_var in used_in_this_step:
+                clean_root = re.sub(r'^(bool_|data_)+', '', raw_var)
+                is_bool_ref = raw_var.startswith("bool_")
+                is_data_ref = raw_var.startswith("data_")
+                canonical_var = f"bool_{clean_root}" if is_bool_ref else (f"data_{clean_root}" if is_data_ref else raw_var)
+                var = canonical_var
+
                 is_available = False
-                if var in known_vars:
+                if raw_var in known_vars or canonical_var in known_vars:
                     is_available = True
-                elif var.startswith("data_") and ("bool_" + var[5:]) in known_vars:
+                elif f"bool_{clean_root}" in known_vars or f"data_{clean_root}" in known_vars or clean_root in known_vars:
                     is_available = True
-                elif var.startswith("bool_") and ("data_" + var[5:]) in known_vars:
+                elif clean_root in all_steps_by_id and clean_root in steps_seen_so_far:
                     is_available = True
 
                 if not is_available:
                     # Vérifier si la variable fait référence à une étape connue
                     matched_step_id = None
-                    if var.startswith("data_") or var.startswith("bool_"):
-                        cand_id = var[5:]
-                        if cand_id in all_steps_by_id:
-                            matched_step_id = cand_id
+                    if clean_root in all_steps_by_id:
+                        matched_step_id = clean_root
 
                     # Vérifier si elle correspond à l'output_variable_name d'une étape future
                     future_step = None
@@ -302,7 +319,8 @@ class Planner(Entity):
                         cand_step = plan.steps[future_idx]
                         if cand_step.output_variable_name:
                             out_name = cand_step.output_variable_name
-                            if var == out_name or (out_name.startswith("bool_") and var == "data_" + out_name[5:]) or (out_name.startswith("data_") and var == "bool_" + out_name[5:]):
+                            cand_clean = re.sub(r'^(bool_|data_)+', '', out_name)
+                            if clean_root == cand_clean or var == out_name:
                                 future_step = cand_step
                                 break
 
@@ -343,13 +361,11 @@ class Planner(Entity):
 
             if step.output_variable_name:
                 out_name = step.output_variable_name
+                clean_out_root = re.sub(r'^(bool_|data_)+', '', out_name)
                 known_vars.add(out_name)
-                if out_name.startswith("bool_"):
-                    known_vars.add("data_" + out_name[5:])
-                elif out_name.startswith("data_"):
-                    known_vars.add("bool_" + out_name[5:])
-                else:
-                    known_vars.add("data_" + out_name)
+                known_vars.add(clean_out_root)
+                known_vars.add(f"bool_{clean_out_root}")
+                known_vars.add(f"data_{clean_out_root}")
 
             # 4. Vérifications d'intégrité tool_args_json
             if step.type == StepType.TOOL_CALL and step.tool_args_json:

@@ -21,6 +21,12 @@ class Actions:
     DATA_STATS = "data.stats"
     DATA_PURGE = "data.purge"
     DATA_EXPORT = "data.export"
+    SET_SKILL_STATE = "skill.set_state"
+    REPAIR_SKILL = "skill.repair"
+    SKILLS_LIST_REQUEST = "skill.list_request"
+    SKILL_PAYLOAD_REQUEST = "skill.payload_request"
+    EXPORT_SKILL_PACKAGE = "skill.export_package"
+    IMPORT_SKILL_PACKAGE = "skill.import_package"
 
 class Events:
     RUNTIME_READY = "runtime.ready"
@@ -154,6 +160,7 @@ MAX_INSIGHTS_PER_TARGET = 5          # Nombre max d'insights mémorisés par cib
 # =====================================================
 SKILL_DISCOVERY_THRESHOLD = 2        # Nombre de succès consécutifs requis pour déclencher la création d'un Skill (DRAFT -> SHADOW)
 SKILL_SHADOW_SUCCESS_THRESHOLD = 1   # Nombre de validations passives en SHADOW requises pour la promotion en PRODUCTION (Total = 3 répétitions réussies)
+SKILL_SHADOW_MISMATCH_THRESHOLD = 3  # Nombre de divergences consécutives d'un Skill en SHADOW sur missions réussies avant obsolescence / QUARANTINE
 SKILL_CIRCUIT_BREAKER_MAX_FAILURES = 3 # Nombre d'échecs consécutifs en PRODUCTION avant QUARANTINE
 
 # =====================================================

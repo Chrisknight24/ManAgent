@@ -208,4 +208,7 @@ class ExecutionTree(BaseModel):
         return None
 
 # Résolution des forward references pour Pydantic
-ExecutionNode.model_rebuild()
+if hasattr(ExecutionNode, "model_rebuild"):
+    ExecutionNode.model_rebuild()
+elif hasattr(ExecutionNode, "update_forward_refs"):
+    ExecutionNode.update_forward_refs()

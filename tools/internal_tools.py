@@ -342,21 +342,26 @@ async def llm_analyze_data(args: Dict[str, Any], runtime_state) -> Dict[str, Any
             "message": msg
         }
 
-    # Détection et traitement robuste des assets multimédias de type image
+    # Détection et traitement robuste des assets multimédias (images, documents PDF, etc.)
     asset = await resolve_media_asset(source, runtime_state)
-    is_image = False
+    is_multimodal = False
     if asset:
         filename = getattr(asset, "filename", "") or getattr(asset, "filepath", "") or asset.get_uri()
-        if any(filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp']):
-            is_image = True
-        else:
-            meta = getattr(asset, "asset_meta", None)
-            if meta and hasattr(meta, "mime_type"):
-                mime = meta.mime_type.lower()
-                if mime.startswith("image/"):
-                    is_image = True
+        meta = getattr(asset, "asset_meta", None)
+        mime = (getattr(meta, "mime_type", None) or "").lower()
 
-    if is_image:
+        if mime:
+            if mime.startswith("image/") or mime == "application/pdf":
+                is_multimodal = True
+        if not is_multimodal:
+            import mimetypes
+            guessed_mime, _unused = mimetypes.guess_type(filename)
+            if guessed_mime and (guessed_mime.startswith("image/") or guessed_mime == "application/pdf"):
+                is_multimodal = True
+            elif any(filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.pdf']):
+                is_multimodal = True
+
+    if is_multimodal:
         llm = await _get_tools_llm(runtime_state)
         if not llm:
             msg = _("Aucun LLM disponible pour l'analyse.")
@@ -367,11 +372,15 @@ async def llm_analyze_data(args: Dict[str, Any], runtime_state) -> Dict[str, Any
                 "message": msg
             }
         
-        # Vérification de la capacité vision
+        # Vérification de la capacité vision / multimodale
         from core.constants import ModelCapabilities
-        if not llm.has_capability(ModelCapabilities.VISION):
+        has_cap = (
+            llm.has_capability(ModelCapabilities.VISION)
+            or (hasattr(ModelCapabilities, "MULTIMODAL") and llm.has_capability(ModelCapabilities.MULTIMODAL))
+        )
+        if not has_cap:
             model_id = getattr(llm, "model_id", "unknown")
-            msg = f"DÉGRADATION GRACIEUSE : Le modèle actif '{model_id}' ne possède pas la capacité 'vision' requise pour analyser l'image '{source}'."
+            msg = f"DÉGRADATION GRACIEUSE : Le modèle actif '{model_id}' ne possède pas la capacité multimodale/vision requise pour analyser '{source}'."
             Logger.warning(f"[llm_analyze_data] {msg}")
             return {
                 "result": False,
@@ -380,7 +389,7 @@ async def llm_analyze_data(args: Dict[str, Any], runtime_state) -> Dict[str, Any
                 "message": msg
             }
 
-        Logger.info(f"[llm_analyze_data] Image détectée '{source}', passage en mode analyse visuelle multimodale.")
+        Logger.info(f"[llm_analyze_data] Asset multimodal détecté '{source}', passage en mode analyse multimodale.")
         return await _run_llm_analysis(raw_value, query, runtime_state, tag="llm_analyze_data", media_assets=[asset])
 
     # Support Progressive Disclosure slicing (from_line, to_line)
@@ -498,6 +507,15 @@ async def execute_skill_tool(args: Dict[str, Any], runtime_state) -> Dict[str, A
             "message": f"Skill '{skill_id}' non trouvé ou inactif."
         }
 
+    from core.skills.models import SkillState
+    if version.state != SkillState.PRODUCTION:
+        return {
+            "result": False,
+            "data": None,
+            "error_reason": f"Skill '{skill_id}' v{version.version} n'est pas en production (état actuel : {version.state.value}). Exécution refusée.",
+            "message": f"Skill '{skill_id}' non disponible en production."
+        }
+
     # Résolution des variables dans les paramètres (ex: $@_data_file)
     resolved_parameters = {}
     for k, v in parameters.items():
@@ -512,6 +530,10 @@ async def execute_skill_tool(args: Dict[str, Any], runtime_state) -> Dict[str, A
     event_emitter = getattr(runtime_state, "propagate_event", None)
     engine = SkillExecutionEngine(registry=skill_registry, event_emitter=event_emitter)
 
+    mission_id = None
+    if runtime_state and hasattr(runtime_state, "execution_context"):
+        mission_id = runtime_state.execution_context.get("mission_id")
+
     # Récupération de l'exécuteur hôte depuis ToolsManager ou transport
     host_executor = getattr(runtime_state, "host_skill_executor", None)
     if not host_executor:
@@ -519,13 +541,15 @@ async def execute_skill_tool(args: Dict[str, Any], runtime_state) -> Dict[str, A
         tools_mgr = getattr(runtime_state, "tools_manager", None)
         async def default_host_executor(payload_ref, params):
             if tools_mgr and hasattr(tools_mgr, "execute_flow"):
-                return await tools_mgr.execute_flow(payload_ref, params)
+                return await tools_mgr.execute_flow(
+                    payload_or_ref=payload_ref,
+                    parameters=params,
+                    skill_id=skill_id,
+                    version=getattr(version, "version", None),
+                    mission_id=mission_id
+                )
             return {"success": True, "output": {"status": "executed", "payload_ref": payload_ref, "params": params}}
         host_executor = default_host_executor
-
-    mission_id = None
-    if runtime_state and hasattr(runtime_state, "execution_context"):
-        mission_id = runtime_state.execution_context.get("mission_id")
 
     exec_result = await engine.execute_skill(
         manifest=manifest,
@@ -537,13 +561,20 @@ async def execute_skill_tool(args: Dict[str, Any], runtime_state) -> Dict[str, A
     )
 
     is_success = exec_result.get("success", False)
+    bo_rep = exec_result.get("breakout_report")
+    bo_data = bo_rep.to_dict() if hasattr(bo_rep, "to_dict") else bo_rep
+
+    fail_bun = exec_result.get("failure_bundle")
+    fb_data = fail_bun.to_dict() if hasattr(fail_bun, "to_dict") else fail_bun
+
     return {
         "result": is_success,
         "data": exec_result.get("output", {}),
         "breakout": exec_result.get("breakout", False),
-        "breakout_report": exec_result.get("breakout_report"),
-        "failure_bundle": exec_result.get("failure_bundle"),
+        "breakout_report": bo_data,
+        "failure_bundle": fb_data,
         "passed_checkpoints": exec_result.get("passed_checkpoints", []),
+        "executed_steps": exec_result.get("executed_steps", []),
         "error_reason": exec_result.get("error_message") or (None if is_success else "Échec d'exécution du skill"),
         "message": f"Skill '{skill_id}' exécuté avec succès ({len(exec_result.get('passed_checkpoints', []))} checkpoints)." if is_success else f"Rupture ou échec sur le Skill '{skill_id}'."
     }

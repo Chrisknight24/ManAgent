@@ -17,6 +17,8 @@ from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 from utils.logger import Logger
 
+import threading
+
 # Module importé pour la constante DEFAULT_MODEL
 try:
     from core.embedding_service import EmbeddingService
@@ -30,10 +32,26 @@ VECTOR_DIM = 384  # Dimension par défaut (all-MiniLM-L6-v2)
 
 
 class MissionProfileStore:
+    _instances: Dict[str, 'MissionProfileStore'] = {}
+    _lock = threading.Lock()
+
+    def __new__(cls, db_path: str = "memory.db", *args, **kwargs):
+        norm_path = os.path.abspath(db_path)
+        if norm_path not in cls._instances:
+            with cls._lock:
+                if norm_path not in cls._instances:
+                    instance = super().__new__(cls)
+                    instance._initialized = False
+                    cls._instances[norm_path] = instance
+        return cls._instances[norm_path]
+
     def __init__(self, db_path: str = "memory.db"):
+        if getattr(self, "_initialized", False):
+            return
         self.db_path = db_path
         self._dll_path = None  # Chemin de la DLL, détecté une seule fois
         self._initialize_db()
+        self._initialized = True
 
     def _get_connection(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path, check_same_thread=False)
@@ -157,8 +175,19 @@ class MissionProfileStore:
     # =========================================================================
 
     @staticmethod
+    def _clean_str(val: Optional[str]) -> str:
+        if not val:
+            return ""
+        import re
+        cleaned = re.sub(r'["\'`«»()\[\]{}]', '', val)
+        return re.sub(r'\s+', ' ', cleaned).strip().lower()
+
+    @staticmethod
     def compute_hash(action: str, object_name: str) -> str:
-        from core.plan_models import clean_signature_str
+        try:
+            from core.plan_models import clean_signature_str
+        except Exception:
+            clean_signature_str = MissionProfileStore._clean_str
         act = clean_signature_str(action)
         obj = clean_signature_str(object_name)
         return f"sig:{act}:{obj}"
@@ -176,7 +205,10 @@ class MissionProfileStore:
         Incrémente consecutive_successes en utilisant le matching vectoriel (sqlite-vec).
         Retourne (canonical_profile_id, consecutive_successes).
         """
-        from core.plan_models import clean_signature_str
+        try:
+            from core.plan_models import clean_signature_str
+        except Exception:
+            clean_signature_str = MissionProfileStore._clean_str
         now = time.time()
         canonical_profile_id = None
         

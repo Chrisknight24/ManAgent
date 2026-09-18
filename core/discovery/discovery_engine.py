@@ -8,6 +8,7 @@ Support multi‑cibles : plus de référence à target unique.
 
 import uuid
 from typing import Dict, List, Optional, Any, Union
+from contextlib import nullcontext
 from core.runtime_state import RuntimeState
 from core.discovery.base_explorer import BaseExplorer
 from core.discovery.discovery_session import DiscoverySession
@@ -164,7 +165,8 @@ class DiscoveryEngine:
             entity_role = exec_ctx.get("entity_role")
 
         scope_kwargs = {"discovery_run_id": run_id, "discovery_signature": plan.signature}
-        with self.runtime_state.execution_context.scope(**scope_kwargs):
+        scope_cm = exec_ctx.scope(**scope_kwargs) if (exec_ctx is not None and hasattr(exec_ctx, "scope")) else nullcontext()
+        with scope_cm:
             cached = await self.get_refined_context(plan.signature) if should_cache else None
             if cached:
                 Logger.info(f"[DiscoveryEngine] {_('Cache hit pour')} {plan.signature}")
@@ -235,8 +237,8 @@ class DiscoveryEngine:
         entity_role: Optional[str] = None,
     ) -> None:
         session_id = plan.signature
-        exec_ctx = getattr(self.runtime_state, 'execution_context', {})
-        solver_id = exec_ctx.get("solver_id")
+        exec_ctx = getattr(self.runtime_state, 'execution_context', None) or {}
+        solver_id = exec_ctx.get("solver_id") if hasattr(exec_ctx, "get") else None
         attempt_number = exec_ctx.get("attempt_number")
         step_id = exec_ctx.get("step_id")
         turn_id = exec_ctx.get("turn_id")

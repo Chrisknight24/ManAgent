@@ -232,26 +232,20 @@ class OpenRouterProvider(BaseProvider):
         if context:
             messages.extend(context)
 
-        if media_assets:
-            import base64
-            import os
-            import mimetypes
+        media_parts = self.extract_normalized_media_assets(media_assets)
+        if media_parts:
             user_content = [{"type": "text", "text": prompt}]
-            for asset in media_assets:
-                if hasattr(asset, "filepath") and asset.filepath and os.path.exists(asset.filepath):
-                    try:
-                        with open(asset.filepath, "rb") as f:
-                            img_data = f.read()
-                        base64_str = base64.b64encode(img_data).decode("utf-8")
-                        mime_type, _ = mimetypes.guess_type(asset.filepath)
-                        if not mime_type:
-                            mime_type = "image/png"
-                        user_content.append({
-                            "type": "image_url",
-                            "image_url": {"url": f"data:{mime_type};base64,{base64_str}"}
-                        })
-                    except Exception as ex:
-                        Logger.error(f"[OpenRouterProvider] Erreur image : {ex}")
+            for p in media_parts:
+                if p["is_image"]:
+                    user_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{p['mime_type']};base64,{p['base64_data']}"}
+                    })
+                elif p["is_pdf"]:
+                    user_content.append({
+                        "type": "text",
+                        "text": f"[Document PDF joint: {p['filename']} ({p['size_bytes']} octets)]"
+                    })
             messages.append({"role": "user", "content": user_content})
         else:
             messages.append({"role": "user", "content": prompt})

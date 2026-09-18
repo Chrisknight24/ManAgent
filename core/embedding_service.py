@@ -22,6 +22,7 @@ from utils.logger import Logger
 
 class EmbeddingService:
     DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+    LITE_DIM = 256
 
     def __init__(self, model_name: Optional[str] = None):
         self.model_name = model_name or self.DEFAULT_MODEL
@@ -29,6 +30,8 @@ class EmbeddingService:
         self._loaded = False
         self._loading_event = asyncio.Event()
         self._load_task: Optional[asyncio.Task] = None
+        # Mode lite (sans torch) : fallback deterministe, jamais de crash.
+        self._lite = not _HAS_ST
 
     def _load_model_sync(self) -> None:
         if not _HAS_ST:
@@ -59,6 +62,15 @@ class EmbeddingService:
     async def _ensure_loaded(self) -> None:
         """Garantit que le modèle est chargé. Lève une exception si le chargement échoue."""
         if self._loaded:
+            return
+        if self._lite:
+            # Pas de torch : on marque comme pret, embed() utilisera le hash.
+            self._loaded = True
+            try:
+                self._loading_event.set()
+            except Exception:
+                pass
+            Logger.warning("[EmbeddingService] Mode lite (hash) : sentence-transformers absent.")
             return
 
         # Si le chargement est déjà en cours, on attend
@@ -93,6 +105,9 @@ class EmbeddingService:
             return [0.0] * 384
 
         await self._ensure_loaded()
+        if self._lite or self._model is None:
+            from embeddings.providers.hash_provider import hash_embed
+            return hash_embed(text, self.LITE_DIM)
         embedding = self._encode_no_grad([text])[0]
         return embedding.tolist()
 
@@ -100,11 +115,16 @@ class EmbeddingService:
         if not texts:
             return []
         await self._ensure_loaded()
+        if self._lite or self._model is None:
+            from embeddings.providers.hash_provider import hash_embed
+            return [hash_embed(t, self.LITE_DIM) for t in texts]
         embeddings = self._encode_no_grad(texts)
         return [emb.tolist() for emb in embeddings]
 
     @property
     async def dimension(self) -> int:
+        if self._lite:
+            return self.LITE_DIM
         await self._ensure_loaded()
         if self._model is None:
             raise RuntimeError("Le modèle n'a pas pu être chargé.")

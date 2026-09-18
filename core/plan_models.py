@@ -11,7 +11,27 @@ Ajout : champ is_crucial et validation stricte du nommage des variables.
 import json
 from enum import Enum
 from typing import List, Dict, Any, Optional
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
+try:
+    from pydantic import model_validator
+except ImportError:
+    from pydantic import root_validator
+    import inspect
+    def model_validator(mode="after"):
+        def decorator(func):
+            target_func = func.__func__ if isinstance(func, classmethod) else func
+            sig = inspect.signature(target_func)
+            params = list(sig.parameters.keys())
+            if mode == "before":
+                def wrapper(cls, values):
+                    res = target_func(cls, values) if (params and params[0] in ("cls", "self")) else target_func(values)
+                    return res
+                return root_validator(pre=True, allow_reuse=True)(wrapper)
+            else:
+                def wrapper(cls, values):
+                    return values
+                return root_validator(pre=False, allow_reuse=True)(wrapper)
+        return decorator
 from core.constants import OrchestratorMode
 from core.i18n import _
 from core.execution_models import ExecutionTree
@@ -128,16 +148,29 @@ class PlanStep(BaseModel):
                 
         return self
 
-    # --- NOUVEAU : Validation stricte du nommage des variables ---
+    # --- Validation et normalisation idempotente du nommage des variables ---
     @model_validator(mode='after')
     def validate_variable_naming(self) -> 'PlanStep':
+        import re
         if self.output_variable_name:
-            if not (self.output_variable_name.startswith("bool_") or self.output_variable_name.startswith("data_")):
-                # On lève une erreur pour forcer le Planner à respecter la convention
-                raise ValueError(
-                    _("La variable '{}' ne respecte pas la convention de nommage. Elle doit commencer par 'bool_' ou 'data_'.")
-                    .format(self.output_variable_name)
-                )
+            raw = self.output_variable_name.strip()
+            is_bool = raw.startswith("bool_")
+            is_data = raw.startswith("data_")
+            clean_root = re.sub(r'^(bool_|data_)+', '', raw).strip()
+            if not clean_root:
+                clean_root = f"out_{self.id}"
+            if is_bool:
+                self.output_variable_name = f"bool_{clean_root}"
+            elif is_data:
+                self.output_variable_name = f"data_{clean_root}"
+            else:
+                self.output_variable_name = f"data_{clean_root}"
+
+        if self.execute_if:
+            self.execute_if = re.sub(r'\$@_bool_(?:bool_)+', '$@_bool_', self.execute_if)
+            self.execute_if = re.sub(r'\$@_data_(?:data_)+', '$@_data_', self.execute_if)
+            self.execute_if = re.sub(r'@\$_bool_(?:bool_)+', '@$_bool_', self.execute_if)
+            self.execute_if = re.sub(r'@\$_data_(?:data_)+', '@$_data_', self.execute_if)
         return self
 
     response_text: Optional[str] = Field(None)

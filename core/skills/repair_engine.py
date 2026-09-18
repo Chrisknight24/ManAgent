@@ -61,6 +61,16 @@ class SkillRepairEngine:
             from core.prompt_loader import get_prompt_loader
             self.prompt_loader = get_prompt_loader()
 
+        # Récupération dynamique de la vue des outils enregistrés
+        tools_view = ""
+        if hasattr(self.llm, "runtime_state") and self.llm.runtime_state:
+            tools_mgr = getattr(self.llm.runtime_state, "tools_manager", None)
+            if tools_mgr and hasattr(tools_mgr, "get_tools_view"):
+                try:
+                    tools_view = await tools_mgr.get_tools_view()
+                except Exception as e:
+                    Logger.debug(f"[SkillRepairEngine] Impossible de récupérer tools_view : {e}")
+
         prompt = self.prompt_loader.load(
             "skill_repair.md",
             skill_id=skill_id,
@@ -69,15 +79,37 @@ class SkillRepairEngine:
             old_meta_plan=old_meta_plan,
             error_msg=error_msg,
             failed_step=failed_step,
-            parameters=failure_bundle.parameters_used if failure_bundle else {}
+            parameters=failure_bundle.parameters_used if failure_bundle else {},
+            tools=tools_view
+        )
+
+        # Context scope pour l'observabilité hiérarchique (Logs, EventStream, Dashboard)
+        exec_ctx = getattr(self.llm.runtime_state, "execution_context", None) if hasattr(self.llm, "runtime_state") else None
+        scope_ctx = (
+            exec_ctx.scope(
+                entity_id=f"skill_repair_{skill_id}",
+                entity_name=f"Skill Repair Engine ({skill_id})",
+                entity_role="skill_repair",
+                skill_id=skill_id
+            )
+            if exec_ctx is not None
+            else None
         )
 
         try:
-            repair_result: SkillRepairResult = await self.llm.generate_structured(
-                prompt=prompt,
-                schema=SkillRepairResult,
-                tag="SkillRepair"
-            )
+            if scope_ctx:
+                with scope_ctx:
+                    repair_result: SkillRepairResult = await self.llm.generate_structured(
+                        prompt=prompt,
+                        schema=SkillRepairResult,
+                        tag="SkillRepair"
+                    )
+            else:
+                repair_result: SkillRepairResult = await self.llm.generate_structured(
+                    prompt=prompt,
+                    schema=SkillRepairResult,
+                    tag="SkillRepair"
+                )
         except Exception as e:
             Logger.error(f"[SkillRepairEngine] ❌ Échec de la génération LLM pour la réparation: {e}")
             return
@@ -86,7 +118,7 @@ class SkillRepairEngine:
         new_payload = {
             "action": action,
             "object": obj,
-            "meta_plan": [node.dict(exclude_none=True) for node in repair_result.meta_plan]
+            "meta_plan": [node.model_dump(exclude_none=True) if hasattr(node, "model_dump") else node.dict(exclude_none=True) for node in repair_result.meta_plan]
         }
         
         # L'enregistrement DRAFT crée la vN+1
@@ -112,6 +144,16 @@ class SkillRepairEngine:
             version=new_version_num,
             target_state=SkillState.SHADOW,
             reason="Skill auto-réparé. Début de la qualification SHADOW."
+        )
+
+        Logger.event(
+            "skill_repaired",
+            skill_id=skill_id,
+            failed_version=failed_version,
+            new_version=new_version_num,
+            state=SkillState.SHADOW.value,
+            repair_reason=repair_result.repair_reason,
+            creator_model=self.llm.model_id
         )
 
         Logger.info(f"[SkillRepairEngine] ✅ Réparation réussie. Nouvelle version v{new_version_num} propulsée en SHADOW.")

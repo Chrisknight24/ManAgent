@@ -14,10 +14,14 @@ Ta mission est d'analyser un méta-plan qui a échoué (Breakout) et de proposer
 {{ old_meta_plan | tojson(indent=2) }}
 ```
 
+## OUTILS DISPONIBLES ET LEURS SCHÉMAS
+Voici les outils enregistrés dans le runtime ManAgent avec leurs descriptions et leurs paramètres attendus :
+{{ tools }}
+
 ## INSTRUCTIONS DE RÉPARATION
 1. Analyse l'erreur et identifie la cause exacte.
 2. Applique une correction **chirurgicale** sur le méta-plan. 
-   - Modifie l'étape fautive (ajustement de l'argument, de la condition, ou du type).
+   - Modifie l'étape fautive (ajustement de l'argument, de la condition, ou du type). Veille à ce que chaque outil reçoive son dictionnaire d'arguments complet et conforme à sa description.
    - OU ajoute une étape intermédiaire de stabilisation (attente, vérification supplémentaire).
    - Ne réinvente pas tout le plan, conserve les parties qui fonctionnaient !
 3. Respecte STRICTEMENT la grammaire des méta-plans (voir ci-dessous).

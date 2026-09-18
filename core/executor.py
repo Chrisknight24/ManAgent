@@ -134,7 +134,8 @@ class Executor:
                         success, execution_output, supplemental_data = await self._execute_step_action(step, accumulated_context, node=node)
 
                     if step.type == StepType.TOOL_CALL and success and execution_output is not None:
-                        node.raw_tool_success = str(execution_output).strip().lower() == "true"
+                        if getattr(node, "raw_tool_success", None) is None:
+                            node.raw_tool_success = str(execution_output).strip().lower() == "true"
 
                     if step.type == StepType.DIRECT_ANSWER and success:
                         step_bool_id = f"bool_{step.id}"
@@ -164,15 +165,17 @@ class Executor:
                             self.solver.variable_registry[base_data_id] = data_entry
 
                         if step.output_variable_name:
-                            base_name = step.output_variable_name
-                            self.solver.variable_registry[base_name] = bool_entry
-                            if base_name.startswith("bool_"):
-                                data_var_name = "data_" + base_name[5:]
-                            else:
-                                data_var_name = base_name + "_data"
-                            self.solver.variable_registry[data_var_name] = data_entry
+                            raw_out_name = step.output_variable_name
+                            clean_out_name = re.sub(r'^(bool_|data_)+', '', raw_out_name)
+                            out_bool_name = f"bool_{clean_out_name}"
+                            out_data_name = f"data_{clean_out_name}"
+
+                            self.solver.variable_registry[out_bool_name] = bool_entry
+                            self.solver.variable_registry[out_data_name] = data_entry
+                            if raw_out_name != out_bool_name and raw_out_name != out_data_name:
+                                self.solver.variable_registry[raw_out_name] = bool_entry
                             if step.is_crucial:
-                                self._propagate_crucial_variable(base_name)
+                                self._propagate_crucial_variable(raw_out_name)
 
                     if self.solver.runtime_state.cancel_requested:
                         Logger.warning(f"[Executor] 🛑 Interruption après action de l'étape [{step.id}].")
@@ -325,15 +328,12 @@ class Executor:
 
     def _propagate_crucial_variable(self, base_name: str) -> None:
         rum = self.solver.runtime_state.mission_rum
-        if base_name in self.solver.variable_registry:
-            rum[base_name] = self.solver.variable_registry[base_name]
-            Logger.debug(f"[Executor] Variable cruciale '{base_name}' propagée vers le RUM.")
-
-        if base_name.startswith("bool_"):
-            data_var_name = "data_" + base_name[5:]
-            if data_var_name in self.solver.variable_registry:
-                rum[data_var_name] = self.solver.variable_registry[data_var_name]
-                Logger.debug(f"[Executor] Variable cruciale '{data_var_name}' propagée vers le RUM.")
+        clean_root = re.sub(r'^(bool_|data_)+', '', base_name)
+        candidates = [base_name, f"bool_{clean_root}", f"data_{clean_root}"]
+        for cand in candidates:
+            if cand in self.solver.variable_registry:
+                rum[cand] = self.solver.variable_registry[cand]
+                Logger.debug(f"[Executor] Variable cruciale '{cand}' propagée vers le RUM.")
 
     # =====================================================
     # FORMATAGE REGISTRE
@@ -395,11 +395,33 @@ class Executor:
         reg = self.solver.variable_registry
         if var_name in reg:
             return var_name, reg[var_name]
+
+        # Nettoyage des suffixes d'instance (-00063 etc.)
         base_var = re.sub(r'-\d+$', '', var_name)
         if base_var in reg:
             return base_var, reg[base_var]
+
+        # Normalisation idempotente des préfixes multiples (bool_bool_ -> bool_, data_data_ -> data_)
+        is_bool = var_name.startswith("bool_")
+        is_data = var_name.startswith("data_")
+        clean_root = re.sub(r'^(bool_|data_)+', '', var_name)
+        clean_base = re.sub(r'-\d+$', '', clean_root)
+
+        candidates = []
+        if is_bool:
+            candidates.extend([f"bool_{clean_root}", f"bool_{clean_base}"])
+        elif is_data:
+            candidates.extend([f"data_{clean_root}", f"data_{clean_base}"])
+        candidates.extend([clean_root, clean_base, f"bool_{clean_root}", f"data_{clean_root}"])
+
+        for cand in candidates:
+            if cand in reg:
+                return cand, reg[cand]
+
         for k, v in reg.items():
-            if re.sub(r'-\d+$', '', k) == var_name or re.sub(r'-\d+$', '', k) == base_var:
+            k_base = re.sub(r'-\d+$', '', k)
+            k_clean = re.sub(r'^(bool_|data_)+', '', k_base)
+            if k_base == var_name or k_base == base_var or k_clean == clean_base:
                 return k, v
         return None, None
 
@@ -416,6 +438,13 @@ class Executor:
             if entry is not None:
                 value = entry.get("value")
                 var_type = entry.get("type")
+
+                # Si la valeur est None, ne JAMAIS injecter la chaîne littérale "None"
+                if value is None:
+                    if for_json:
+                        return "null"
+                    Logger.warning(f"[Executor] Variable '{var_name}' présente dans le registre avec valeur None. Référence brute conservée.")
+                    return match.group(0)
 
                 # Virtual Asset (URI, input, file, output, etc.)
                 if var_type == "virtual_asset" or (isinstance(value, str) and ("://" in value or value.startswith("turn_"))):
@@ -448,6 +477,10 @@ class Executor:
                         return json.dumps(value, ensure_ascii=False)
                     else:
                         return str(value)
+
+            if not for_json:
+                # Dans un contexte textuel / prompt / goal, conserver la référence intacte
+                return match.group(0)
             return f"__UNKNOWN_VAR_{var_name}__"
 
         return re.sub(r'(\$@_|@\$_)([a-zA-Z0-9_-]+)', replace_var, text)
@@ -599,18 +632,26 @@ class Executor:
             target_data_var_names.append(base_data_id)
 
         if step.output_variable_name:
-            base_name = step.output_variable_name
-            self.solver.variable_registry[base_name] = {
+            raw_out_name = step.output_variable_name
+            clean_out_name = re.sub(r'^(bool_|data_)+', '', raw_out_name)
+            out_bool_name = f"bool_{clean_out_name}"
+            out_data_name = f"data_{clean_out_name}"
+
+            # 1. Enregistrer le statut d'exécution booléen sous bool_
+            self.solver.variable_registry[out_bool_name] = {
                 "value": status_value,
                 "description": step.output_variable_desc or _("Statut de l'étape abstraite {}").format(step.id),
                 "source": child_solver.id,
                 "timestamp": datetime.now().isoformat()
             }
-            custom_data_name = "data_" + base_name[5:] if base_name.startswith("bool_") else (
-                base_name if base_name.startswith("data_") else base_name + "_data"
-            )
-            if custom_data_name not in target_data_var_names:
-                target_data_var_names.append(custom_data_name)
+            if raw_out_name != out_bool_name and raw_out_name != out_data_name:
+                self.solver.variable_registry[raw_out_name] = self.solver.variable_registry[out_bool_name]
+
+            # 2. Assurer que les données seront injectées sous data_ et la racine
+            if out_data_name not in target_data_var_names:
+                target_data_var_names.append(out_data_name)
+            if clean_out_name not in target_data_var_names:
+                target_data_var_names.append(clean_out_name)
 
         INLINE_LIMIT = ASSET_INLINE_LIMIT
         data_val_str = str(data_value) if data_value is not None else ""
@@ -673,6 +714,26 @@ class Executor:
             enriched_error = f"[TOOLS FAILED] {error_msg}"
             return False, "", enriched_error, child_result
 
+    def _validate_tool_args(self, tool_name: str, args: dict) -> Tuple[bool, Optional[str]]:
+        """
+        Validation générique pré-exécution des arguments d'outil pour s'assurer que
+        la charge utile est un dictionnaire JSON valide et ne contient pas de pseudo-code
+        non résolu ou d'expressions littérales de code résiduelles.
+        """
+        if not isinstance(args, dict):
+            return False, _("Les arguments d'outil doivent être un dictionnaire JSON valide.")
+
+        for key, val in args.items():
+            if isinstance(val, str):
+                # Détection générique de fuite de pseudo-code (ex: ' "texte".propriété[index] ')
+                if re.search(r'["\'].*?["\']\.[a-zA-Z_]\w*\s*\[', val):
+                    return False, _(
+                        "L'argument '{}' de l'outil '{}' contient une expression de pseudo-code non résolue : '{}'. "
+                        "Les valeurs passées aux outils doivent être des données scalaires ou structurées résolues."
+                    ).format(key, tool_name, val)
+
+        return True, None
+
     async def _handle_tool_call(self, step: PlanStep, node: Optional[ExecutionNode] = None) -> Tuple[bool, str, Optional[str]]:
         try:
             tool_args = self._safe_json_loads(step.tool_args_json)
@@ -687,6 +748,12 @@ class Executor:
             self.solver.runtime_state._solver_registry_for_tools = self.solver.variable_registry
         else:
             tool_args_raw = self._interpolate_dict(tool_args, for_json=True)
+
+        # Validation déterministe pré-exécution des arguments d'outil
+        is_valid_args, validation_err = self._validate_tool_args(step.tool_name, tool_args_raw)
+        if not is_valid_args:
+            Logger.error(f"[Executor] 🛑 Arguments invalides pour l'outil '{step.tool_name}' à l'étape [{step.id}] : {validation_err}")
+            return False, "", validation_err
 
         hardware_result_str = await self.solver.execute_tool(step.tool_name, tool_args_raw)
 
@@ -756,18 +823,26 @@ class Executor:
                 target_data_var_names.append(base_data_id)
 
             if step.output_variable_name:
-                base_name = step.output_variable_name
-                self.solver.variable_registry[base_name] = {
+                raw_out_name = step.output_variable_name
+                clean_out_name = re.sub(r'^(bool_|data_)+', '', raw_out_name)
+                out_bool_name = f"bool_{clean_out_name}"
+                out_data_name = f"data_{clean_out_name}"
+
+                # 1. Enregistrer le statut d'exécution booléen sous bool_
+                self.solver.variable_registry[out_bool_name] = {
                     "value": is_success_flag,
                     "description": step.output_variable_desc or _("Statut de l'opération {}").format(step.tool_name),
                     "source": self.solver.id,
                     "timestamp": datetime.now().isoformat()
                 }
-                custom_data_name = "data_" + base_name[5:] if base_name.startswith("bool_") else (
-                    base_name if base_name.startswith("data_") else base_name + "_data"
-                )
-                if custom_data_name not in target_data_var_names:
-                    target_data_var_names.append(custom_data_name)
+                if raw_out_name != out_bool_name and raw_out_name != out_data_name:
+                    self.solver.variable_registry[raw_out_name] = self.solver.variable_registry[out_bool_name]
+
+                # 2. Assurer que les données seront injectées sous data_ et la racine
+                if out_data_name not in target_data_var_names:
+                    target_data_var_names.append(out_data_name)
+                if clean_out_name not in target_data_var_names:
+                    target_data_var_names.append(clean_out_name)
 
             # Seuil de volumétrie pour encapsulation en DataAsset (~3000 chars)
             INLINE_LIMIT = ASSET_INLINE_LIMIT
@@ -826,10 +901,31 @@ class Executor:
             if node:
                 node.raw_success_flag = is_success_flag
                 node.raw_tool_success = (is_success_flag == "true")
+                node.result = parsed_result
                 if "failure_bundle" in parsed_result:
                     node.failure_bundle = parsed_result.get("failure_bundle")
                 if "breakout_report" in parsed_result:
                     node.breakout_report = parsed_result.get("breakout_report")
+                if "executed_steps" in parsed_result:
+                    node.executed_steps = parsed_result.get("executed_steps")
+                    node.metadata["executed_steps"] = parsed_result.get("executed_steps")
+
+            # Sauvegarde des données de diagnostic Skill dans le variable_registry
+            if parsed_result.get("breakout_report"):
+                bo_rep = parsed_result.get("breakout_report")
+                self.solver.variable_registry[f"breakout_{step.id}"] = {
+                    "value": bo_rep if isinstance(bo_rep, (dict, list, str, int, float, bool)) else (bo_rep.to_dict() if hasattr(bo_rep, "to_dict") else str(bo_rep)),
+                    "description": _("Rapport de rupture (Breakout) du skill {}").format(step.tool_name),
+                    "source": self.solver.id,
+                    "timestamp": datetime.now().isoformat()
+                }
+            if parsed_result.get("passed_checkpoints"):
+                self.solver.variable_registry[f"checkpoints_{step.id}"] = {
+                    "value": parsed_result.get("passed_checkpoints"),
+                    "description": _("Checkpoints validés par {}").format(step.tool_name),
+                    "source": self.solver.id,
+                    "timestamp": datetime.now().isoformat()
+                }
 
             if is_success_flag == "true":
                 if actual_data is not None:

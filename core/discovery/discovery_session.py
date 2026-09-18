@@ -199,8 +199,9 @@ class DiscoverySession:
                 tool_result=result
             )
 
+            # Si l'étape a une condition d'arrêt anticipé explicite satisfaite
             if self._check_expected_result(step, result):
-                if step.expected_result and step.expected_result.strip().lower() == "true" and result.get("success"):
+                if step.expected_result and step.expected_result.strip().lower() in ["early_exit", "stop_on_match"]:
                     self.workspace.set_exit_policy(ExitPolicy.EXPECTED_RESULT_FOUND)
             else:
                 Logger.debug(f"[DiscoverySession:{self.session_id}] Expected_result non satisfait (attendu: {step.expected_result}, obtenu: {result.get('success')}).")

@@ -268,11 +268,18 @@ class ProviderManager:
             if meta.is_recommended:
                 score += 15.0
 
-            # Bonus coût selon préférence
+            # Bonus/malus coût selon préférence
             cost_pref = self.routing_policy.get("cost_preference", "balanced")
-            if cost_pref == "prefer_free" or cost_pref == "free_tier_available":
+            if cost_pref in ["prefer_free", "free_tier_available"]:
                 if meta.cost_tier in ["free", "free_tier_available"]:
-                    score += 25.0
+                    score += 35.0
+                elif meta.cost_tier == "paid":
+                    score -= 150.0  # Modèle payant fortement pénalisé si mode gratuit
+            elif cost_pref == "balanced":
+                if meta.cost_tier in ["free", "free_tier_available"]:
+                    score += 20.0
+                elif meta.cost_tier == "paid":
+                    score -= 80.0   # Pénaliser les modèles payants pour éviter d'élire un modèle payant sans sélection explicite
 
             candidates.append((score, meta.provider_id, meta.model_id))
 

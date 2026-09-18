@@ -290,3 +290,20 @@ class ConversationMemory:
         except Exception as e:
             Logger.error(f"[ConversationMemory] Erreur suppression messages DB {session_id} : {e}")
 
+    def clear_all_messages(self) -> int:
+        """Purge l'ensemble des messages de toutes les sessions (RAM et SQLite)."""
+        self._sessions.clear()
+        deleted_count = 0
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM messages")
+                row = cursor.fetchone()
+                deleted_count = row[0] if row else 0
+                cursor.execute("DELETE FROM messages")
+                conn.commit()
+                Logger.info(f"[ConversationMemory] Tous les messages ont été purgés de la DB ({deleted_count} messages supprimés).")
+        except Exception as e:
+            Logger.error(f"[ConversationMemory] Erreur purge totale messages DB : {e}")
+        return deleted_count
+

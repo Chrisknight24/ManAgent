@@ -32,6 +32,8 @@ mono-thread, il n'y a pas de section critique à protéger tant qu'aucun
 cas ici, l'appel est synchrone).
 """
 import itertools
+import uuid
+from typing import Optional
 
 _counter = itertools.count(1)
 
@@ -57,3 +59,8 @@ def make_step_id(local_id: str) -> str:
     """
     safe_local = (local_id or "step").strip()
     return f"{safe_local}-{next_unique_suffix()}"
+
+
+def make_mission_id(prefix: str = "mission") -> str:
+    """Génère un identifiant unique de mission."""
+    return f"{prefix}_{uuid.uuid4().hex[:12]}"

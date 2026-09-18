@@ -89,8 +89,8 @@ class SkillExecutionEngine:
         context_state: Dict[str, Any] = {}
 
         try:
-            # 1. Vérification des checkpoints définis dans le manifest
-            checkpoints_map = {cp.checkpoint_id: cp for cp in manifest.checkpoints}
+            # 1. Cartographie dynamique des checkpoints (jalons d'étapes)
+            checkpoints_map = {cp.checkpoint_id: cp for cp in (manifest.checkpoints or [])}
             
             # 2. Appel du host_executor pour lancer le flux ou la commande
             execution_response = await host_executor(version.flow_payload_ref, parameters)
@@ -100,14 +100,16 @@ class SkillExecutionEngine:
                 is_success = execution_response.get("success", True)
                 breakout_data = execution_response.get("breakout")
                 output_data = execution_response.get("output", {})
-                passed_cps = execution_response.get("passed_checkpoints", [])
+                passed_cps = execution_response.get("passed_checkpoints") or execution_response.get("checkpoints_passed", [])
+                executed_steps = execution_response.get("executed_steps", [])
             else:
                 is_success = bool(execution_response)
                 breakout_data = None
                 output_data = {"result": execution_response}
-                passed_cps = [cp.checkpoint_id for cp in manifest.checkpoints]
+                passed_cps = [cp.checkpoint_id for cp in (manifest.checkpoints or [])]
+                executed_steps = []
 
-            # 3. Traitement des checkpoints franchis
+            # 3. Traitement dynamique des jalons d'étapes franchis avec succès
             for cp_id in passed_cps:
                 cp_obj = checkpoints_map.get(cp_id, Checkpoint(checkpoint_id=cp_id, name=cp_id))
                 passed_checkpoints.append(cp_id)
@@ -117,7 +119,7 @@ class SkillExecutionEngine:
                     version=ver_num,
                     checkpoint_id=cp_id,
                     checkpoint_name=cp_obj.name,
-                    is_critical=cp_obj.is_critical,
+                    is_critical=getattr(cp_obj, "is_critical", False),
                     reached_at=time.time(),
                     observed_state=output_data
                 )
@@ -126,24 +128,41 @@ class SkillExecutionEngine:
             # 4. Détection et traitement d'un Breakout / Échec
             if not is_success or breakout_data:
                 failed_cp_id = "unknown"
-                if breakout_data and isinstance(breakout_data, dict):
+                if isinstance(breakout_data, BreakoutReport):
+                    breakout_report = breakout_data
+                elif isinstance(execution_response, dict) and isinstance(execution_response.get("breakout_report"), BreakoutReport):
+                    breakout_report = execution_response["breakout_report"]
+                elif breakout_data and isinstance(breakout_data, dict):
                     failed_cp_id = breakout_data.get("failed_checkpoint_id", "unknown")
                     err_msg = breakout_data.get("error_message", "Breakout détecté pendant l'exécution")
-                    f_class = FailureClass(breakout_data.get("failure_class", FailureClass.UNKNOWN.value))
+                    raw_fclass = breakout_data.get("failure_class", FailureClass.UNKNOWN.value)
+                    try:
+                        f_class = FailureClass(raw_fclass)
+                    except Exception:
+                        f_class = FailureClass.UNKNOWN
+                    breakout_report = BreakoutReport(
+                        skill_id=skill_id,
+                        version=ver_num,
+                        failed_checkpoint_id=failed_cp_id,
+                        completed_checkpoints=passed_checkpoints,
+                        failure_class=f_class,
+                        error_message=err_msg,
+                        recoverability="HIGH" if len(passed_checkpoints) > 0 else "MEDIUM",
+                        resume_context={"parameters": parameters, "passed_checkpoints": passed_checkpoints}
+                    )
                 else:
                     err_msg = "Échec d'exécution du flux par l'hôte"
                     f_class = FailureClass.EXECUTION_ERROR
-
-                breakout_report = BreakoutReport(
-                    skill_id=skill_id,
-                    version=ver_num,
-                    failed_checkpoint_id=failed_cp_id,
-                    completed_checkpoints=passed_checkpoints,
-                    failure_class=f_class,
-                    error_message=err_msg,
-                    recoverability="HIGH" if len(passed_checkpoints) > 0 else "MEDIUM",
-                    resume_context={"parameters": parameters, "passed_checkpoints": passed_checkpoints}
-                )
+                    breakout_report = BreakoutReport(
+                        skill_id=skill_id,
+                        version=ver_num,
+                        failed_checkpoint_id=failed_cp_id,
+                        completed_checkpoints=passed_checkpoints,
+                        failure_class=f_class,
+                        error_message=err_msg,
+                        recoverability="HIGH" if len(passed_checkpoints) > 0 else "MEDIUM",
+                        resume_context={"parameters": parameters, "passed_checkpoints": passed_checkpoints}
+                    )
 
                 # Événement de rupture
                 bo_event = BreakoutOccurredEvent(
@@ -195,7 +214,8 @@ class SkillExecutionEngine:
                     "breakout_report": breakout_report,
                     "failure_bundle": failure_bundle,
                     "passed_checkpoints": passed_checkpoints,
-                    "duration_ms": duration_ms
+                    "duration_ms": duration_ms,
+                    "executed_steps": executed_steps
                 }
 
             # 5. Succès complet de l'exécution
@@ -224,7 +244,8 @@ class SkillExecutionEngine:
                 "breakout": False,
                 "output": output_data,
                 "passed_checkpoints": passed_checkpoints,
-                "duration_ms": duration_ms
+                "duration_ms": duration_ms,
+                "executed_steps": executed_steps
             }
 
         except Exception as e:

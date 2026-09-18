@@ -48,7 +48,7 @@ class RegistryExplorer(BaseExplorer):
         return "Inspecte et analyse les variables temporaires et leurs valeurs stockées en mémoire vive pour la mission en cours."
 
     def get_available_goals(self) -> List[str]:
-        return ["list_keys", "describe_type", "check_value", "summarize", "analyze_value"]
+        return ["list_keys", "describe_value", "describe_type", "inspect_value", "check_value", "summarize", "analyze_value"]
 
     def get_tools_description(self) -> List[Dict[str, Any]]:
         return [
@@ -74,7 +74,7 @@ class RegistryExplorer(BaseExplorer):
                     "properties": {
                         "target": {"type": "string"},
                         "offset": {"type": "integer", "default": 0},
-                        "limit": {"type": "integer", "default": 500}
+                        "limit": {"type": "integer", "default": 2000}
                     },
                     "required": ["target"]
                 }
@@ -97,17 +97,18 @@ class RegistryExplorer(BaseExplorer):
         try:
             if tool_name == "list_keys":
                 return await self._list_keys()
-            elif tool_name == "describe_value":
+            elif tool_name in ["describe_value", "describe_type"]:
                 return await self._describe_value(args.get("target"))
-            elif tool_name == "inspect_value":
+            elif tool_name in ["inspect_value", "check_value"]:
                 return await self._inspect_value(
                     args.get("target"),
                     args.get("offset", 0),
-                    args.get("limit", 500)
+                    args.get("limit", 2000)
                 )
-            elif tool_name == "analyze_value":
+            elif tool_name in ["analyze_value", "summarize"]:
                 from tools.internal_tools import llm_analyze_data
-                return await llm_analyze_data({"source": args.get("target"), "query": args.get("query")}, self.runtime_state)
+                query = args.get("query") or args.get("goal") or _("Résumer et analyser la valeur")
+                return await llm_analyze_data({"source": args.get("target"), "query": query}, self.runtime_state)
             else:
                 return {"success": False, "data": _("Outil inconnu.")}
         except Exception as e:
@@ -177,7 +178,7 @@ class RegistryExplorer(BaseExplorer):
                 if not valid:
                     raise ValueError(_("La cible '{target}' n'existe pas dans les données fournies.").format(target=t))
             else:
-                matched_k, _ = self._find_target_in_registry(registry, t)
+                matched_k, _unused = self._find_target_in_registry(registry, t)
                 if matched_k is None:
                     raise ValueError(_("Cible '{target}' invalide pour registry.").format(target=t))
 
@@ -331,7 +332,7 @@ class RegistryExplorer(BaseExplorer):
                 if t == base_t or re.sub(r'-\d+$', '', t) == base_t or re.sub(r'-\d+$', '', t) == target:
                     return True
         registry = self._get_registry()
-        matched_key, _ = self._find_target_in_registry(registry, target)
+        matched_key, _unused = self._find_target_in_registry(registry, target)
         return matched_key is not None
 
     def create_signature(self, targets: List[str], technical_goals: List[str]) -> str:
@@ -348,17 +349,24 @@ class RegistryExplorer(BaseExplorer):
     # =====================================================
 
     def _get_registry(self) -> Dict[str, Any]:
-        """Récupère le registre depuis le data_context courant ou runtime_state."""
-        if hasattr(self, "_current_data_context") and self._current_data_context is not None and isinstance(self._current_data_context, dict):
+        """Récupère le registre depuis le data_context courant, RUM ou runtime_state."""
+        if hasattr(self, "_current_data_context") and self._current_data_context is not None and isinstance(self._current_data_context, dict) and len(self._current_data_context) > 0:
             return self._current_data_context
-        if hasattr(self.runtime_state, "execution_context"):
+        if hasattr(self, "_data_provider") and self._data_provider is not None and hasattr(self._data_provider, "_registry") and isinstance(self._data_provider._registry, dict) and len(self._data_provider._registry) > 0:
+            return self._data_provider._registry
+        if hasattr(self.runtime_state, "mission_rum") and isinstance(self.runtime_state.mission_rum, dict) and len(self.runtime_state.mission_rum) > 0:
+            return self.runtime_state.mission_rum
+        if hasattr(self.runtime_state, "execution_context") and isinstance(self.runtime_state.execution_context, dict):
             ctx_data = self.runtime_state.execution_context.get("data_context")
-            if isinstance(ctx_data, dict):
+            if isinstance(ctx_data, dict) and len(ctx_data) > 0:
                 return ctx_data
-        if hasattr(self.runtime_state, "_solver_registry_for_tools") and self.runtime_state._solver_registry_for_tools is not None:
+        if hasattr(self.runtime_state, "_solver_registry_for_tools") and isinstance(self.runtime_state._solver_registry_for_tools, dict) and len(self.runtime_state._solver_registry_for_tools) > 0:
             return self.runtime_state._solver_registry_for_tools
-        if hasattr(self.runtime_state, "variable_registry") and self.runtime_state.variable_registry:
+        if hasattr(self.runtime_state, "variable_registry") and isinstance(self.runtime_state.variable_registry, dict) and len(self.runtime_state.variable_registry) > 0:
             return self.runtime_state.variable_registry
+        # Repli si dictionnaires vides
+        if hasattr(self, "_current_data_context") and isinstance(self._current_data_context, dict):
+            return self._current_data_context
         Logger.warning("[RegistryExplorer] Aucun registre trouvé.")
         return {}
 

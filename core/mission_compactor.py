@@ -52,21 +52,42 @@ class MissionCompactor(Entity):
         Trie les missions similaires du plus récent au plus ancien
         et ajoute une annotation explicite de récence temporelle.
         """
-        def _get_timestamp(ep: Dict[str, Any]):
-            ts = ep.get("finished_at") or ep.get("created_at")
+        def _get_datetime(ep: Dict[str, Any]) -> datetime:
+            episode_data = ep.get("episode") if isinstance(ep.get("episode"), dict) else {}
+            ts = (
+                ep.get("finished_at")
+                or ep.get("created_at")
+                or episode_data.get("timestamp")
+                or episode_data.get("created_at")
+                or episode_data.get("finished_at")
+            )
             if ts:
-                try:
-                    return datetime.fromisoformat(str(ts).replace("Z", ""))
-                except Exception:
-                    pass
+                if isinstance(ts, (int, float)):
+                    try:
+                        return datetime.fromtimestamp(float(ts))
+                    except Exception:
+                        pass
+                elif isinstance(ts, str):
+                    try:
+                        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    except Exception:
+                        try:
+                            return datetime.fromtimestamp(float(ts))
+                        except Exception:
+                            pass
             return datetime.min
 
-        sorted_eps = sorted(raw_missions, key=_get_timestamp, reverse=True)
+        sorted_eps = sorted(raw_missions, key=_get_datetime, reverse=True)
         
         annotated = []
         for idx, ep in enumerate(sorted_eps):
             ep_copy = dict(ep)
-            date_str = ep_copy.get("finished_at") or ep_copy.get("created_at") or "Date inconnue"
+            dt = _get_datetime(ep_copy)
+            if dt != datetime.min:
+                date_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                date_str = "Date inconnue"
+
             if idx == 0 and len(sorted_eps) > 1:
                 ep_copy["_recency_label"] = f"⭐ LA PLUS RÉCENTE (terminée le {date_str})"
             elif idx == 0:

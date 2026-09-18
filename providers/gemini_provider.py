@@ -192,32 +192,18 @@ class GeminiProvider(BaseProvider):
                     )
             
             parts = [types.Part.from_text(text=prompt)]
-            if media_assets:
-                for asset in media_assets:
-                    if hasattr(asset, "filepath") and asset.filepath and os.path.exists(asset.filepath):
-                        try:
-                            with open(asset.filepath, "rb") as f:
-                                img_data = f.read()
-                            import mimetypes
-                            mime_type, _encoding = mimetypes.guess_type(asset.filepath)
-                            if not mime_type:
-                                if asset.filepath.lower().endswith(".png"):
-                                    mime_type = "image/png"
-                                elif asset.filepath.lower().endswith((".jpg", ".jpeg")):
-                                    mime_type = "image/jpeg"
-                                elif asset.filepath.lower().endswith(".webp"):
-                                    mime_type = "image/webp"
-                                else:
-                                    mime_type = "image/png"
-                            parts.append(
-                                types.Part.from_bytes(
-                                    data=img_data,
-                                    mime_type=mime_type
-                                )
-                            )
-                            Logger.info(f"[GeminiProvider] Image attachée avec succès : {asset.filename} ({mime_type})")
-                        except Exception as ex:
-                            Logger.error(f"[GeminiProvider] Erreur lors du chargement de l'image {asset.filename} : {ex}")
+            media_parts = self.extract_normalized_media_assets(media_assets)
+            for p in media_parts:
+                try:
+                    parts.append(
+                        types.Part.from_bytes(
+                            data=p["data_bytes"],
+                            mime_type=p["mime_type"]
+                        )
+                    )
+                    Logger.info(f"[GeminiProvider] Asset média attaché : {p['filename']} ({p['mime_type']}, {p['size_bytes']} octets)")
+                except Exception as ex:
+                    Logger.error(f"[GeminiProvider] Erreur lors de l'attachement de l'asset {p['filename']} : {ex}")
 
             contents.append(types.Content(role="user", parts=parts))
 

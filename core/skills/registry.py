@@ -105,8 +105,8 @@ class SkillRegistry:
     def get_skill(self, skill_id: str) -> Optional[SkillManifest]:
         """Retourne le manifest du skill s'il existe, sinon None."""
         try:
-            manifest, _ = self.get_active_skill(skill_id)
-            return manifest
+            pkg = self.export_package(skill_id)
+            return pkg.manifest if pkg else None
         except Exception:
             return None
 
@@ -128,6 +128,114 @@ class SkillRegistry:
         except Exception:
             return 0
 
+    def create_synthesis_version(
+        self,
+        manifest: SkillManifest,
+        flow_payload: Any,
+        creator_model: str = "skill_synthesizer",
+        creator_capabilities: Optional[List[str]] = None,
+        min_reasoning_score: float = 1.0,
+        min_benchmark_score: float = 50.0,
+        initial_state: SkillState = SkillState.DRAFT
+    ) -> SkillVersion:
+        """
+        Enregistre un Skill ou crée une nouvelle version (vN+1) suite à une (re-)synthèse.
+        Gère automatiquement la création initiale (v1) ou l'incrément de version (v2, v3, etc.).
+        """
+        payload_str = json.dumps(flow_payload) if isinstance(flow_payload, (dict, list)) else str(flow_payload)
+        now = time.time()
+        capabilities_list = creator_capabilities or []
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT MAX(version) FROM skill_versions WHERE skill_id = ?", (manifest.skill_id,))
+            row = cursor.fetchone()
+            max_v = row[0] if (row and row[0] is not None) else 0
+
+            if max_v == 0:
+                # Insertion du Manifest dans `skills`
+                cursor.execute("""
+                    INSERT OR REPLACE INTO skills (
+                        skill_id, namespace, name, description, parameters_schema,
+                        environment_json, checkpoints_json, risk_level,
+                        current_production_version, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    manifest.skill_id,
+                    manifest.namespace,
+                    manifest.name,
+                    manifest.description,
+                    json.dumps(manifest.parameters_schema),
+                    json.dumps(manifest.environment.to_dict()),
+                    json.dumps([cp.to_dict() for cp in manifest.checkpoints]),
+                    manifest.risk_level,
+                    None,
+                    now,
+                    now
+                ))
+                new_version = 1
+                parent_v = None
+            else:
+                # Mise à jour des métadonnées du manifest existant
+                cursor.execute("""
+                    UPDATE skills SET description = ?, parameters_schema = ?, updated_at = ?
+                    WHERE skill_id = ?
+                """, (manifest.description, json.dumps(manifest.parameters_schema), now, manifest.skill_id))
+                new_version = max_v + 1
+                parent_v = max_v
+
+            ref = f"payload_{manifest.skill_id}_v{new_version}"
+            trust_profile = TrustProfile()
+
+            # Insertion de la nouvelle version
+            cursor.execute("""
+                INSERT INTO skill_versions (
+                    skill_id, version, parent_version, state, creator_model,
+                    min_capability_tier, provenance, repair_reason, flow_payload_ref,
+                    payload_content, trust_profile_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                manifest.skill_id,
+                new_version,
+                parent_v,
+                initial_state.value,
+                creator_model,
+                int(min_reasoning_score),
+                ProvenanceType.DISTILLED.value,
+                f"Re-synthèse de compétence (v{new_version})" if new_version > 1 else None,
+                ref,
+                payload_str,
+                json.dumps(trust_profile.to_dict()),
+                now,
+                now
+            ))
+
+            # Indexation des Signatures
+            for sig in manifest.signature_hashes:
+                for app in (manifest.target_applications or [None]):
+                    cursor.execute("""
+                        INSERT OR IGNORE INTO skill_signatures_index (signature_hash, skill_id, target_app)
+                        VALUES (?, ?, ?)
+                    """, (sig, manifest.skill_id, app))
+
+            conn.commit()
+
+        return SkillVersion(
+            skill_id=manifest.skill_id,
+            version=new_version,
+            parent_version=parent_v,
+            state=initial_state,
+            creator_model=creator_model,
+            creator_capabilities=capabilities_list,
+            min_reasoning_score=min_reasoning_score,
+            min_benchmark_score=min_benchmark_score,
+            provenance=ProvenanceType.DISTILLED,
+            flow_payload_ref=ref,
+            trust_profile=trust_profile,
+            created_at=now,
+            updated_at=now
+        )
+
     def create_draft_skill(
         self,
         manifest: SkillManifest,
@@ -138,17 +246,13 @@ class SkillRegistry:
         min_benchmark_score: float = 50.0
     ) -> SkillVersion:
         """Helper pour enregistrer un nouveau candidat Skill DRAFT/SHADOW."""
-        payload_str = json.dumps(flow_payload) if isinstance(flow_payload, (dict, list)) else str(flow_payload)
-        ref = f"payload_{manifest.skill_id}_v1"
-        return self.register_draft_skill(
+        return self.create_synthesis_version(
             manifest=manifest,
-            flow_payload_ref=ref,
-            payload_content=payload_str,
+            flow_payload=flow_payload,
             creator_model=creator_model,
             creator_capabilities=creator_capabilities,
             min_reasoning_score=min_reasoning_score,
             min_benchmark_score=min_benchmark_score,
-            provenance=ProvenanceType.DISTILLED,
             initial_state=SkillState.DRAFT
         )
 
@@ -246,6 +350,13 @@ class SkillRegistry:
                         INSERT OR IGNORE INTO skill_signatures_index (signature_hash, skill_id, target_app)
                         VALUES (?, ?, ?)
                     """, (sig, manifest.skill_id, app))
+
+            if initial_state == SkillState.PRODUCTION:
+                cursor.execute("""
+                    UPDATE skills
+                    SET current_production_version = ?, updated_at = ?
+                    WHERE skill_id = ?
+                """, (version_num, now, manifest.skill_id))
 
             conn.commit()
 
@@ -388,6 +499,14 @@ class SkillRegistry:
                 Logger.warning(f"[SkillRegistry] ⚠️ Skill '{skill_id}' v{version} placé en {target_state.value} (Raison: {reason}).")
 
             conn.commit()
+
+            Logger.event(
+                "skill_transition",
+                skill_id=skill_id,
+                version=version,
+                target_state=target_state.value,
+                reason=reason
+            )
             return True
 
     # =========================================================================
@@ -462,12 +581,18 @@ class SkillRegistry:
                     cursor.execute(fb_query, fallback_ids)
                     rows = cursor.fetchall()
 
+            candidate_scored: List[Tuple[SkillManifest, SkillVersion, float]] = []
+
             for r in rows:
                 env_obj = ExecutionEnvironment.from_dict(json.loads(r[5]))
 
-                # Vérification déterministe de compatibilité environnementale
-                if host_environment and not env_obj.is_compatible(host_environment):
-                    continue
+                # Vérification déterministe rigide de compatibilité environnementale
+                if host_environment:
+                    is_match, specificity, mismatches = env_obj.calculate_compatibility(host_environment)
+                    if not is_match:
+                        continue
+                else:
+                    specificity = 0.0
 
                 checkpoints = [Checkpoint.from_dict(cp) for cp in json.loads(r[6])]
                 manifest = SkillManifest(
@@ -497,11 +622,12 @@ class SkillRegistry:
                     created_at=r[20],
                     updated_at=r[21]
                 )
-                results.append((manifest, version))
+                candidate_scored.append((manifest, version, specificity))
 
-        # Tri par trust score décroissant
-        results.sort(key=lambda x: x[1].trust_profile.trust_score, reverse=True)
-        return results
+        # Tri prioritaire par spécificité d'environnement décroissante (maximum de variables qui matchent),
+        # puis par trust score décroissant
+        candidate_scored.sort(key=lambda x: (x[2], x[1].trust_profile.trust_score), reverse=True)
+        return [(m, v) for m, v, _ in candidate_scored]
 
     def get_shadow_skills(self) -> List[Tuple[SkillManifest, SkillVersion]]:
         """Récupère toutes les versions de compétences actuellement sous évaluation SHADOW."""
@@ -568,9 +694,46 @@ class SkillRegistry:
             
         if pkg.manifest.current_production_version:
             v_match = next((v for v in pkg.versions if v.version == pkg.manifest.current_production_version), None)
-            return pkg.manifest, v_match
-            
-        return pkg.manifest, pkg.versions[-1] if pkg.versions else None
+            if v_match and v_match.state in (SkillState.PRODUCTION, SkillState.DEGRADED):
+                return pkg.manifest, v_match
+            if v_match and v_match.state not in (SkillState.QUARANTINE, SkillState.RETIRED):
+                return pkg.manifest, v_match
+            return pkg.manifest, None
+
+        # Fallback pour skills en incubation / shadow / test (aucune version de production établie)
+        # Chercher la dernière version candidate active (SHADOW, HALF_OPEN)
+        evaluable_versions = [
+            v for v in pkg.versions
+            if v.state in (SkillState.PRODUCTION, SkillState.SHADOW, SkillState.HALF_OPEN, SkillState.DEGRADED)
+        ]
+        if evaluable_versions:
+            latest_evaluable = max(evaluable_versions, key=lambda v: v.version)
+            return pkg.manifest, latest_evaluable
+
+        return pkg.manifest, None
+
+    def get_flow_payload(self, skill_id: str, version: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """Récupère le contenu désérialisé (JSON dict) du flow_payload d'une version donnée ou active."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            if version is not None:
+                cursor.execute(
+                    "SELECT payload_content FROM skill_versions WHERE skill_id = ? AND version = ?",
+                    (skill_id, version)
+                )
+            else:
+                cursor.execute("""
+                    SELECT v.payload_content FROM skill_versions v
+                    JOIN skills s ON s.skill_id = v.skill_id
+                    WHERE s.skill_id = ? AND v.version = s.current_production_version
+                """, (skill_id,))
+            row = cursor.fetchone()
+            if row and row[0]:
+                try:
+                    return json.loads(row[0])
+                except Exception:
+                    return {"raw": row[0]}
+        return None
 
     def record_run_metric(
         self,
@@ -578,7 +741,8 @@ class SkillRegistry:
         version: int,
         success: bool,
         is_breakout: bool = False,
-        is_shadow: bool = False
+        is_shadow: bool = False,
+        shadow_mismatch: bool = False
     ) -> TrustProfile:
         """Met à jour le profil de confiance d'une version suite à une exécution ou observation."""
         with self._get_connection() as conn:
@@ -591,7 +755,12 @@ class SkillRegistry:
             trust_profile = TrustProfile.from_dict(json.loads(row[0]))
             current_state = SkillState(row[1])
 
-            trust_profile.record_run(success=success, is_breakout=is_breakout, is_shadow=is_shadow)
+            trust_profile.record_run(
+                success=success,
+                is_breakout=is_breakout,
+                is_shadow=is_shadow,
+                shadow_mismatch=shadow_mismatch
+            )
 
             # Circuit Breaker automatique : si trop d'échecs consécutifs en PRODUCTION -> QUARANTINE
             if current_state == SkillState.PRODUCTION and trust_profile.consecutive_failures >= 3:
@@ -677,7 +846,10 @@ class SkillRegistry:
                 )
                 versions.append(ver_obj)
                 if v[8]:  # payload_content
-                    embedded_payloads[v[7]] = v[8]
+                    try:
+                        embedded_payloads[v[7]] = json.loads(v[8])
+                    except Exception:
+                        embedded_payloads[v[7]] = v[8]
 
         return SkillPackage(
             manifest=manifest,
@@ -729,6 +901,8 @@ class SkillRegistry:
             # 2. Insertion des Versions
             for ver in package.versions:
                 payload_content = package.embedded_payloads.get(ver.flow_payload_ref)
+                if isinstance(payload_content, (dict, list)):
+                    payload_content = json.dumps(payload_content)
                 cursor.execute("""
                     INSERT INTO skill_versions (
                         skill_id, version, parent_version, state, creator_model,
@@ -780,29 +954,44 @@ class SkillRegistry:
             return 0
 
     def list_all_skills(self) -> List[Dict[str, Any]]:
-        """Retourne la liste complète des skills enregistrés dans la base."""
+        """Retourne la liste complète des skills enregistrés dans la base avec leurs métriques et états récents."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT s.skill_id, s.namespace, s.name, s.description, s.risk_level,
                        s.current_production_version, s.created_at,
-                       v.version, v.state
+                       v.version, v.state, v.trust_profile_json
                 FROM skills s
-                LEFT JOIN skill_versions v ON s.skill_id = v.skill_id AND v.version = s.current_production_version
+                LEFT JOIN skill_versions v ON s.skill_id = v.skill_id 
+                     AND v.version = COALESCE(s.current_production_version, (SELECT MAX(v2.version) FROM skill_versions v2 WHERE v2.skill_id = s.skill_id))
+                ORDER BY s.created_at DESC
             """)
             rows = cursor.fetchall()
             results = []
             for r in rows:
+                trust_data = {}
+                if len(r) > 9 and r[9]:
+                    try:
+                        trust_data = json.loads(r[9])
+                    except Exception:
+                        trust_data = {}
+                tp_obj = TrustProfile.from_dict(trust_data) if trust_data else TrustProfile()
                 results.append({
+                    "id": r[0],
                     "skill_id": r[0],
+                    "ns": r[1],
                     "namespace": r[1],
                     "name": r[2],
                     "description": r[3],
                     "risk_level": r[4],
                     "production_version": r[5],
                     "created_at": r[6],
-                    "active_version": r[7],
-                    "state": r[8] or "DRAFT"
+                    "version": r[7] or 1,
+                    "active_version": r[7] or 1,
+                    "state": r[8] or "DRAFT",
+                    "success": tp_obj.success_count,
+                    "trust": tp_obj.trust_score,
+                    "trust_profile": trust_data
                 })
             return results
 

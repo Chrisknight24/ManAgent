@@ -503,16 +503,16 @@ class FilesExplorer(BaseExplorer):
                 from_line = args.get("from_line")
                 to_line = args.get("to_line")
 
-                if from_line is not None or to_line is not None:
-                    fl = max(1, int(from_line or 1))
-                    tl = max(fl, int(to_line or (fl + 100)))
-                    lines = asset.read_slice(from_line=fl, to_line=tl)
-                    content = "\n".join(lines)
-                else:
-                    content = asset.dump_data()
+                # Délégation propre et sécurisée à ToolsManager / llm_analyze_data
+                # Traite de façon universelle le texte brut, les images et les documents PDF enregistrés
+                from tools.internal_tools import llm_analyze_data
+                res = await llm_analyze_data({
+                    "source": asset.get_uri(),
+                    "query": query or "Analyse ce document/fichier et réponds précisément.",
+                    "from_line": from_line,
+                    "to_line": to_line
+                }, self.runtime_state)
 
-                from tools.internal_tools import _run_llm_analysis
-                res = await _run_llm_analysis(content, query, self.runtime_state, tag="files_explorer_analyze")
                 analysis_data = res.get("data")
                 return {
                     "success": res.get("result", False),
@@ -576,6 +576,9 @@ class FilesExplorer(BaseExplorer):
             elif tg == "search_definitions":
                 tool_name = "search_definitions"
                 args["query"] = self._extract_search_pattern(goal) or "def"
+            elif tg in ["analyze_asset", "analyze", "summarize"]:
+                tool_name = "analyze_asset"
+                args["query"] = goal
             elif "search" in tool_name or "find" in tool_name:
                 tool_name = "search_asset"
                 clean_q = self._extract_search_pattern(goal)

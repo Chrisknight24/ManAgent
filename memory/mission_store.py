@@ -7,6 +7,10 @@ from utils.logger import Logger
 from memory.session_memory import MissionCache
 
 
+import os
+import threading
+
+
 def _safe_json_default(obj: Any) -> Any:
     if hasattr(obj, "model_dump"):
         return obj.model_dump(mode="json")
@@ -18,10 +22,25 @@ def _safe_json_default(obj: Any) -> Any:
 
 
 class MissionStore:
+    _instances: Dict[str, 'MissionStore'] = {}
+    _lock = threading.Lock()
+
+    def __new__(cls, db_path: str = "memory.db", *args, **kwargs):
+        norm_path = os.path.abspath(db_path)
+        if norm_path not in cls._instances:
+            with cls._lock:
+                if norm_path not in cls._instances:
+                    instance = super().__new__(cls)
+                    instance._initialized = False
+                    cls._instances[norm_path] = instance
+        return cls._instances[norm_path]
 
     def __init__(self, db_path: str = "memory.db"):
+        if getattr(self, "_initialized", False):
+            return
         self.db_path = db_path
         self._initialize_db()
+        self._initialized = True
 
     def _get_connection(self):
         return sqlite3.connect(self.db_path, check_same_thread=False)
@@ -253,9 +272,20 @@ class MissionStore:
             with self._get_connection() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
-                cursor.execute('SELECT mission_id, session_id, solver_id, status, error, duration_ms, cost, turn_id, created_at, summary FROM episodes ORDER BY created_at DESC LIMIT ?', (limit,))
+                cursor.execute('''
+                    SELECT mission_id, session_id, goal, environment, status, summary, 
+                           profile_id, created_at, finished_at, analyzed_at 
+                    FROM episodes 
+                    ORDER BY created_at DESC 
+                    LIMIT ?
+                ''', (limit,))
                 rows = cursor.fetchall()
-                return [dict(row) for row in rows]
+                episodes = []
+                for row in rows:
+                    ep_dict = dict(row)
+                    ep_dict["solver_id"] = ep_dict.get("mission_id")
+                    episodes.append(ep_dict)
+                return episodes
         except Exception as e:
             Logger.error(f"[MissionStore] Erreur lecture get_all_episodes : {e}")
             return []

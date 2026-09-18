@@ -61,6 +61,85 @@ class BaseProvider(ABC):
         self.active_key_index: int = 0
         self._key_cooldowns: Dict[str, float] = {}  # key_str -> timestamp expiration cooldown
 
+    @staticmethod
+    def extract_normalized_media_assets(media_assets: Optional[List[Any]]) -> List[Dict[str, Any]]:
+        """
+        Extrait et normalise de manière agnostique les assets multimédias (images, PDFs, documents)
+        pour tous les providers (Gemini, Claude, OpenAI, OpenRouter, etc.).
+        Gère les fichiers sur disque, les contenus bruts (bytes/str) et la détection MIME fiable.
+        """
+        if not media_assets:
+            return []
+        
+        import os
+        import base64
+        import mimetypes
+
+        normalized = []
+        for asset in media_assets:
+            filename = getattr(asset, "filename", "") or getattr(asset, "target_id", "asset")
+            filepath = getattr(asset, "filepath", None)
+            meta = getattr(asset, "asset_meta", None)
+            mime_type = (getattr(meta, "mime_type", None) or "").lower()
+
+            media_bytes = None
+            if filepath and os.path.exists(filepath):
+                try:
+                    with open(filepath, "rb") as f:
+                        media_bytes = f.read()
+                except Exception as ex:
+                    Logger.error(f"[BaseProvider] Erreur lecture fichier {filepath}: {ex}")
+            elif hasattr(asset, "raw_content"):
+                raw = asset.raw_content
+                if isinstance(raw, bytes):
+                    media_bytes = raw
+                elif isinstance(raw, str):
+                    media_bytes = raw.encode("utf-8")
+            elif hasattr(asset, "dump_data"):
+                try:
+                    dumped = asset.dump_data()
+                    if isinstance(dumped, bytes):
+                        media_bytes = dumped
+                    elif isinstance(dumped, str):
+                        media_bytes = dumped.encode("utf-8")
+                except Exception:
+                    pass
+
+            if not media_bytes:
+                continue
+
+            if not mime_type:
+                guessed, _unused = mimetypes.guess_type(filename or (filepath or ""))
+                if guessed:
+                    mime_type = guessed.lower()
+                elif filename.lower().endswith(".pdf"):
+                    mime_type = "application/pdf"
+                elif filename.lower().endswith(".png"):
+                    mime_type = "image/png"
+                elif filename.lower().endswith((".jpg", ".jpeg")):
+                    mime_type = "image/jpeg"
+                elif filename.lower().endswith(".webp"):
+                    mime_type = "image/webp"
+                elif filename.lower().endswith(".gif"):
+                    mime_type = "image/gif"
+                elif filename.lower().endswith(".bmp"):
+                    mime_type = "image/bmp"
+                else:
+                    mime_type = "application/octet-stream"
+
+            base64_str = base64.b64encode(media_bytes).decode("utf-8")
+            normalized.append({
+                "filename": filename,
+                "mime_type": mime_type,
+                "data_bytes": media_bytes,
+                "base64_data": base64_str,
+                "is_pdf": (mime_type == "application/pdf"),
+                "is_image": mime_type.startswith("image/"),
+                "size_bytes": len(media_bytes)
+            })
+
+        return normalized
+
     def check_cancelled(self):
         """
         Vérifie de façon générique si la requête a été annulée ou si le tour de génération a changé (epoch).

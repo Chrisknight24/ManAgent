@@ -14,4 +14,4 @@ PLAN PROPOSÉ POUR CETTE TENTATIVE RÉUSSIE :
 Instructions (contraste implicite avec les échecs précédents) :
 1. Identifie un mot-clé de scope STABLE et étroit qui résume la STRATÉGIE GAGNANTE à l'origine de ce succès (ex: 'keyboard_win_r_alternative', 'vision_based_ui_navigation').
 2. Propose 5 à 8 mots-clés LARGES et variés.
-3. Produis une règle impérative courte (1-2 phrases), adressée directement à {{ entity_type }}, pour PRIVILÉGIER cette approche à l'avenir, en mentionnant en quoi elle est plus robuste que l'approche qui a échoué précédemment.
+3. Produis une règle impérative courte (1-2 phrases), adressée directement à {{ entity_type }}, pour PRIVILÉGIER cette approche à l'avenir, en mentionnant en quoi elle est plus robuste que l'approche qui a échoué précédemment. Note : Les Skills qualifiés restent toujours prioritaires ; ne génère pas de règle préconisant l'abandon systématique de l'outil `execute_skill` ou des Skills.

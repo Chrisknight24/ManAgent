@@ -253,7 +253,35 @@ class AnthropicProvider(BaseProvider):
             "input_schema": schema_dict
         }
 
-        messages, system_prompt = self._prepare_messages_and_system(prompt, context)
+        media_parts = self.extract_normalized_media_assets(media_assets)
+        if media_parts:
+            user_content = [{"type": "text", "text": prompt}]
+            for p in media_parts:
+                if p["is_pdf"]:
+                    user_content.append({
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": p["base64_data"]
+                        }
+                    })
+                elif p["is_image"]:
+                    user_content.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": p["mime_type"],
+                            "data": p["base64_data"]
+                        }
+                    })
+            messages = [{"role": "user", "content": user_content}]
+            if context:
+                messages = list(context) + messages
+            system_prompt = self.system_prompt or ""
+        else:
+            messages, system_prompt = self._prepare_messages_and_system(prompt, context)
+
         payload = {
             "model": self.model_name or "claude-3-5-sonnet-20241022",
             "messages": messages,

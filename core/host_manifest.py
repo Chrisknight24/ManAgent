@@ -18,36 +18,77 @@ from dataclasses import dataclass, field, asdict
 class HostManifest:
     """
     Manifeste dynamique fourni par l'hôte lors de l'initialisation ou reconfiguration.
-    Permet à n'importe quelle application cliente d'annoncer ses outils et capacités
-    de façon agnostique et transparente.
+    Permet à n'importe quelle application cliente (RPA, Robotique, Web, API, CLI, Cloud)
+    d'annoncer ses outils, capacités et son environnement d'exécution de façon 100% agnostique.
     """
     host_name: str = "generic_host"
     host_version: str = "1.0.0"
-    os: str = "generic"  # ex: "windows", "linux", "macos"
-    os_version: Optional[str] = None
-    capabilities: List[str] = field(default_factory=list)  # ex: ["mouse", "keyboard", "uia", "vision", "flo_runner"]
-    resolution_width: Optional[int] = None
-    resolution_height: Optional[int] = None
-    dpi_scale: float = 1.0
-    tools: List[Dict[str, Any]] = field(default_factory=list)  # Outils externes déclarés par l'hôte
+    capabilities: List[str] = field(default_factory=list)  # Capacités brutes déclarées par l'hôte
+    tools: List[Dict[str, Any]] = field(default_factory=list)  # Schémas des outils déclarés par l'hôte
+    environment: Dict[str, Any] = field(default_factory=dict)  # Empreinte d'environnement brute
     metadata: Dict[str, Any] = field(default_factory=dict)     # Données libres supplémentaires
 
+    def __init__(
+        self,
+        host_name: str = "generic_host",
+        host_version: str = "1.0.0",
+        capabilities: Optional[List[str]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        environment: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs
+    ):
+        self.host_name = host_name
+        self.host_version = host_version
+        self.capabilities = list(capabilities or [])
+        self.tools = list(tools or [])
+        self.environment = dict(environment or {})
+        self.metadata = dict(metadata or {})
+
+        # Tout argument additionnel est intégré dynamiquement dans l'environnement de l'hôte
+        for k, v in kwargs.items():
+            if v is not None:
+                self.environment[k] = v
+
+    def __getattr__(self, item: str) -> Any:
+        if "environment" in self.__dict__ and item in self.environment:
+            return self.environment[item]
+        if "metadata" in self.__dict__ and item in self.metadata:
+            return self.metadata[item]
+        return None
+
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        d = {
+            "host_name": self.host_name,
+            "host_version": self.host_version,
+            "capabilities": self.capabilities,
+            "tools": self.tools,
+            "environment": self.environment,
+            "metadata": self.metadata,
+        }
+        for k, v in self.environment.items():
+            if k not in d:
+                d[k] = v
+        return d
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "HostManifest":
         if not isinstance(data, dict):
             return cls()
+        
+        env = dict(data.get("environment") or {})
+        meta = dict(data.get("metadata") or {})
+        
+        # Ingestion transparente de tout champ contextuel passé par l'hôte
+        for k, v in data.items():
+            if k not in ("host_name", "host_version", "capabilities", "tools", "environment", "metadata") and v is not None:
+                env[k] = v
+
         return cls(
             host_name=data.get("host_name", "generic_host"),
             host_version=data.get("host_version", "1.0.0"),
-            os=data.get("os", "generic"),
-            os_version=data.get("os_version"),
             capabilities=data.get("capabilities", []),
-            resolution_width=data.get("resolution_width"),
-            resolution_height=data.get("resolution_height"),
-            dpi_scale=float(data.get("dpi_scale", 1.0)),
             tools=data.get("tools", []),
-            metadata=data.get("metadata", {})
+            environment=env,
+            metadata=meta
         )

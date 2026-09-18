@@ -225,7 +225,18 @@ class DeepSeekProvider(BaseProvider):
         messages = [{"role": "system", "content": strict_system_prompt}]
         if context:
             messages.extend(context)
-        messages.append({"role": "user", "content": prompt})
+
+        media_parts = self.extract_normalized_media_assets(media_assets)
+        if media_parts:
+            user_content = [{"type": "text", "text": prompt}]
+            for p in media_parts:
+                user_content.append({
+                    "type": "text",
+                    "text": f"[Fichier/Document joint: {p['filename']} ({p['mime_type']}, {p['size_bytes']} octets)]"
+                })
+            messages.append({"role": "user", "content": user_content})
+        else:
+            messages.append({"role": "user", "content": prompt})
 
         payload = {
             "model": self.model_name or "deepseek-chat",

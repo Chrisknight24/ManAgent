@@ -52,8 +52,12 @@ class RuntimeState:
         self.discovery_llm = None
         self.discovery_engine = None            
         
-        # --- SKILL MANAGEMENT (STACK INTEGRATION) ---
+        # --- SKILL & STORE MANAGEMENT (STACK INTEGRATION) ---
         self.skill_registry = None
+        self.mission_store = None
+        self.mission_profile_store = None
+        self.lesson_store = None
+        self.session_store = None
         self.host_skill_executor = None
         self.host_environment = None
         
@@ -91,3 +95,23 @@ class RuntimeState:
     def set_discovery_engine(self, engine):
         """Définit le DiscoveryEngine."""
         self.discovery_engine = engine
+
+    @property
+    def host_environment(self) -> Optional[Dict[str, Any]]:
+        """
+        Retourne l'environnement hôte sous forme de dictionnaire prêt pour le filtrage déterministe
+        des compétences (Retriever / SkillRegistry).
+        """
+        if hasattr(self, "_host_environment_override") and self._host_environment_override is not None:
+            return self._host_environment_override
+        if self.host_manifest:
+            if hasattr(self.host_manifest, "to_dict"):
+                return self.host_manifest.to_dict()
+            elif isinstance(self.host_manifest, dict):
+                return self.host_manifest
+        return None
+
+    @host_environment.setter
+    def host_environment(self, value: Optional[Dict[str, Any]]):
+        self._host_environment_override = value
+

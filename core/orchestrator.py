@@ -5,6 +5,7 @@ Orchestrateur central du runtime (Architecture Hub & Spoke).
 RÔLE (Le PDG) : Centre de validation, de routage des paquets C++ et Superviseur Suprême.
 """
 
+import os
 import asyncio
 import re
 import time
@@ -99,6 +100,10 @@ class Orchestrator(Supervisor, Entity):
         self.skill_registry = SkillRegistry()
         self.session_store = SessionStore()
         self.lesson_store = LessonStore()
+        self.runtime_state.mission_store = self.mission_store
+        self.runtime_state.mission_profile_store = self.mission_profile_store
+        self.runtime_state.skill_registry = self.skill_registry
+        self.runtime_state.session_store = self.session_store
         self.runtime_state.lesson_store = self.lesson_store
         self.marker_manager = MarkerManager()
         self.fingerprint_store = FingerprintStore()
@@ -133,6 +138,12 @@ class Orchestrator(Supervisor, Entity):
         """Implémentation de la méthode abstraite de Entity."""
         return await self.handle_request(packet)
 
+    def get_data_providers(self) -> Dict[str, Any]:
+        """Retourne les DataProviders de l'Orchestrateur (exclut rigoureusement 'skills')."""
+        providers = super().get_data_providers()
+        providers.pop("skills", None)
+        return providers
+
     # =====================================================
     # POINT D'ENTRÉE PRINCIPAL (Frontend -> Python)
     # =====================================================
@@ -162,6 +173,16 @@ class Orchestrator(Supervisor, Entity):
                         runtime_state=self.runtime_state
                     )
                 manifest_obj = self.runtime_state.tools_manager.register_host_manifest(manifest_payload)
+                # Capacites embeddings declarees par l'hote (ex: "embeddings-local").
+                try:
+                    caps = list(getattr(manifest_obj, "capabilities", []) or [])
+                    self.runtime_state.host_embedding_caps = [
+                        c for c in caps if "embedding" in str(c).lower()
+                    ]
+                    if isinstance(manifest_payload, dict) and manifest_payload.get("embeddings"):
+                        self.runtime_state.host_embeddings_pref = manifest_payload.get("embeddings")
+                except Exception:
+                    pass
                 await self.propagate_event(Events.HOST_MANIFEST_UPDATED, {
                     "host_name": manifest_obj.host_name,
                     "host_version": manifest_obj.host_version,
@@ -186,6 +207,216 @@ class Orchestrator(Supervisor, Entity):
                 await self.propagate_event(Events.LEARNER_ANALYZE_FINISHED, {"count": analyzed})
                 return ResponsePacket(type="response", status="success",
                                       payload={"message": f"Analyse terminée : {analyzed} épisodes traités."})
+            elif packet.action == Actions.SET_SKILL_STATE:
+                skill_id = packet.payload.get("skill_id")
+                state = packet.payload.get("state")
+                version = packet.payload.get("version")
+                from core.skills.registry import SkillRegistry
+                from core.skills.models import SkillState
+                reg = self.runtime_state.skill_registry if (hasattr(self, "runtime_state") and self.runtime_state and getattr(self.runtime_state, "skill_registry", None)) else SkillRegistry()
+                if not version:
+                    active = reg.get_active_version(skill_id)
+                    version = active[0] if active else None
+                if not version:
+                    try:
+                        pkg = reg.export_package(skill_id)
+                        if pkg and pkg.versions:
+                            version = max(v.version for v in pkg.versions)
+                    except Exception:
+                        version = 1
+                try:
+                    version = int(version)
+                except (ValueError, TypeError):
+                    version = 1
+
+                if state == "QUARANTINE":
+                    s = SkillState.QUARANTINE
+                elif state == "PRODUCTION":
+                    s = SkillState.PRODUCTION
+                elif state == "SHADOW":
+                    s = SkillState.SHADOW
+                else:
+                    s = SkillState.DRAFT
+                success = reg.transition_state(skill_id, version, s, "Manual transition via settings")
+                Logger.info(f"[Orchestrator] Skill {skill_id} v{version} state updated to {state} (success={success})")
+                return ResponsePacket(type="response", status="success" if success else "error", payload={"message": f"Skill {skill_id} v{version} state updated to {state}", "success": success})
+
+            elif packet.action == Actions.REPAIR_SKILL:
+                skill_id = packet.payload.get("skill_id")
+                req_version = packet.payload.get("version")
+                req_provider = packet.payload.get("provider_id") or packet.payload.get("forced_provider")
+                req_model = packet.payload.get("model_id") or packet.payload.get("forced_model")
+                from core.skills.registry import SkillRegistry
+                from core.skills.repair_engine import SkillRepairEngine
+                from core.llm import Llm
+                from providers.provider_manager import ModelRequirement
+                reg = self.runtime_state.skill_registry if (hasattr(self, "runtime_state") and self.runtime_state and getattr(self.runtime_state, "skill_registry", None)) else SkillRegistry()
+                
+                failed_version = None
+                if req_version:
+                    try:
+                        failed_version = int(req_version)
+                    except (ValueError, TypeError):
+                        failed_version = None
+
+                if not failed_version:
+                    active_res = reg.get_active_version(skill_id)
+                    if active_res:
+                        failed_version = active_res[0]
+                    else:
+                        try:
+                            pkg = reg.export_package(skill_id)
+                            if pkg and pkg.versions:
+                                failed_version = max(v.version for v in pkg.versions)
+                        except Exception:
+                            failed_version = 1
+
+                if failed_version:
+                    ver_obj = reg.get_version(skill_id, failed_version)
+                    creator_model = ver_obj.creator_model if ver_obj else None
+
+                    # Détermination du modèle pour la réparation :
+                    # 1. Sélection active passée dans le payload
+                    # 2. Modèle actuel configuré sur l'Orchestrateur (self.llm)
+                    # 3. Modèle d'origine ayant synthétisé le skill (creator_model)
+                    target_provider = req_provider
+                    target_model = req_model
+
+                    if not target_model and hasattr(self, "llm") and self.llm and self.llm.model_id and self.llm.model_id != "auto":
+                        target_provider = self.llm.provider_id
+                        target_model = self.llm.model_id
+                    elif not target_model and creator_model and creator_model != "SolverAutoDiscovery":
+                        target_model = creator_model
+                        if "gemini" in creator_model.lower():
+                            target_provider = "gemini"
+                        elif "groq" in creator_model.lower() or "llama" in creator_model.lower():
+                            target_provider = "groq"
+
+                    if hasattr(self, "llm") and self.llm and (not target_model or target_model == self.llm.model_id):
+                        repair_llm = self.llm.clone(role_name="skill_repair")
+                    else:
+                        repair_llm = Llm(
+                            provider_manager=self.provider_manager,
+                            provider_id=target_provider or "auto",
+                            model_id=target_model or "auto",
+                            runtime_state=self.runtime_state,
+                            requirement=ModelRequirement(
+                                role_name="skill_repair",
+                                preferred_provider=target_provider,
+                                preferred_model=target_model
+                            )
+                        )
+                    repair_engine = SkillRepairEngine(llm=repair_llm)
+                    asyncio.create_task(repair_engine.repair_skill(skill_id=skill_id, failed_version=failed_version))
+                    Logger.info(f"[Orchestrator] 🔧 Réparation initiée pour {skill_id} v{failed_version} via provider={repair_llm.provider_id}, model={repair_llm.model_id}")
+                    return ResponsePacket(type="response", status="success", payload={"message": f"Repair initiated for {skill_id} v{failed_version}", "model_id": repair_llm.model_id})
+                return ResponsePacket(type="response", status="error", payload={"message": f"Skill {skill_id} not found for repair"})
+                
+            elif packet.action == Actions.SKILLS_LIST_REQUEST:
+                from core.skills.registry import SkillRegistry
+                reg = self.runtime_state.skill_registry if (hasattr(self, "runtime_state") and self.runtime_state and getattr(self.runtime_state, "skill_registry", None)) else SkillRegistry()
+                skills = reg.list_all_skills()
+                skills_list = []
+                if isinstance(skills, list):
+                    for s in skills:
+                        skills_list.append({
+                            "id": s.get("id") or s.get("skill_id"),
+                            "ns": s.get("ns") or s.get("namespace", "unknown"),
+                            "version": s.get("version") or s.get("active_version", 1),
+                            "state": s.get("state", "DRAFT"),
+                            "success": s.get("success", 0),
+                            "trust": float(s.get("trust", 0.0))
+                        })
+                elif isinstance(skills, dict):
+                    for s_id, s_data in skills.items():
+                        skills_list.append({
+                            "id": s_id,
+                            "ns": s_data.get("namespace", "unknown"),
+                            "version": s_data.get("version", 1),
+                            "state": s_data.get("state", "DRAFT"),
+                            "success": s_data.get("metrics", {}).get("success", 0),
+                            "trust": float(s_data.get("metrics", {}).get("trust", 0.0))
+                        })
+                return ResponsePacket(type="response", status="success", payload={
+                    "message": "Skills list retrieved",
+                    "skills": skills_list,
+                    "skills_list": skills_list
+                })
+
+            elif packet.action == Actions.SKILL_PAYLOAD_REQUEST:
+                skill_id = packet.payload.get("skill_id") if packet.payload else ""
+                version = packet.payload.get("version") if packet.payload else None
+                from core.skills.registry import SkillRegistry
+                reg = self.runtime_state.skill_registry if (hasattr(self, "runtime_state") and self.runtime_state and getattr(self.runtime_state, "skill_registry", None)) else SkillRegistry()
+                manifest, ver_obj = reg.get_active_skill(skill_id, target_version=version)
+                flow_payload = reg.get_flow_payload(skill_id, version=version)
+                
+                # S'il n'y a pas de payload stocké ou si c'est vide, générer une structure de secours valide
+                if not flow_payload:
+                    flow_payload = {
+                        "meta_plan": [
+                            {"step_id": f"{skill_id}_step_1", "tool_name": "desktop", "tool_args": {}, "description": f"Exécution automatisée pour {skill_id}"}
+                        ]
+                    }
+
+                # Extraction propre de la liste des étapes
+                steps = []
+                if isinstance(flow_payload, dict):
+                    steps = (
+                        flow_payload.get("meta_plan") or 
+                        flow_payload.get("plan_nodes") or 
+                        flow_payload.get("nodes") or 
+                        flow_payload.get("steps") or 
+                        []
+                    )
+                elif isinstance(flow_payload, list):
+                    steps = flow_payload
+
+                manifest_dict = manifest.to_dict() if (manifest and hasattr(manifest, "to_dict")) else {}
+                response_data = {
+                    "skill_id": skill_id,
+                    "version": ver_obj.version if ver_obj else (version or 1),
+                    "state": ver_obj.state.value if ver_obj and hasattr(ver_obj.state, "value") else (ver_obj.state if ver_obj else "DRAFT"),
+                    "steps": steps,
+                    "flow_payload": flow_payload,
+                    "manifest": manifest_dict
+                }
+                return ResponsePacket(type="response", status="success", payload=response_data)
+
+            elif packet.action == Actions.EXPORT_SKILL_PACKAGE:
+                skill_id = packet.payload.get("skill_id")
+                from core.skills.registry import SkillRegistry
+                reg = SkillRegistry()
+                pkg = reg.export_package(skill_id)
+                if not pkg:
+                    return ErrorPacket(type="error", message=f"Impossible d'exporter le skill '{skill_id}'")
+                return ResponsePacket(type="response", status="success", payload={
+                    "skill_id": skill_id,
+                    "package": pkg.to_dict()
+                })
+
+            elif packet.action == Actions.IMPORT_SKILL_PACKAGE:
+                pkg_data = packet.payload.get("package")
+                if not pkg_data:
+                    return ErrorPacket(type="error", message="Données de package (.skillpkg) manquantes.")
+                from core.skills.registry import SkillRegistry
+                from core.skills.models import SkillPackage
+                reg = SkillRegistry()
+                try:
+                    if isinstance(pkg_data, str):
+                        pkg_data = json.loads(pkg_data)
+                    pkg = SkillPackage.from_dict(pkg_data)
+                    success = reg.import_package(pkg, overwrite=True)
+                    if success:
+                        return ResponsePacket(type="response", status="success", payload={
+                            "message": f"Skill '{pkg.manifest.skill_id}' importé avec succès.",
+                            "skill_id": pkg.manifest.skill_id
+                        })
+                    return ErrorPacket(type="error", message="Échec de l'importation dans le registre.")
+                except Exception as e:
+                    Logger.error(f"[Orchestrator] Erreur import package: {e}")
+                    return ErrorPacket(type="error", message=f"Erreur d'importation: {str(e)}")
+                
             elif packet.action == Actions.SYSTEM_WARMUP:
                 Logger.info("[Orchestrator] 🚀 Exécution du Warm-up IA en arrière-plan...")
                 async def _bg_warmup():
@@ -281,12 +512,15 @@ class Orchestrator(Supervisor, Entity):
                     sessions_count = await asyncio.to_thread(self.session_store.get_sessions_count)
                 if self.runtime_state.cache_manager:
                     cache_entries_count = await asyncio.to_thread(self.runtime_state.cache_manager._count_entries)
-                try:
-                    from core.skills.registry import SkillRegistry
-                    reg = SkillRegistry()
-                    skills_count = await asyncio.to_thread(reg.get_skills_count)
-                except Exception:
-                    skills_count = 0
+                if hasattr(self, "skill_registry") and self.skill_registry:
+                    skills_count = await asyncio.to_thread(self.skill_registry.get_skills_count)
+                else:
+                    try:
+                        from core.skills.registry import SkillRegistry
+                        reg = SkillRegistry()
+                        skills_count = await asyncio.to_thread(reg.get_skills_count)
+                    except Exception:
+                        skills_count = 0
 
                 return ResponsePacket(type="response", status="success", payload={
                     "episodes_count": episodes_count,
@@ -315,11 +549,24 @@ class Orchestrator(Supervisor, Entity):
                 if target in ("all", "skills"):
                     if hasattr(self, "skill_registry") and self.skill_registry:
                         results["skills_cleared"] = await asyncio.to_thread(self.skill_registry.clear_all_skills)
-                if target in ("all", "sessions"):
+                if target in ("all", "sessions", "messages", "memory"):
                     self.session_memories.clear()
                     self.asset_registries.clear()
+                    if hasattr(self, "memory") and self.memory and hasattr(self.memory, "clear_all_messages"):
+                        results["messages_cleared"] = await asyncio.to_thread(self.memory.clear_all_messages)
                     if hasattr(self, "session_store") and self.session_store:
                         results["sessions_cleared"] = await asyncio.to_thread(self.session_store.clear_all_sessions)
+
+                # Si purge totale ("all"), réinitialiser aussi les logs d'observabilité (events.jsonl)
+                if target == "all":
+                    try:
+                        events_file = "observability/events.jsonl"
+                        if os.path.exists(events_file):
+                            with open(events_file, "w", encoding="utf-8") as f_ev:
+                                f_ev.write("")
+                            results["events_log_cleared"] = True
+                    except Exception as e_ev:
+                        Logger.warning(f"[Orchestrator] Erreur lors de la réinitialisation de events.jsonl: {e_ev}")
 
                 Logger.info(f"[Orchestrator] Réinitialisation/Purge de données exécutée (action: {packet.action}, cible: {target}) : {results}")
                 return ResponsePacket(type="response", status="success", payload={
@@ -423,6 +670,13 @@ class Orchestrator(Supervisor, Entity):
             history_provider = HistoryProvider(session_id, self.memory)
             self.register_data_provider("history", history_provider)
             Logger.debug(f"[Orchestrator] HistoryProvider enregistré pour la session {session_id}")
+
+            # Enregistrement de l'explorateur de compétences dans le DiscoveryEngine
+            # (Note : les compétences ne sont pas exposées en PD à l'Orchestrateur/Solver/Planner qui utilisent le Retriever)
+            from core.discovery.explorers.skills_explorer import SkillsExplorer
+            skills_explorer = SkillsExplorer(runtime_state=self.runtime_state, registry=self.skill_registry if hasattr(self, "skill_registry") else None)
+            self.runtime_state.discovery_engine.register_explorer("skills", skills_explorer)
+            Logger.debug(f"[Orchestrator] SkillsExplorer enregistré dans DiscoveryEngine pour la session {session_id}")
 
             # NOUVEAU : Enregistrement des providers DataAssets (Fichiers, Payloads utilisateurs, Retours d'outils)
             files_provider = FilesProvider(asset_registry, data_type="files")
@@ -1743,9 +1997,13 @@ class Orchestrator(Supervisor, Entity):
         """
         Méthode privée appelée par ToolsManager pour exécuter un outil externe (C++).
         """
-        is_valid = self.runtime_state.tools_manager.validate_tool_call(tool_name, arguments)
-        if not is_valid:
-            return json.dumps({"result": False, "data": None, "message": "Tool not found"})
+        try:
+            is_valid = self.runtime_state.tools_manager.validate_tool_call(tool_name, arguments)
+            if not is_valid:
+                return json.dumps({"result": False, "data": None, "message": f"Tool '{tool_name}' not recognized"})
+        except Exception as e:
+            Logger.error(f"[Orchestrator] Échec de validation de l'appel d'outil '{tool_name}': {e}")
+            return json.dumps({"result": False, "data": None, "message": str(e)})
 
         call_id = str(uuid.uuid4())
         loop = asyncio.get_running_loop()
@@ -1870,60 +2128,98 @@ class Orchestrator(Supervisor, Entity):
         host_manifest_payload = payload.get("host_manifest")
         if host_manifest_payload:
             self.runtime_state.tools_manager.register_host_manifest(host_manifest_payload)
-        elif raw_tools:
+            try:
+                caps = (host_manifest_payload.get("capabilities", []) or []
+                        if isinstance(host_manifest_payload, dict) else [])
+                self.runtime_state.host_embedding_caps = [
+                    c for c in caps if "embedding" in str(c).lower()
+                ]
+            except Exception:
+                pass
+        if raw_tools:
             self.runtime_state.tools_manager.load_tools_from_payload(raw_tools)
             Logger.info(f"[Orchestrator] {len(raw_tools)} outils externes chargés.")
 
         # Référence à l'Orchestrateur pour les appels d'outils externes (C++)
         self.runtime_state.orchestrator = self
         # =====================================================
-        # INITIALISATION DES EMBEDDING PROVIDERS
+        # INITIALISATION DES EMBEDDING PROVIDERS (plug-and-play)
+        # lite-hash toujours dispo (0 Mo), local/remote en option.
+        # Config : "embeddings": {"mode": "lite|local|remote", "model": ...,
+        #   "api_key": ..., "base_url": ...} + legacy "embedding_models".
         # =====================================================
-        embedding_models = payload.get("embedding_models", [])
+        embedding_models = list(payload.get("embedding_models", []) or [])
+        emb_cfg = payload.get("embeddings", {}) or {}
+        if isinstance(emb_cfg, dict) and (emb_cfg.get("mode") or "").strip():
+            mode = str(emb_cfg.get("mode")).lower().strip()
+            if mode == "lite":
+                embedding_models.append({"type": "hash"})
+            elif mode == "local":
+                embedding_models.append({
+                    "type": "sentence-transformer",
+                    "id": emb_cfg.get("model", "sentence-transformers/all-MiniLM-L6-v2"),
+                    "display_name": emb_cfg.get("display_name", emb_cfg.get("model", "Local")),
+                })
+            elif mode == "remote":
+                embedding_models.append({
+                    "type": "remote",
+                    "id": emb_cfg.get("model", "text-embedding-3-small"),
+                    "api_key": emb_cfg.get("api_key", ""),
+                    "base_url": emb_cfg.get("base_url", "https://api.openai.com/v1"),
+                    "display_name": emb_cfg.get("display_name"),
+                })
+            else:
+                Logger.warning(f"[Orchestrator] Mode embeddings inconnu : {mode} (ignore, lite par defaut).")
+        self.runtime_state.embedding_manager.set_emitter(self.propagate_event)
+
+        from embeddings.providers.hash_provider import HashEmbeddingProvider
+        from embeddings.providers import create_embedding_provider
+
+        if HashEmbeddingProvider.PROVIDER_ID not in self.runtime_state.embedding_manager._providers:
+            self.runtime_state.embedding_manager.register_provider(HashEmbeddingProvider())
+
         if embedding_models:
-            self.runtime_state.embedding_manager.set_emitter(self.propagate_event)
-
-            from embeddings.providers.sentence_transformer import SentenceTransformerProvider
-
             for model_def in embedding_models:
-                model_id = model_def.get("id")
-                if not model_id:
-                    continue
-                prefix_query = model_def.get("prefix_query", "")
-                prefix_passage = model_def.get("prefix_passage", "")
-                display_name = model_def.get("display_name", model_id)
-
-                provider = SentenceTransformerProvider(
-                    model_id=model_id,
-                    display_name=display_name,
-                    prefix_query=prefix_query,
-                    prefix_passage=prefix_passage,
-                    emit_func=self.propagate_event
-                )
-                self.runtime_state.embedding_manager.register_provider(provider)
+                try:
+                    if not isinstance(model_def, dict):
+                        continue
+                    # Ancien format sans "type" : ignore lite deja enregistre
+                    if not model_def.get("type") and model_def.get("id") in (
+                        "lite-hash", "hash", "lite",
+                    ):
+                        continue
+                    provider = create_embedding_provider(model_def, emit_func=self.propagate_event)
+                    self.runtime_state.embedding_manager.register_provider(provider)
+                except Exception as e:
+                    Logger.warning(f"[Orchestrator] Embedding ignore ({model_def}): {e}")
 
             active_model = payload.get("active_embedding_model")
             if active_model and active_model in self.runtime_state.embedding_manager._providers:
                 self.runtime_state.embedding_manager.set_active_provider(active_model)
             else:
+                # Priorite : choix explicite, sinon premier non-lite, sinon lite.
                 providers = self.runtime_state.embedding_manager.list_providers()
-                if providers:
-                    first_id = providers[0]["id"]
-                    self.runtime_state.embedding_manager.set_active_provider(first_id)
-                    Logger.info(f"[Orchestrator] Fallback : modèle d'embedding actif = {first_id}")
+                non_lite = [p for p in providers if p["id"] != HashEmbeddingProvider.PROVIDER_ID]
+                pick = non_lite[0]["id"] if non_lite else HashEmbeddingProvider.PROVIDER_ID
+                self.runtime_state.embedding_manager.set_active_provider(pick)
+                Logger.info(f"[Orchestrator] Embedding actif = {pick}")
 
-            Logger.info(f"[Orchestrator] {len(embedding_models)} modèle(s) d'embedding enregistré(s).")
+            Logger.info(f"[Orchestrator] {len(embedding_models)} modele(s) d'embedding demande(s).")
         else:
-            # Fallback : modèle par défaut
-            Logger.warning("[Orchestrator] Aucun embedding_models dans le payload. Utilisation du modèle par défaut.")
-            from embeddings.providers.sentence_transformer import SentenceTransformerProvider
-            default_provider = SentenceTransformerProvider(
-                model_id="sentence-transformers/all-MiniLM-L6-v2",
-                display_name="MiniLM L6 (anglais)",
-                emit_func=self.propagate_event
-            )
-            self.runtime_state.embedding_manager.register_provider(default_provider)
-            self.runtime_state.embedding_manager.set_active_provider("sentence-transformers/all-MiniLM-L6-v2")
+            # Defaut : lite, leger et offline. Full seulement si demande explicite.
+            Logger.info("[Orchestrator] Pas de embedding_models : mode lite-hash par defaut.")
+            self.runtime_state.embedding_manager.set_active_provider(HashEmbeddingProvider.PROVIDER_ID)
+
+        # Memorise le choix pour le Retriever et l'observabilite.
+        try:
+            active_emb = self.runtime_state.embedding_manager.active_provider_id
+        except Exception:
+            active_emb = HashEmbeddingProvider.PROVIDER_ID
+        self.runtime_state.active_embedding_model = active_emb
+        self.runtime_state.embeddings_mode = (
+            "lite" if (active_emb or "") == HashEmbeddingProvider.PROVIDER_ID
+            else ("remote" if (active_emb or "").startswith("remote:") else "local")
+        )
 
         api_keys = payload.get("api_keys", {})
         runtime_config = payload.get("runtime_configuration", {})
@@ -1996,7 +2292,7 @@ class Orchestrator(Supervisor, Entity):
                     capabilities=enriched_model.get("capabilities", []),
                     reasoning_score=float(enriched_model.get("reasoning_score", enriched_model.get("reasoning_level", 1.0))),
                     speed_score=float(enriched_model.get("speed_score", 1.0)),
-                    cost_tier=enriched_model.get("cost_tier", "standard"),
+                    cost_tier=enriched_model.get("cost_tier", enriched_model.get("availability", "standard")),
                     benchmark_score=float(enriched_model.get("benchmark_score", 50.0)),
                     latency_profile=enriched_model.get("latency_profile", "medium"),
                     context_window=int(enriched_model.get("context_window", 4000)),
@@ -2087,5 +2383,13 @@ class Orchestrator(Supervisor, Entity):
             Logger.info("[Orchestrator] HistoryExplorer enregistré.")
         else:
             Logger.warning("[Orchestrator] DiscoveryEngine non disponible, impossible d'enregistrer les Explorers.")        
-        await self.propagate_event(Events.RUNTIME_CONFIGURED, {"available_models": validated_models})
-        return ResponsePacket(type="response", status="success", payload={"models_count": len(validated_models)})
+        await self.propagate_event(Events.RUNTIME_CONFIGURED, {
+            "available_models": validated_models,
+            "embeddings_mode": getattr(self.runtime_state, "embeddings_mode", "lite"),
+            "active_embedding_model": getattr(self.runtime_state, "active_embedding_model", None),
+        })
+        return ResponsePacket(type="response", status="success", payload={
+            "models_count": len(validated_models),
+            "embeddings_mode": getattr(self.runtime_state, "embeddings_mode", "lite"),
+            "active_embedding_model": getattr(self.runtime_state, "active_embedding_model", None),
+        })

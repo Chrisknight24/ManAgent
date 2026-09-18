@@ -116,26 +116,35 @@ class Solver(Supervisor, Entity):
         else:
             self.variable_registry = {}
 
-        # Enregistrement du DataProvider pour le registre
-        if self.runtime_state.discovery_engine:
-            registry_provider = SolverRegistryProvider(self)
-            self.register_data_provider("registry", registry_provider)
-            Logger.info(
-                _("[Solver:{id}] DataProvider 'registry' enregistré pour le Solver.")
-                .format(id=self.id)
-            )
-
-            # Activation explicite de la Progressive Disclosure
-            if not self.llm._discovery_enabled:
-                self.llm.enable_discovery(self.runtime_state.discovery_engine, self)
+        # Gestion de la Progressive Disclosure : SEUL LE SOLVER ROOT (depth == 0) y a accès
+        if self.depth == 0:
+            if self.runtime_state.discovery_engine:
+                registry_provider = SolverRegistryProvider(self)
+                self.register_data_provider("registry", registry_provider)
                 Logger.info(
-                    _("[Solver:{id}] Progressive Disclosure activée.")
+                    _("[Solver:{id}] DataProvider 'registry' enregistré pour le Solver (Root).")
                     .format(id=self.id)
                 )
 
-            # --- NOUVEAU : partager le registre avec le LLM pour la Progressive Disclosure ---
-            if self.llm and self.runtime_state.discovery_engine:
-                self.llm.set_data_context(self.variable_registry)
+                # Activation explicite de la Progressive Disclosure pour le Root Solver
+                if not self.llm._discovery_enabled:
+                    self.llm.enable_discovery(self.runtime_state.discovery_engine, self)
+                    Logger.info(
+                        _("[Solver:{id}] Progressive Disclosure activée (Root Solver).")
+                        .format(id=self.id)
+                    )
+
+                if self.llm and self.runtime_state.discovery_engine:
+                    self.llm.set_data_context(self.variable_registry)
+        else:
+            # Sous-solver technique (depth > 0) : isolation du LLM et désactivation de la Progressive Disclosure
+            if self.llm:
+                self.llm = self.llm.clone(clear_context=True)
+                self.llm.disable_discovery()
+            Logger.info(
+                _("[Solver:{id}] Progressive Disclosure désactivée pour le sous-solver (depth={depth}).")
+                .format(id=self.id, depth=self.depth)
+            )
 
         self.planner = Planner(
             name=f"planner_{solver_id}",
@@ -144,6 +153,12 @@ class Solver(Supervisor, Entity):
             parent=self
         )
         self.executor = Executor(solver_node=self)
+
+    def get_data_providers(self) -> Dict[str, Any]:
+        """Retourne les DataProviders du Solver (exclut rigoureusement 'skills')."""
+        providers = super().get_data_providers()
+        providers.pop("skills", None)
+        return providers
 
     def _get_registry_metadata_view(self) -> Dict[str, Any]:
         view = {}
@@ -559,7 +574,21 @@ class Solver(Supervisor, Entity):
                             self.last_failure_bundle = getattr(result, "failure_bundle", None)
                             self.last_breakout_report = getattr(result, "breakout_report", None)
                             Logger.warning(f"[Solver:{self.id}] 🔄 Échec exécution (Tentative {execution_attempt}/{MAX_EXECUTION_TRIES}). Raison : {result.error_reason}")
-                            self.context += _("\n[Raison de l'échec] {}. Vous devez adapter le prochain plan.").format(result.error_reason)
+                            if self.last_breakout_report:
+                                bo = self.last_breakout_report
+                                bo_dict = bo.to_dict() if hasattr(bo, "to_dict") else (bo if isinstance(bo, dict) else {})
+                                cps_valides = bo_dict.get("completed_checkpoints") or getattr(bo, "completed_checkpoints", [])
+                                fail_step = bo_dict.get("failed_checkpoint_id") or getattr(bo, "failed_checkpoint_id", "inconnue")
+                                bo_reason = bo_dict.get("error_message") or getattr(bo, "error_message", result.error_reason)
+                                self.context += _(
+                                    "\n\n[RUPTURE DE SKILL DÉTECTÉE (Breakout)]"
+                                    "\n- Checkpoints déjà validés et acquis : {}"
+                                    "\n- Étape/Action en échec : {}"
+                                    "\n- Cause de la rupture : {}"
+                                    "\n- DIRECTIVE DE REPLANIFICATION : Ne recommencez pas les actions couvertes par les checkpoints déjà validés. Reprenez le plan à partir du point d'échec avec des primitives atomiques ou une voie alternative."
+                                ).format(cps_valides or "aucun", fail_step, bo_reason)
+                            else:
+                                self.context += _("\n[Raison de l'échec] {}. Vous devez adapter le prochain plan.").format(result.error_reason)
 
                             await self.propagate_event(Events.PLAN_ABANDONED, {
                                 "mission_id": self.id,
@@ -859,6 +888,7 @@ class Solver(Supervisor, Entity):
             from core.constants import (
                 SKILL_DISCOVERY_THRESHOLD,
                 SKILL_SHADOW_SUCCESS_THRESHOLD,
+                SKILL_SHADOW_MISMATCH_THRESHOLD,
                 SKILL_CIRCUIT_BREAKER_MAX_FAILURES
             )
 
@@ -901,12 +931,28 @@ class Solver(Supervisor, Entity):
                 object_name=primary_obj
             )
             self.canonical_profile_id = canonical_profile_id
+            mission_id = getattr(self.execution_tree, "mission_id", None) if hasattr(self, "execution_tree") else None
+            skill_id = f"desktop.{primary_action}.{primary_obj}".replace(" ", "_") if primary_action and primary_obj else None
             
-            if canonical_profile_id != -1 and hasattr(self, "mission_store") and self.mission_store and getattr(self.execution_tree, "mission_id", None):
-                self.mission_store.link_episode_to_profile(self.execution_tree.mission_id, canonical_profile_id)
+            if canonical_profile_id != -1 and hasattr(self, "mission_store") and self.mission_store and mission_id:
+                self.mission_store.link_episode_to_profile(mission_id, canonical_profile_id)
+
+            # Émission immédiate et inconditionnelle de l'événement de cycle de vie (Events & HTML)
+            lifecycle_payload = {
+                "solver_id": self.id,
+                "mission_id": mission_id,
+                "canonical_profile_id": canonical_profile_id,
+                "consecutive_count": consecutive_count,
+                "threshold": SKILL_DISCOVERY_THRESHOLD,
+                "skill_id": skill_id,
+                "is_success": is_success,
+                "signature": combined_signature_text,
+            }
+            Logger.event("skill_lifecycle", **lifecycle_payload)
+            if hasattr(self, "propagate_event"):
+                await self.propagate_event("skill_lifecycle", lifecycle_payload)
 
             if is_success and canonical_profile_id != -1:
-                skill_id = f"desktop.{primary_action}.{primary_obj}".replace(" ", "_")
                 Logger.info(f"[Solver:{self.id}] 🎯 Succès enregistré pour profil {canonical_profile_id} (succès consécutifs: {consecutive_count}).")
 
                 existing = registry.get_skill(skill_id)
@@ -922,7 +968,182 @@ class Solver(Supervisor, Entity):
                         
                         from core.skills.synthesizer import SkillSynthesizer
                         if hasattr(self, "llm") and self.llm:
-                            synthesizer = SkillSynthesizer(llm=self.llm)
+                            # Cloner le LLM du Solver pour créer un LLM dédié, vierge et isolé pour la synthèse
+                            dedicated_llm = self.llm.clone(role_name="skill_synthesizer")
+                            synthesizer = SkillSynthesizer(llm=dedicated_llm)
+                            created_manifest = await synthesizer.synthesize(
+                                skill_id=skill_id,
+                                combined_signature=combined_signature_text,
+                                primary_action=primary_action,
+                                primary_object=primary_obj,
+                                recent_trees=recent_trees
+                            )
+                            if created_manifest:
+                                Logger.event(
+                                    "skill_created",
+                                    skill_id=skill_id,
+                                    version=1,
+                                    state=SkillState.SHADOW.value,
+                                    solver_id=self.id,
+                                    mission_id=mission_id,
+                                    canonical_profile_id=canonical_profile_id
+                                )
+                        else:
+                            Logger.warning(f"[Solver:{self.id}] Impossible de lancer le Synthesizer : LLM non disponible.")
+                else:
+                    # CAS B: Le skill existe déjà -> Le Skill Engine gère l'évaluation / shadow avec Aligner de traces
+                    active_info = registry.get_active_version(skill_id)
+                    if active_info:
+                        ver, state, trust = active_info
+                        if state == SkillState.SHADOW:
+                            # 1. Extraction de la trace réelle exécutée lors de cette mission
+                            trace_nodes: List[Dict[str, Any]] = []
+                            if hasattr(self, "execution_tree") and self.execution_tree and self.execution_tree.last_attempt:
+                                attempt = self.execution_tree.last_attempt
+                                raw_nodes = getattr(attempt, "nodes", []) or getattr(getattr(attempt, "execution_graph", None), "nodes", [])
+                                for n in raw_nodes:
+                                    t_name = getattr(n, "tool_name", None) or (n.get("tool_name") if isinstance(n, dict) else None)
+                                    action_val = getattr(n, "action", None) or (n.get("action") if isinstance(n, dict) else None)
+                                    t_args = getattr(n, "tool_args", None) or getattr(n, "arguments", None) or (n.get("tool_args") if isinstance(n, dict) else None) or (n.get("arguments") if isinstance(n, dict) else {}) or {}
+                                    t_status = getattr(n, "status", "") or (n.get("status") if isinstance(n, dict) else "")
+                                    trace_nodes.append({
+                                        "tool_name": t_name or action_val or "",
+                                        "action": action_val or t_name or "",
+                                        "tool_args": t_args if isinstance(t_args, dict) else {},
+                                        "status": t_status
+                                    })
+
+                            # 2. Récupération du méta-plan de la compétence en Shadow
+                            flow_payload = registry.get_flow_payload(skill_id, ver)
+                            meta_plan_nodes: List[Dict[str, Any]] = []
+                            if isinstance(flow_payload, dict):
+                                meta_plan_nodes = (
+                                    flow_payload.get("meta_plan") or 
+                                    flow_payload.get("plan_nodes") or 
+                                    flow_payload.get("nodes") or 
+                                    flow_payload.get("steps") or 
+                                    []
+                                )
+                            elif isinstance(flow_payload, list):
+                                meta_plan_nodes = flow_payload
+
+                            # 3. Évaluation scientifique de concordance (LCS)
+                            from core.skills.aligner import SkillTraceAligner
+                            align_res = SkillTraceAligner.evaluate_concordance(
+                                observed_trace=trace_nodes,
+                                meta_plan=meta_plan_nodes
+                            )
+
+                            if align_res.is_aligned:
+                                updated_trust = registry.record_run_metric(skill_id, ver, success=True, is_shadow=True)
+                                shadow_successes = updated_trust.shadow_validation_count
+                                Logger.info(
+                                    f"[Solver:{self.id}] 🛡️ Concordance Shadow VALIDÉE pour '{skill_id}' v{ver} "
+                                    f"({align_res.reason}) - Validation {shadow_successes}/{SKILL_SHADOW_SUCCESS_THRESHOLD}."
+                                )
+                                Logger.event(
+                                    "skill_shadow_validated",
+                                    skill_id=skill_id,
+                                    version=ver,
+                                    shadow_successes=shadow_successes,
+                                    threshold=SKILL_SHADOW_SUCCESS_THRESHOLD,
+                                    concordance_reason=align_res.reason,
+                                    solver_id=self.id,
+                                    mission_id=mission_id
+                                )
+                                if shadow_successes >= SKILL_SHADOW_SUCCESS_THRESHOLD:
+                                    Logger.info(f"[Solver:{self.id}] 🎉 PROMOTION EN PRODUCTION: Skill '{skill_id}' v{ver} qualifié !")
+                                    registry.transition_state(
+                                        skill_id=skill_id,
+                                        version=ver,
+                                        target_state=SkillState.PRODUCTION,
+                                        reason=f"Validation shadow réussie avec concordance LCS ({align_res.reason})."
+                                    )
+                                    Logger.event(
+                                        "skill_transition",
+                                        skill_id=skill_id,
+                                        version=ver,
+                                        target_state=SkillState.PRODUCTION.value,
+                                        reason=f"Validation shadow réussie avec concordance LCS ({align_res.reason}).",
+                                        solver_id=self.id,
+                                        mission_id=mission_id
+                                    )
+                            else:
+                                updated_trust = registry.record_run_metric(skill_id, ver, success=True, is_shadow=True, shadow_mismatch=True)
+                                mismatches = updated_trust.shadow_mismatch_count
+                                Logger.warning(
+                                    f"[Solver:{self.id}] ⚠️ Mission réussie mais trace NON CONCORDANTE avec le Méta-Plan Shadow '{skill_id}' v{ver}. "
+                                    f"{align_res.reason} -> Mismatches consécutifs: {mismatches}/{SKILL_SHADOW_MISMATCH_THRESHOLD}."
+                                )
+                                Logger.event(
+                                    "skill_shadow_mismatch",
+                                    skill_id=skill_id,
+                                    version=ver,
+                                    shadow_mismatch_count=mismatches,
+                                    threshold=SKILL_SHADOW_MISMATCH_THRESHOLD,
+                                    concordance_reason=align_res.reason,
+                                    is_simplification=align_res.is_simplification,
+                                    solver_id=self.id,
+                                    mission_id=mission_id
+                                )
+
+                                if mismatches >= SKILL_SHADOW_MISMATCH_THRESHOLD:
+                                    Logger.warning(
+                                        f"[Solver:{self.id}] 🛑 Seuil d'obsolescence Shadow atteint ({mismatches} >= {SKILL_SHADOW_MISMATCH_THRESHOLD}). "
+                                        f"Skill '{skill_id}' v{ver} placé en QUARANTINE."
+                                    )
+                                    registry.transition_state(
+                                        skill_id=skill_id,
+                                        version=ver,
+                                        target_state=SkillState.QUARANTINE,
+                                        reason=f"Obsolescence Shadow: {mismatches} divergences consécutives observées sur missions réussies ({align_res.reason})."
+                                    )
+                                    Logger.event(
+                                        "skill_shadow_stale",
+                                        skill_id=skill_id,
+                                        version=ver,
+                                        target_state=SkillState.QUARANTINE.value,
+                                        reason=f"Obsolescence Shadow: {mismatches} divergences consécutives.",
+                                        solver_id=self.id,
+                                        mission_id=mission_id
+                                    )
+
+                                    # Déclenchement automatique immédiat d'une re-synthèse vN+1 sur la base des traces optimales
+                                    if consecutive_count >= SKILL_DISCOVERY_THRESHOLD and hasattr(self, "llm") and self.llm:
+                                        Logger.info(f"[Solver:{self.id}] ♻️ Re-synthèse immédiate déclenchée pour '{skill_id}' avec les traces simplifiées.")
+                                        recent_trees = self.mission_store.get_recent_trees_by_profile_id(canonical_profile_id, limit=SKILL_DISCOVERY_THRESHOLD) if hasattr(self, "mission_store") and self.mission_store else []
+                                        if not recent_trees and hasattr(self, "execution_tree") and self.execution_tree:
+                                            tree_dict = self.execution_tree.model_dump(mode="json") if hasattr(self.execution_tree, "model_dump") else (self.execution_tree.to_dict() if hasattr(self.execution_tree, "to_dict") else self.execution_tree)
+                                            recent_trees = [tree_dict]
+                                        
+                                        from core.skills.synthesizer import SkillSynthesizer
+                                        dedicated_llm = self.llm.clone(role_name="skill_synthesizer")
+                                        synthesizer = SkillSynthesizer(llm=dedicated_llm)
+                                        await synthesizer.synthesize(
+                                            skill_id=skill_id,
+                                            combined_signature=combined_signature_text,
+                                            primary_action=primary_action,
+                                            primary_object=primary_obj,
+                                            recent_trees=recent_trees
+                                        )
+                        elif state == SkillState.PRODUCTION:
+                            # Les métriques d'exécution réelle (succès ou breakout) sont déjà fidèlement
+                            # enregistrées par SkillExecutionEngine au moment précis où le skill s'exécute.
+                            # On n'enregistre pas de succès aveugle ici pour éviter de masquer un breakout
+                            # lorsque la mission a finalement réussi grâce au fallback / retry du Solver.
+                            Logger.info(f"[Solver:{self.id}] 📊 Skill en Production '{skill_id}' v{ver} actif pour cette mission.")
+                    else:
+                        # CAS C: Le skill existe mais aucune version active (ex: QUARANTINE ou RETIRED)
+                        if consecutive_count >= SKILL_DISCOVERY_THRESHOLD and hasattr(self, "llm") and self.llm:
+                            Logger.info(f"[Solver:{self.id}] 🚀 Re-synthèse d'une nouvelle version pour le skill sans version active '{skill_id}'.")
+                            recent_trees = self.mission_store.get_recent_trees_by_profile_id(canonical_profile_id, limit=SKILL_DISCOVERY_THRESHOLD) if hasattr(self, "mission_store") and self.mission_store else []
+                            if not recent_trees and hasattr(self, "execution_tree") and self.execution_tree:
+                                tree_dict = self.execution_tree.model_dump(mode="json") if hasattr(self.execution_tree, "model_dump") else (self.execution_tree.to_dict() if hasattr(self.execution_tree, "to_dict") else self.execution_tree)
+                                recent_trees = [tree_dict]
+                            
+                            from core.skills.synthesizer import SkillSynthesizer
+                            dedicated_llm = self.llm.clone(role_name="skill_synthesizer")
+                            synthesizer = SkillSynthesizer(llm=dedicated_llm)
                             await synthesizer.synthesize(
                                 skill_id=skill_id,
                                 combined_signature=combined_signature_text,
@@ -930,33 +1151,11 @@ class Solver(Supervisor, Entity):
                                 primary_object=primary_obj,
                                 recent_trees=recent_trees
                             )
-                        else:
-                            Logger.warning(f"[Solver:{self.id}] Impossible de lancer le Synthesizer : LLM non disponible.")
-                else:
-                    # CAS B: Le skill existe déjà -> Le Skill Engine gère l'évaluation / shadow
-                    active_info = registry.get_active_version(skill_id)
-                    if active_info:
-                        ver, state, trust = active_info
-                        if state == SkillState.SHADOW:
-                            updated_trust = registry.record_run_metric(skill_id, ver, success=True, is_shadow=True)
-                            shadow_successes = updated_trust.shadow_validation_count
-                            Logger.info(f"[Solver:{self.id}] 🛡️ Validation Shadow pour '{skill_id}' v{ver} (exécutions shadow réussies: {shadow_successes}/{SKILL_SHADOW_SUCCESS_THRESHOLD}).")
-                            if shadow_successes >= SKILL_SHADOW_SUCCESS_THRESHOLD:
-                                Logger.info(f"[Solver:{self.id}] 🎉 PROMOTION EN PRODUCTION: Skill '{skill_id}' v{ver} qualifié !")
-                                registry.transition_state(
-                                    skill_id=skill_id,
-                                    version=ver,
-                                    target_state=SkillState.PRODUCTION,
-                                    reason=f"Validation shadow réussie ({shadow_successes} exécutions passives sans échec)."
-                                )
-                        elif state == SkillState.PRODUCTION:
-                            registry.record_run_metric(skill_id, ver, success=True)
-                            Logger.info(f"[Solver:{self.id}] 📊 Métrique d'exécution en Production enregistrée pour '{skill_id}' v{ver}.")
 
             elif not is_success and canonical_profile_id != -1:
                 # ÉCHEC: reset consecutive_successes
                 Logger.warning(f"[Solver:{self.id}] ⚠️ Échec enregistré pour profil {canonical_profile_id}. Succès consécutifs réinitialisés à 0.")
-                skill_id = f"desktop.{primary_action}.{primary_obj}".replace(" ", "_")
+                skill_id = f"desktop.{primary_action}.{primary_obj}".replace(" ", "_") if primary_action and primary_obj else None
                 active_info = registry.get_active_version(skill_id)
                 if active_info:
                     ver, state, trust = active_info
@@ -970,29 +1169,27 @@ class Solver(Supervisor, Entity):
                                 target_state=SkillState.QUARANTINE,
                                 reason=f"{SKILL_CIRCUIT_BREAKER_MAX_FAILURES} échecs consécutifs en production."
                             )
+                            Logger.event(
+                                "skill_transition",
+                                skill_id=skill_id,
+                                version=ver,
+                                target_state=SkillState.QUARANTINE.value,
+                                reason=f"{SKILL_CIRCUIT_BREAKER_MAX_FAILURES} échecs consécutifs en production.",
+                                solver_id=self.id,
+                                mission_id=mission_id
+                            )
                             # --- LANCEMENT DE L'AUTO-REPARATION ---
                             from core.skills.repair_engine import SkillRepairEngine
                             if hasattr(self, "llm") and self.llm:
-                                repair_engine = SkillRepairEngine(llm=self.llm)
+                                # Cloner le LLM du Solver pour créer un LLM dédié, vierge et isolé pour la réparation
+                                dedicated_repair_llm = self.llm.clone(role_name="skill_repair")
+                                repair_engine = SkillRepairEngine(llm=dedicated_repair_llm)
                                 await repair_engine.repair_skill(
                                     skill_id=skill_id,
                                     failed_version=ver,
                                     failure_bundle=getattr(self, "last_failure_bundle", None),
                                     breakout_report=getattr(self, "last_breakout_report", None)
                                 )
-
-            # Propagation de l'événement de cycle de vie du skill pour l'observabilité HTML / UI
-            if hasattr(self, "propagate_event"):
-                await self.propagate_event("skill_lifecycle", {
-                    "solver_id": self.id,
-                    "mission_id": getattr(self.execution_tree, "mission_id", None) if hasattr(self, "execution_tree") else None,
-                    "canonical_profile_id": canonical_profile_id,
-                    "consecutive_count": consecutive_count,
-                    "threshold": SKILL_DISCOVERY_THRESHOLD,
-                    "skill_id": f"desktop.{primary_action}.{primary_obj}".replace(" ", "_") if primary_action and primary_obj else None,
-                    "is_success": is_success,
-                    "signature": combined_signature_text,
-                })
 
         except Exception as e:
             Logger.error(f"[Solver:{self.id}] Erreur post-exécution dans _handle_skill_lifecycle_post_execution: {e}")
