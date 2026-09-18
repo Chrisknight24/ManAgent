@@ -1,0 +1,11 @@
+# Fins de ligne : git convertit auto (fini les warnings LF/CRLF sur Windows)
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+
+# Binaires : jamais de conversion
+*.dll binary
+*.db binary
+*.tar.gz binary
+*.exe binary
