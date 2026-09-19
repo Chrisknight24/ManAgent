@@ -4,11 +4,10 @@ embeddings/providers/__init__.py
 Providers concrets pour les embeddings + fabrique (factory).
 Types supportes : "hash" (lite, offline), "sentence-transformer" (local full),
 "remote" (API OpenAI-compatible).
-"""
 
-from embeddings.providers.sentence_transformer import SentenceTransformerProvider
-from embeddings.providers.hash_provider import HashEmbeddingProvider
-from embeddings.providers.remote_provider import RemoteEmbeddingProvider
+Imports paresseux (lazy) : importer ce package ne tire JAMAIS torch.
+Le module lourd sentence_transformer n'est charge qu'a l'usage reel.
+"""
 
 __all__ = [
     "SentenceTransformerProvider",
@@ -16,6 +15,19 @@ __all__ = [
     "RemoteEmbeddingProvider",
     "create_embedding_provider",
 ]
+
+
+def __getattr__(name: str):
+    if name == "SentenceTransformerProvider":
+        from embeddings.providers.sentence_transformer import SentenceTransformerProvider
+        return SentenceTransformerProvider
+    if name == "HashEmbeddingProvider":
+        from embeddings.providers.hash_provider import HashEmbeddingProvider
+        return HashEmbeddingProvider
+    if name == "RemoteEmbeddingProvider":
+        from embeddings.providers.remote_provider import RemoteEmbeddingProvider
+        return RemoteEmbeddingProvider
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def create_embedding_provider(model_def: dict, emit_func=None):
@@ -39,15 +51,18 @@ def create_embedding_provider(model_def: dict, emit_func=None):
         else:
             ptype = "sentence-transformer"
     if ptype in ("hash", "lite", "lite-hash"):
+        from embeddings.providers.hash_provider import HashEmbeddingProvider
         return HashEmbeddingProvider(dim=int(model_def.get("dim", 256)))
     if ptype == "remote":
+        from embeddings.providers.remote_provider import RemoteEmbeddingProvider
         return RemoteEmbeddingProvider(
             model_id=model_def.get("id", "text-embedding-3-small").replace("remote:", ""),
             api_key=model_def.get("api_key", ""),
             base_url=model_def.get("base_url", "https://api.openai.com/v1"),
             display_name=model_def.get("display_name"),
         )
-    # defaut : local full
+    # defaut : local full (charge torch uniquement ici, a l'usage reel)
+    from embeddings.providers.sentence_transformer import SentenceTransformerProvider
     return SentenceTransformerProvider(
         model_id=model_def.get("id", "sentence-transformers/all-MiniLM-L6-v2"),
         display_name=model_def.get("display_name", model_def.get("id", "")),

@@ -194,6 +194,22 @@ class Orchestrator(Supervisor, Entity):
                     "message": "Host manifest registered successfully.",
                     "host_manifest": manifest_obj.to_dict()
                 })
+            elif packet.action == Actions.EMBEDDINGS_CATALOG:
+                from embeddings.catalog import catalog_status
+                extra = getattr(self.runtime_state, "embedding_catalog_extra", []) or []
+                try:
+                    active_id = self.runtime_state.embedding_manager.active_provider_id
+                except Exception:
+                    active_id = None
+                rows = catalog_status(extra=extra, active_id=active_id)
+                return ResponsePacket(type="response", status="success", payload={
+                    "models": rows,
+                    "active_embedding_model": active_id,
+                })
+            elif packet.action == Actions.EMBEDDINGS_PREPARE:
+                return await self._handle_embeddings_prepare(packet)
+            elif packet.action == Actions.EMBEDDINGS_SET_DEFAULT:
+                return await self._handle_embeddings_set_default(packet)
             elif packet.action == Actions.LEARNER_ANALYZE:
                 if not self.runtime_state.learner:
                     return ErrorPacket(type="error", message="Learner non initialisé. Envoyez un message d'abord.")
@@ -2092,6 +2108,123 @@ class Orchestrator(Supervisor, Entity):
             Logger.warning(f"[Orchestrator] Échec de l'invalidation du cache : {e}")
 
     # =====================================================
+    # CATALOGUE EMBEDDINGS (plug-and-play, agnostique)
+    # =====================================================
+    async def _handle_embeddings_prepare(self, packet: RequestPacket):
+        """Telecharge/precharge un modele du catalogue avec progression en events."""
+        from embeddings.catalog import get_catalog, detect_installed
+        from embeddings.providers import create_embedding_provider
+
+        payload = packet.payload or {}
+        model_id = (payload.get("id") or payload.get("model_id") or "").strip()
+        force = bool(payload.get("force", False))
+        set_default = bool(payload.get("set_default", False))
+        if not model_id:
+            return ErrorPacket(type="error", message="embeddings.prepare requiert 'id'.")
+        if model_id in ("lite-hash", "hash", "lite") or model_id.startswith("remote:"):
+            return ResponsePacket(type="response", status="success", payload={
+                "id": model_id, "already": True,
+                "message": "Rien a telecharger pour ce mode.",
+            })
+
+        entries = {e["id"]: e for e in get_catalog(
+            getattr(self.runtime_state, "embedding_catalog_extra", []) or []
+        )}
+        entry = entries.get(model_id)
+        if entry is None:
+            return ErrorPacket(type="error", message=f"Modele inconnu du catalogue : {model_id}.")
+
+        state = detect_installed([model_id]).get(model_id, {})
+        if state.get("installed") and not force:
+            return ResponsePacket(type="response", status="success", payload={
+                "id": model_id, "already": True,
+                "size_bytes": state.get("size_bytes", 0),
+                "message": "Deja installe. Relancez avec force:true pour re-telecharger.",
+            })
+
+        model_def = dict(entry)
+        for k in ("api_key", "base_url", "display_name"):
+            if payload.get(k):
+                model_def[k] = payload[k]
+        await self.propagate_event("embedding.download_started", {
+            "id": model_id, "display_name": entry.get("display_name", model_id),
+        })
+        try:
+            provider = create_embedding_provider(model_def, emit_func=self.propagate_event)
+            await provider.initialize()
+            mgr = self.runtime_state.embedding_manager
+            if model_id not in mgr._providers and getattr(provider, "model_name", None) not in mgr._providers:
+                mgr.register_provider(provider)
+            if set_default:
+                mgr.set_active_provider(provider.model_name)
+                self.runtime_state.active_embedding_model = provider.model_name
+                self.runtime_state.embeddings_mode = "local"
+            await self.propagate_event("embedding.download_finished", {
+                "id": model_id, "dimension": provider.dimension,
+            })
+            return ResponsePacket(type="response", status="success", payload={
+                "id": model_id, "already": False,
+                "dimension": provider.dimension,
+                "active": set_default,
+            })
+        except Exception as e:
+            Logger.error(f"[Orchestrator] embeddings.prepare echec ({model_id}) : {e}")
+            await self.propagate_event("embedding.download_error", {
+                "id": model_id, "error": str(e),
+            })
+            return ErrorPacket(type="error", message=f"Echec telechargement {model_id} : {e}")
+
+    async def _handle_embeddings_set_default(self, packet: RequestPacket):
+        """Bascule le modele d'embedding actif (hot-swap, sans couper le tchat)."""
+        from embeddings.catalog import get_catalog, detect_installed
+        from embeddings.providers import create_embedding_provider
+        from embeddings.providers.hash_provider import HashEmbeddingProvider
+
+        payload = packet.payload or {}
+        model_id = (payload.get("id") or payload.get("model_id") or "").strip()
+        if not model_id:
+            return ErrorPacket(type="error", message="embeddings.set_default requiert 'id'.")
+        mgr = self.runtime_state.embedding_manager
+        if model_id in mgr._providers:
+            mgr.set_active_provider(model_id)
+        else:
+            entries = {e["id"]: e for e in get_catalog(
+                getattr(self.runtime_state, "embedding_catalog_extra", []) or []
+            )}
+            entry = entries.get(model_id)
+            if entry is None:
+                return ErrorPacket(type="error", message=f"Modele inconnu : {model_id}.")
+            if entry.get("type") == "sentence-transformer":
+                st = detect_installed([model_id]).get(model_id, {})
+                if not st.get("installed"):
+                    return ErrorPacket(type="error", message=(
+                        f"{model_id} non installe. Appelez embeddings.prepare d'abord."
+                    ))
+            model_def = dict(entry)
+            for k in ("api_key", "base_url"):
+                if payload.get(k):
+                    model_def[k] = payload[k]
+            try:
+                provider = create_embedding_provider(model_def, emit_func=self.propagate_event)
+                mgr.register_provider(provider)
+                mgr.set_active_provider(provider.model_name)
+            except Exception as e:
+                return ErrorPacket(type="error", message=f"Activation impossible : {e}")
+        self.runtime_state.active_embedding_model = mgr.active_provider_id
+        self.runtime_state.embeddings_mode = (
+            "lite" if (mgr.active_provider_id or "") == HashEmbeddingProvider.PROVIDER_ID
+            else ("remote" if (mgr.active_provider_id or "").startswith("remote:") else "local")
+        )
+        await self.propagate_event("embedding.active_changed", {
+            "id": self.runtime_state.active_embedding_model,
+            "mode": self.runtime_state.embeddings_mode,
+        })
+        return ResponsePacket(type="response", status="success", payload={
+            "id": self.runtime_state.active_embedding_model,
+            "mode": self.runtime_state.embeddings_mode,
+        })
+
+    # =====================================================
     # CONFIGURATION RUNTIME
     # =====================================================
     async def _handle_runtime_configure(self, packet: RequestPacket):
@@ -2150,6 +2283,8 @@ class Orchestrator(Supervisor, Entity):
         # =====================================================
         embedding_models = list(payload.get("embedding_models", []) or [])
         emb_cfg = payload.get("embeddings", {}) or {}
+        # Entrees catalogue supplementaires de l'hote (extensible, jamais fige).
+        self.runtime_state.embedding_catalog_extra = payload.get("embedding_catalog_extra", []) or []
         if isinstance(emb_cfg, dict) and (emb_cfg.get("mode") or "").strip():
             mode = str(emb_cfg.get("mode")).lower().strip()
             if mode == "lite":

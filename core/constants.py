@@ -27,6 +27,9 @@ class Actions:
     SKILL_PAYLOAD_REQUEST = "skill.payload_request"
     EXPORT_SKILL_PACKAGE = "skill.export_package"
     IMPORT_SKILL_PACKAGE = "skill.import_package"
+    EMBEDDINGS_CATALOG = "embeddings.catalog"
+    EMBEDDINGS_PREPARE = "embeddings.prepare"
+    EMBEDDINGS_SET_DEFAULT = "embeddings.set_default"
 
 class Events:
     RUNTIME_READY = "runtime.ready"

@@ -76,6 +76,14 @@ L'hôte choisit le mode dans `runtime.configure` (simple pour l'utilisateur du s
 La réponse `runtime.configured` et l'événement associé renvoient `embeddings_mode` + `active_embedding_model`.
 L'hôte peut déclarer ses capacités dans le manifest : `"capabilities":["mouse","keyboard","embeddings-local"]`.
 
+## 3c. Gestion des modèles (UI setup — query, pas de dur)
+
+Séquence recommandée pour l'écran modèles de l'hôte :
+1. `{"action":"embeddings.catalog","payload":{}}` → `{"models":[{"id","display_name","type","languages","size_mb","dim","installed","size_bytes","active"}]}`. Remplir la liste + tailles + état installé. Jamais de modèle en dur côté hôte.
+2. Bouton Télécharger → `{"action":"embeddings.prepare","payload":{"id":"..."}}` → events `embedding.download_started/finished/error` (+ progression `EMBEDDING_MODEL_LOADING/...` pour le local). Option `force:true` pour re-télécharger, `set_default:true` pour activer de suite.
+3. Bouton Par défaut → `{"action":"embeddings.set_default","payload":{"id":"..."}}` → bascule à chaud (réponse + event `embedding.active_changed`). Erreur claire si non installé (« appelez embeddings.prepare d'abord »).
+4. Alternative en une fois : `runtime.configure {"embeddings":{"mode":"lite|local|remote",...}}` (voir §3b).
+
 ## 4. Actions supportées (voir `core/constants.py:8`)
 
 | Action | Usage |
