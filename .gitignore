@@ -29,6 +29,9 @@ dist/
 build/
 *.spec.log
 
+# Fichier d'echange local des logs (jamais sur git)
+user_log.txt
+
 # OS
 Thumbs.db
 .DS_Store

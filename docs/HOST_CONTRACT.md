@@ -101,12 +101,13 @@ Séquence recommandée pour l'écran modèles de l'hôte :
 
 ## 5. Boucle outils (host exécute, ManAgent décide)
 
-ManAgent ne clique jamais lui-même. Il demande :
-`{"type":"event","event":"executor.run_tool","payload":{"tool":"click","args":{...},"step_id":"..."}}`
+ManAgent ne clique jamais lui-même. Il demande (event `tool.requested`) :
+`{"type":"event","event":"tool.requested","payload":{"call_id":"...","tool_name":"click","arguments":{...}}}`
 L'hôte exécute côté C++ puis répond :
 ```json
-{"type":"request","action":"tool.result","payload":{"step_id":"...","success":true,"result":{...}}}
+{"type":"request","action":"tool.result","payload":{"call_id":"...","result":"..."}}
 ```
+`call_id` = le ticket de suivi (obligatoire, tel quel). Mauvais ticket → erreur claire.
 
 ## 6. Observabilité (tout est observable)
 

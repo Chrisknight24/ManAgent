@@ -2136,9 +2136,24 @@ class Orchestrator(Supervisor, Entity):
 
         state = detect_installed([model_id]).get(model_id, {})
         if state.get("installed") and not force:
+            active = False
+            try:
+                mgr = self.runtime_state.embedding_manager
+                if model_id not in mgr._providers:
+                    provider = create_embedding_provider(dict(entry), emit_func=self.propagate_event)
+                    mgr.register_provider(provider)
+                    model_id = provider.model_name
+                if set_default and model_id in mgr._providers:
+                    mgr.set_active_provider(model_id)
+                    self.runtime_state.active_embedding_model = model_id
+                    self.runtime_state.embeddings_mode = "local"
+                    active = True
+            except Exception as e:
+                Logger.warning(f"[Orchestrator] embeddings.prepare activation : {e}")
             return ResponsePacket(type="response", status="success", payload={
                 "id": model_id, "already": True,
                 "size_bytes": state.get("size_bytes", 0),
+                "active": active,
                 "message": "Deja installe. Relancez avec force:true pour re-telecharger.",
             })
 
