@@ -36,6 +36,7 @@ GO REQUIS : oui
   2. Transport : stdin/stdout aujourd'hui, WebSocket/TCP/HTTP/MCP demain — logique métier inchangée.
   3. Modèles : providers LLM et embeddings interchangeables (polymorphisme). Jamais de fixette sur un modèle précis, jamais de chemin en dur, catalogue + détection au lieu de suppositions.
 - Toute feature doit marcher pour un hôte inconnu, avec le seul contrat `docs/HOST_CONTRACT.md`.
+- Veille continue : si du code suppose un outil externe précis (RPA, souris, Windows...), le signaler au mainteneur au lieu de le laisser passer.
 - Ne jamais lire hors du dossier ManAgent sans accord explicite du mainteneur.
 
 ## 5. Langue
