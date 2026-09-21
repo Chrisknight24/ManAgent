@@ -18,6 +18,7 @@ Commande :
 - Dossier de travail (working dir) : le dossier ManAgent (pour `prompts/`, `rules.md`).
 - Protocole : une ligne = un JSON. Pas de log texte sur stdout, que du JSON.
 - Premier signal attendu : `{"type":"event","event":"runtime.ready","payload":{}}` (voir `main.py`, `core/constants.py:32`).
+- Handshake de version : `runtime.configure` envoie `"protocol_version": "1"` (top-level) ; `runtime.configured` la renvoie. Mismatch = erreur bruyante, pas de session.
 
 Santé (healthcheck) : si pas de `runtime.ready` en 15s → tuer le QProcess et relancer.
 

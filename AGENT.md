@@ -3,6 +3,8 @@
 ## 1. Architecture de décision (obligatoire, style ManAgent)
 - L'agent propose TOUJOURS un plan de mission AVANT d'agir.
 - Le plan liste : objectif, fichiers touchés, commandes prévues, risques.
+- Le plan décrit CONCRÈTEMENT : pour chaque fichier, la fonction modifiée et
+  comment (pas juste les noms) — le mainteneur veut comprendre, pas exécuter.
 - Le mainteneur (Christian) doit valider avec `GO`.
 - Sans `GO` explicite : NE RIEN MODIFIER, NE RIEN COMMITTER, NE RIEN PUSHER.
 - Une seule mission à la fois. Pas d'actions cachées.
@@ -12,7 +14,7 @@ Format attendu :
 MISSION : <nom court>
 OBJECTIF : <1 phrase>
 PLAN :
-1. <fichier/commande> — <pourquoi>
+1. <fichier> :: <fonction> — <comment je modifie>
 2. ...
 RISQUES : <ce qui peut casser>
 GO REQUIS : oui

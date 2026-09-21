@@ -178,3 +178,33 @@ CONTEXT_MAX_FACTS_TOKENS = 1500      # Budget de tokens pour les faits et leçon
 CONTEXT_MAX_TIMELINE_TOKENS = 1000   # Budget de tokens pour l'index chronologique
 CONTEXT_RECENT_TURNS_LIMIT = 6       # Nombre de tours récents inclus par défaut
 
+# =====================================================
+# PROTOCOLE (version du langage hôte <-> cerveau)
+# =====================================================
+# À monter à chaque changement incompatible (action/payload/event supprimé
+# ou renommé). L'hôte déclare sa version dans runtime.configure ;
+# mismatch = erreur bruyante, pas de session.
+PROTOCOL_VERSION = "1"
+
+
+def check_protocol_version(provided) -> tuple:
+    """Vérifie la version annoncée par l'hôte.
+
+    Retour : (accepted: bool, message: str).
+    - Absent/vide : accepté + avertissement (transition vieux hôtes).
+    - Égal : accepté.
+    - Différent : refusé (erreur bruyante).
+    Fonction pure (sans imports) pour rester testable vite.
+    """
+    if provided is None or (isinstance(provided, str) and not provided.strip()):
+        return True, (
+            "protocol_version absent — accepté en transition, "
+            f"merci d'envoyer \"protocol_version\": \"{PROTOCOL_VERSION}\"."
+        )
+    if str(provided).strip() == PROTOCOL_VERSION:
+        return True, "protocol version OK."
+    return False, (
+        f"protocol version mismatch (host:{provided} brain:{PROTOCOL_VERSION}) — "
+        "mettez à jour le côté le plus ancien, session refusée."
+    )
+

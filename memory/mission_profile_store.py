@@ -68,6 +68,14 @@ class MissionProfileStore:
             os.path.join(current_dir, "vec0.dll"),
             os.path.join(root_dir, "sqlite-vec.dll"),
         ]
+        # Dossier de l'exe fige : vec0.dll livre a cote de managent.exe.
+        import sys
+        if getattr(sys, "frozen", False):
+            exe_d = os.path.dirname(os.path.abspath(sys.executable))
+            possible_paths.insert(0, os.path.join(exe_d, "vec0.dll"))
+            meipass = getattr(sys, "_MEIPASS", None)
+            if meipass:
+                possible_paths.insert(0, os.path.join(meipass, "vec0.dll"))
         for p in possible_paths:
             if os.path.exists(p):
                 self._dll_path = p

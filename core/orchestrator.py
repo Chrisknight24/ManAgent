@@ -2244,6 +2244,16 @@ class Orchestrator(Supervisor, Entity):
     # =====================================================
     async def _handle_runtime_configure(self, packet: RequestPacket):
         Logger.info("Runtime configuration started")
+        payload = packet.payload
+        # Garde-fou versions : mismatch = refus bruyant, pas de session fantôme.
+        from core.constants import PROTOCOL_VERSION, check_protocol_version
+        pv_ok, pv_msg = check_protocol_version(payload.get("protocol_version"))
+        if not pv_ok:
+            Logger.error(f"[Orchestrator] {pv_msg}")
+            return ErrorPacket(type="error", message=pv_msg)
+        if "absent" in pv_msg:
+            Logger.warning(f"[Orchestrator] {pv_msg}")
+        self.runtime_state.protocol_version = payload.get("protocol_version") or PROTOCOL_VERSION
         self.runtime_state.cancel_requested = False
         if hasattr(self.runtime_state, "cancel_requested_for_turn"):
             self.runtime_state.cancel_requested_for_turn = False
@@ -2537,9 +2547,11 @@ class Orchestrator(Supervisor, Entity):
             "available_models": validated_models,
             "embeddings_mode": getattr(self.runtime_state, "embeddings_mode", "lite"),
             "active_embedding_model": getattr(self.runtime_state, "active_embedding_model", None),
+            "protocol_version": PROTOCOL_VERSION,
         })
         return ResponsePacket(type="response", status="success", payload={
             "models_count": len(validated_models),
             "embeddings_mode": getattr(self.runtime_state, "embeddings_mode", "lite"),
             "active_embedding_model": getattr(self.runtime_state, "active_embedding_model", None),
+            "protocol_version": PROTOCOL_VERSION,
         })

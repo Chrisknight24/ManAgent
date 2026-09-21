@@ -64,6 +64,16 @@ async def main():
             await transport.send_packet({"type": "error", "message": str(e)})
 
 if __name__ == "__main__":
+    import argparse
+    from utils.paths import setup_data_dir, get_version
+    _ap = argparse.ArgumentParser(add_help=False)
+    _ap.add_argument("--data-dir", default=None)
+    _ap.add_argument("--version", action="store_true")
+    _args, _ = _ap.parse_known_args()
+    if _args.version:
+        print("managent " + get_version())
+        raise SystemExit(0)
+    _data = setup_data_dir(_args.data_dir)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

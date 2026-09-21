@@ -109,6 +109,7 @@ Action inconnue → `{"type":"error","message":"Unknown action: ..."}`. Jamais d
 {
   "system_prompt": "You are a helpful assistant.",
   "language": "fr",
+  "protocol_version": "1",
   "environment": "simulated",
   "hitl_policy": "balanced",
   "api_keys": {"gemini": "TA_CLÉ"},
@@ -122,6 +123,9 @@ Action inconnue → `{"type":"error","message":"Unknown action: ..."}`. Jamais d
 }
 ```
 - `hitl_policy` : strict (demande souvent), balanced, autonomous (demande rarement).
+- `protocol_version` : version du langage ("1"). Renvoyée dans `runtime.configured`.
+  Absente = accepté + avertissement (transition). Différente = erreur bruyante
+  `protocol version mismatch`, pas de session. À monter à chaque changement incompatible.
 - `capabilities` d'un modèle : `text`, `vision`, `tools`... (sert au routage).
 - Réponse : `{"models_count": 1, "embeddings_mode": "lite", ...}`. Si `0`, le format des modèles est faux.
 
