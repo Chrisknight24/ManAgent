@@ -725,6 +725,11 @@ class Orchestrator(Supervisor, Entity):
             Logger.info(f"[Orchestrator] Input volumineux détecté et encapsulé en DataAsset(s) : {ingestion_result.created_assets}")
 
         # --- GESTION DU LLM DE L'ORCHESTRATEUR ---
+        # C2 : forced_* optionnels, auto-routage par défaut (agnostique).
+        from providers.provider_manager import resolve_chat_model
+        forced_provider, forced_model = resolve_chat_model(
+            forced_provider, forced_model, self.provider_manager
+        )
         from providers.provider_manager import ModelRequirement
         if self.llm is None:
             self.llm = Llm(
@@ -771,9 +776,6 @@ class Orchestrator(Supervisor, Entity):
         self.runtime_state.cancel_requested = False
         self.runtime_state.generation_epoch = getattr(self.runtime_state, "generation_epoch", 0) + 1
         self.runtime_state.reset_execution_markers()
-
-        if not forced_provider or not forced_model:
-            raise ValueError(_("Missing forced_provider or forced_model."))
 
         # 3. Initialiser le Learner (une seule fois)
         await self._ensure_learner_initialized(forced_provider, forced_model)

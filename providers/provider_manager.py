@@ -378,3 +378,30 @@ class ProviderManager:
     def clear(self):
         self.providers.clear()
         self.models_metadata.clear()
+
+
+def resolve_chat_model(forced_provider, forced_model, provider_manager):
+    """Résout le modèle d'un chat.send (C2 : forced_* optionnels, agnostique).
+
+    1. Les deux fournis (non "auto") -> override explicite, tels quels.
+    2. Sinon -> auto-routage par capabilities ["text"] (préférence partielle respectée).
+    3. Introuvable -> ValueError claire (configurer des modèles d'abord).
+    """
+    fp = (forced_provider or "").strip()
+    fm = (forced_model or "").strip()
+    if fp and fm and fp != "auto" and fm != "auto":
+        return fp, fm
+    req = ModelRequirement(
+        role_name="chat",
+        required_capabilities=["text"],
+        preferred_provider=fp if fp and fp != "auto" else None,
+        preferred_model=fm if fm and fm != "auto" else None,
+    )
+    best = provider_manager.find_best_model_for_requirement(req)
+    if best:
+        Logger.info(f"[ProviderManager] Auto-routage chat : {best[0]}/{best[1]}")
+        return best[0], best[1]
+    raise ValueError(
+        "Aucun modèle avec la capacité 'text' disponible. "
+        "Envoyez runtime.configure avec des modèles, ou précisez forced_provider/forced_model."
+    )

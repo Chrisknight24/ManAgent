@@ -30,6 +30,7 @@ GO REQUIS : oui
 - Ne jamais versionner (1) : `memory.db`, `*.dll`, `*.tar.gz`, `.venv/`, `__pycache__/`, `events.jsonl`, `dist/`, `build/`.
 - `requirements.txt` / `pyproject.toml` doivent refléter les vrais imports.
 - Tests : si un test échoue après un changement code, mettre à jour le test OU corriger le code, jamais ignorer.
+- Chaque mission ajoute des tests rapides (fonctions pures de préférence, mS pas minutes).
 - Docs avant code pour toute feature visible.
 
 ## 4. Agnosticisme ManAgent (CRITIQUE, non négociable)
