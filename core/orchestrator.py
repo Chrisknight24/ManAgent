@@ -210,6 +210,8 @@ class Orchestrator(Supervisor, Entity):
                 return await self._handle_embeddings_prepare(packet)
             elif packet.action == Actions.EMBEDDINGS_SET_DEFAULT:
                 return await self._handle_embeddings_set_default(packet)
+            elif packet.action == Actions.EMBEDDINGS_CANCEL:
+                return await self._handle_embeddings_cancel(packet)
             elif packet.action == Actions.LEARNER_ANALYZE:
                 if not self.runtime_state.learner:
                     return ErrorPacket(type="error", message="Learner non initialisé. Envoyez un message d'abord.")
@@ -2159,6 +2161,13 @@ class Orchestrator(Supervisor, Entity):
                 "message": "Deja installe. Relancez avec force:true pour re-telecharger.",
             })
 
+        from embeddings.catalog import precheck_download
+        pre = precheck_download(model_id)
+        if not pre.get("ok"):
+            await self.propagate_event("embedding.download_error", {
+                "id": model_id, "error": pre.get("reason", "precheck"),
+            })
+            return ErrorPacket(type="error", message=f"Téléchargement impossible : {pre.get('reason')}")
         model_def = dict(entry)
         for k in ("api_key", "base_url", "display_name"):
             if payload.get(k):
@@ -2176,6 +2185,7 @@ class Orchestrator(Supervisor, Entity):
                 mgr.set_active_provider(provider.model_name)
                 self.runtime_state.active_embedding_model = provider.model_name
                 self.runtime_state.embeddings_mode = "local"
+                self._sync_memory_embedding_space()
             await self.propagate_event("embedding.download_finished", {
                 "id": model_id, "dimension": provider.dimension,
             })
@@ -2236,10 +2246,46 @@ class Orchestrator(Supervisor, Entity):
             "id": self.runtime_state.active_embedding_model,
             "mode": self.runtime_state.embeddings_mode,
         })
+        self._sync_memory_embedding_space()
         return ResponsePacket(type="response", status="success", payload={
             "id": self.runtime_state.active_embedding_model,
             "mode": self.runtime_state.embeddings_mode,
         })
+
+    async def _handle_embeddings_cancel(self, packet: RequestPacket):
+        """Annule un téléchargement en cours (best-effort, reprise auto au retry)."""
+        payload = packet.payload or {}
+        model_id = (payload.get("id") or payload.get("model_id") or "").strip()
+        if not model_id:
+            return ErrorPacket(type="error", message="embeddings.cancel requiert 'id'.")
+        mgr = self.runtime_state.embedding_manager
+        provider = mgr.get_provider(model_id)
+        cancelled = False
+        if provider is not None and hasattr(provider, "cancel"):
+            try:
+                provider.cancel()
+                cancelled = True
+            except Exception as e:
+                Logger.warning(f"[Orchestrator] embeddings.cancel : {e}")
+        await self.propagate_event("embedding.download_cancelled", {
+            "id": model_id, "cancelled": cancelled,
+        })
+        return ResponsePacket(type="response", status="success", payload={
+            "id": model_id, "cancelled": cancelled,
+            "message": "Annulation demandée (reprise auto au prochain prepare)."
+            if cancelled else "Rien à annuler (provider inconnu ou sans cancel).",
+        })
+
+    def _sync_memory_embedding_space(self) -> None:
+        """Pointe les stores vers l'espace du modèle actif (R6 : pas de mélange)."""
+        model_id = getattr(self.runtime_state, "active_embedding_model", None)
+        for attr in ("lesson_store", "mission_profile_store"):
+            store = getattr(self.runtime_state, attr, None)
+            if store is not None and hasattr(store, "use_embedding_model"):
+                try:
+                    store.use_embedding_model(model_id)
+                except Exception as e:
+                    Logger.warning(f"[Orchestrator] Espace mémoire {attr} : {e}")
 
     # =====================================================
     # CONFIGURATION RUNTIME
@@ -2382,6 +2428,7 @@ class Orchestrator(Supervisor, Entity):
             "lite" if (active_emb or "") == HashEmbeddingProvider.PROVIDER_ID
             else ("remote" if (active_emb or "").startswith("remote:") else "local")
         )
+        self._sync_memory_embedding_space()
 
         api_keys = payload.get("api_keys", {})
         runtime_config = payload.get("runtime_configuration", {})

@@ -30,6 +30,7 @@ class Actions:
     EMBEDDINGS_CATALOG = "embeddings.catalog"
     EMBEDDINGS_PREPARE = "embeddings.prepare"
     EMBEDDINGS_SET_DEFAULT = "embeddings.set_default"
+    EMBEDDINGS_CANCEL = "embeddings.cancel"
 
 class Events:
     RUNTIME_READY = "runtime.ready"

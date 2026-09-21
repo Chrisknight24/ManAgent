@@ -26,9 +26,35 @@ from core.constants import (
 
 class LessonStore:
 
-    def __init__(self, db_path: str = "memory.db"):
+    BASE_VEC_TABLE = "vec_lessons"
+
+    def __init__(self, db_path: str = "memory.db", embedding_model: Optional[str] = None):
         self.db_path = db_path
+        self.embedding_model = embedding_model
+        self._vec_table = self.BASE_VEC_TABLE
+        self._apply_embedding_space()
         self._initialize_db()
+
+    def _apply_embedding_space(self) -> None:
+        """Pointe vers les tables de l'espace du modèle (R6 : pas de mélange)."""
+        try:
+            from embeddings.catalog import vec_table, model_dim
+            self._vec_table = vec_table(self.BASE_VEC_TABLE, self.embedding_model)
+            self._vector_dim = model_dim(self.embedding_model, default=384)
+        except Exception:
+            self._vec_table = self.BASE_VEC_TABLE
+            self._vector_dim = 384
+
+    def use_embedding_model(self, model_id: Optional[str]) -> str:
+        """Bascule l'espace mémoire (hot-swap sûr : anciennes tables préservées)."""
+        self.embedding_model = model_id
+        self._apply_embedding_space()
+        try:
+            self._initialize_db()
+        except Exception:
+            pass
+        Logger.info(f"[LessonStore] Espace mémoire : {self._vec_table}")
+        return self._vec_table
 
     def _get_connection(self):
         return sqlite3.connect(self.db_path, check_same_thread=False)
@@ -122,14 +148,14 @@ class LessonStore:
                 self._ensure_column(conn, "lessons", "embedding", "BLOB")
 
                 self._ensure_extension_loaded(conn)
-                cursor.execute('''
-                    CREATE VIRTUAL TABLE IF NOT EXISTS vec_lessons USING vec0(
-                        embedding float[384]
+                cursor.execute(f'''
+                    CREATE VIRTUAL TABLE IF NOT EXISTS {self._vec_table} USING vec0(
+                        embedding float[{self._vector_dim}]
                     )
                 ''')
 
                 conn.commit()
-                Logger.info("[LessonStore] Table 'lessons' et 'vec_lessons' prêtes.")
+                Logger.info(f"[LessonStore] Table 'lessons' et '{self._vec_table}' prêtes.")
         except Exception as e:
             Logger.error(f"[LessonStore] Erreur d'initialisation : {e}")
 
@@ -168,7 +194,7 @@ class LessonStore:
                 
                 lesson_id = cursor.lastrowid
                 if blob:
-                    cursor.execute("INSERT INTO vec_lessons(rowid, embedding) VALUES (?, ?)", (lesson_id, blob))
+                    cursor.execute(f"INSERT INTO {self._vec_table}(rowid, embedding) VALUES (?, ?)", (lesson_id, blob))
                 conn.commit()
                 Logger.debug(f"[LessonStore] Nouvelle leçon (brute) : {scope} (polarity={polarity})")
         except Exception as e:
@@ -354,7 +380,7 @@ class LessonStore:
                 ))
                 new_id = cursor.lastrowid
                 if blob:
-                    cursor.execute("INSERT INTO vec_lessons(rowid, embedding) VALUES (?, ?)", (new_id, blob))
+                    cursor.execute(f"INSERT INTO {self._vec_table}(rowid, embedding) VALUES (?, ?)", (new_id, blob))
                 conn.commit()
                 Logger.info(f"[LessonStore] Leçon consolidée créée : id={new_id}, scope={scope}")
                 return new_id
@@ -531,7 +557,7 @@ class LessonStore:
                 cursor.execute('DELETE FROM lessons')
                 count = cursor.rowcount
                 try:
-                    cursor.execute('DELETE FROM vec_lessons')
+                    cursor.execute(f'DELETE FROM {self._vec_table}')
                 except Exception:
                     pass
                 conn.commit()

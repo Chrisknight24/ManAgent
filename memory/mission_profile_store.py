@@ -19,12 +19,15 @@ from utils.logger import Logger
 
 import threading
 
-# Module importé pour la constante DEFAULT_MODEL
-try:
-    from core.embedding_service import EmbeddingService
-    DEFAULT_EMBEDDING_MODEL = getattr(EmbeddingService, "DEFAULT_MODEL", 'sentence-transformers/all-MiniLM-L6-v2')
-except Exception:
-    DEFAULT_EMBEDDING_MODEL = 'sentence-transformers/all-MiniLM-L6-v2'
+# Modèle historique par défaut (import paresseux : ce module ne doit jamais
+# tirer torch au simple import, sinon les tests et le démarrage ralentissent).
+def _default_embedding_model() -> str:
+    try:
+        from core.embedding_service import EmbeddingService
+        return getattr(EmbeddingService, "DEFAULT_MODEL",
+                       'sentence-transformers/all-MiniLM-L6-v2')
+    except Exception:
+        return 'sentence-transformers/all-MiniLM-L6-v2'
 
 TABLE_NAME = "mission_profiles"
 VEC_TABLE_NAME = "vec_mission_profiles"
@@ -35,7 +38,7 @@ class MissionProfileStore:
     _instances: Dict[str, 'MissionProfileStore'] = {}
     _lock = threading.Lock()
 
-    def __new__(cls, db_path: str = "memory.db", *args, **kwargs):
+    def __new__(cls, db_path: str = "memory.db", embedding_model: Optional[str] = None, *args, **kwargs):
         norm_path = os.path.abspath(db_path)
         if norm_path not in cls._instances:
             with cls._lock:
@@ -45,13 +48,36 @@ class MissionProfileStore:
                     cls._instances[norm_path] = instance
         return cls._instances[norm_path]
 
-    def __init__(self, db_path: str = "memory.db"):
+    def __init__(self, db_path: str = "memory.db", embedding_model: Optional[str] = None):
         if getattr(self, "_initialized", False):
             return
         self.db_path = db_path
+        self.embedding_model = embedding_model
         self._dll_path = None  # Chemin de la DLL, détecté une seule fois
+        self._apply_embedding_space()
         self._initialize_db()
         self._initialized = True
+
+    def _apply_embedding_space(self) -> None:
+        """Pointe vers les tables de l'espace du modèle (R6 : pas de mélange)."""
+        try:
+            from embeddings.catalog import vec_table, model_dim
+            self._vec_table = vec_table(VEC_TABLE_NAME, self.embedding_model)
+            self._vector_dim = model_dim(self.embedding_model, default=VECTOR_DIM)
+        except Exception:
+            self._vec_table = VEC_TABLE_NAME
+            self._vector_dim = VECTOR_DIM
+
+    def use_embedding_model(self, model_id: Optional[str]) -> str:
+        """Bascule l'espace mémoire (hot-swap sûr : anciennes tables préservées)."""
+        self.embedding_model = model_id
+        self._apply_embedding_space()
+        try:
+            self._initialize_db()
+        except Exception:
+            pass
+        Logger.info(f"[MissionProfileStore] Espace mémoire : {self._vec_table}")
+        return self._vec_table
 
     def _get_connection(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path, check_same_thread=False)
@@ -166,8 +192,8 @@ class MissionProfileStore:
                 # Table virtuelle vectorielle sqlite-vec
                 try:
                     cursor.execute(f"""
-                        CREATE VIRTUAL TABLE IF NOT EXISTS {VEC_TABLE_NAME} USING vec0(
-                            embedding float[{VECTOR_DIM}]
+                        CREATE VIRTUAL TABLE IF NOT EXISTS {self._vec_table} USING vec0(
+                            embedding float[{self._vector_dim}]
                         )
                     """)
                 except Exception as ve:
@@ -388,7 +414,7 @@ class MissionProfileStore:
         Insère un MissionProfile vectoriel.
         """
         if embedding_model is None:
-            embedding_model = DEFAULT_EMBEDDING_MODEL
+            embedding_model = _default_embedding_model()
         if embedding_dimension is None:
             embedding_dimension = 384
 
@@ -419,7 +445,7 @@ class MissionProfileStore:
                 # Insertion dans la table virtuelle vectorielle si elle existe
                 try:
                     cursor.execute(f"""
-                        INSERT INTO {VEC_TABLE_NAME} (rowid, embedding)
+                        INSERT INTO {self._vec_table} (rowid, embedding)
                         VALUES (?, ?)
                     """, (profile_id, self._serialize_embedding(embedding)))
                 except Exception:
@@ -458,7 +484,7 @@ class MissionProfileStore:
                         p.embedding_dimension,
                         p.root_mission_id,
                         v.distance
-                    FROM {VEC_TABLE_NAME} v
+                    FROM {self._vec_table} v
                     JOIN {TABLE_NAME} p ON p.id = v.rowid
                     WHERE v.embedding MATCH ? AND k = ?
                 """
@@ -531,7 +557,7 @@ class MissionProfileStore:
 
                 placeholders = ",".join("?" for _ in ids)
                 try:
-                    cursor.execute(f"DELETE FROM {VEC_TABLE_NAME} WHERE rowid IN ({placeholders})", ids)
+                    cursor.execute(f"DELETE FROM {self._vec_table} WHERE rowid IN ({placeholders})", ids)
                 except Exception:
                     pass
 
@@ -575,7 +601,7 @@ class MissionProfileStore:
                 cursor.execute(f"DELETE FROM {TABLE_NAME}")
                 count = cursor.rowcount
                 try:
-                    cursor.execute(f"DELETE FROM {VEC_TABLE_NAME}")
+                    cursor.execute(f"DELETE FROM {self._vec_table}")
                 except Exception:
                     pass
                 conn.commit()

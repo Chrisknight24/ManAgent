@@ -45,6 +45,7 @@ class SentenceTransformerProvider(EmbeddingProvider):
         self._model: Optional["SentenceTransformer"] = None
         self._dimension: Optional[int] = None
         self._loaded = False
+        self._cancel_requested = False
 
     @property
     def model_name(self) -> str:
@@ -64,6 +65,14 @@ class SentenceTransformerProvider(EmbeddingProvider):
     def is_loaded(self) -> bool:
         return self._loaded
 
+    def cancel(self) -> None:
+        """Demande l'annulation du chargement en cours (best-effort).
+
+        Le téléchargement HuggingFace partiel est repris automatiquement
+        au prochain essai (cache `.incomplete`). Vérifié avant/après.
+        """
+        self._cancel_requested = True
+
     async def initialize(self) -> None:
         """Charge le modèle. Envoie des événements de progression."""
         if self._loaded:
@@ -76,6 +85,16 @@ class SentenceTransformerProvider(EmbeddingProvider):
             )
 
         Logger.info(f"[SentenceTransformerProvider] Démarrage chargement : {self._model_id}")
+
+        if self._cancel_requested:
+            Logger.info(f"[SentenceTransformerProvider] Chargement annulé avant démarrage : {self._model_id}")
+            if self._emit:
+                await self._emit("EMBEDDING_MODEL_CANCELLED", {
+                    "model_id": self._model_id,
+                    "display_name": self._display_name,
+                    "status": "cancelled",
+                })
+            raise asyncio.CancelledError(f"Chargement annulé : {self._model_id}")
 
         if self._emit:
             await self._emit("EMBEDDING_MODEL_LOADING", {
@@ -105,6 +124,17 @@ class SentenceTransformerProvider(EmbeddingProvider):
 
             self._dimension = dim
             self._loaded = True
+
+            if self._cancel_requested:
+                self._loaded = False
+                Logger.info(f"[SentenceTransformerProvider] Chargement annulé après download : {self._model_id}")
+                if self._emit:
+                    await self._emit("EMBEDDING_MODEL_CANCELLED", {
+                        "model_id": self._model_id,
+                        "display_name": self._display_name,
+                        "status": "cancelled",
+                    })
+                raise asyncio.CancelledError(f"Chargement annulé : {self._model_id}")
 
             Logger.info(f"[SentenceTransformerProvider] Modèle chargé : {self._model_id} (dim={dim})")
 

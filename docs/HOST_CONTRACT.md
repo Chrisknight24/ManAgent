@@ -82,7 +82,8 @@ L'hôte peut déclarer ses capacités dans le manifest : `"capabilities":["mouse
 Séquence recommandée pour l'écran modèles de l'hôte :
 1. `{"action":"embeddings.catalog","payload":{}}` → `{"models":[{"id","display_name","type","languages","size_mb","dim","installed","size_bytes","active"}]}`. Remplir la liste + tailles + état installé. Jamais de modèle en dur côté hôte.
 2. Bouton Télécharger → `{"action":"embeddings.prepare","payload":{"id":"..."}}` → events `embedding.download_started/finished/error` (+ progression `EMBEDDING_MODEL_LOADING/...` pour le local). Option `force:true` pour re-télécharger, `set_default:true` pour activer de suite.
-3. Bouton Par défaut → `{"action":"embeddings.set_default","payload":{"id":"..."}}` → bascule à chaud (réponse + event `embedding.active_changed`). Erreur claire si non installé (« appelez embeddings.prepare d'abord »).
+3. Bouton Par défaut → `{"action":"embeddings.set_default","payload":{"id":"..."}}` → bascule à chaud (réponse + event `embedding.active_changed`). Erreur claire si non installé (« appelez embeddings.prepare d'abord »). Mémoire séparée par modèle : pas de mélange, anciennes données préservées.
+4. Bouton Annuler (pendant un download) → `{"action":"embeddings.cancel","payload":{"id":"..."}}` (reprise auto au prochain prepare). Le prepare vérifie l'espace disque avant et refuse clairement si insuffisant.
 4. Alternative en une fois : `runtime.configure {"embeddings":{"mode":"lite|local|remote",...}}` (voir §3b).
 
 ## 4. Actions supportées (voir `core/constants.py:8`)
@@ -128,6 +129,7 @@ ManAgent affiche sa version via `pyproject.toml` / `VERSION`. L'hôte envoie `ho
 - `write(json + "\n")`, `readLine()` → `QJsonDocument::fromJson`
 - Timeout `runtime.ready` : 15s. Timeout `chat.send` : selon mission, écouter `heartbeat`.
 - Ne jamais parser stdout comme du texte, toujours comme JSON ligne par ligne.
-- Règle v0 : ne traiter que les lignes qui commencent par `{`. Les lignes `[INFO]/[WARNING]`
-  sont des logs mélangés sur stdout (limite connue, logs vers stderr prévu plus tard).
+- Règle v0 : ne traiter que les lignes qui commencent par `{` (sécurité).
+  Les logs vont déjà sur stderr côté ManAgent (vérifié : seul le JSON va sur
+  stdout) ; le filtre reste en ceinture + bretelles.
 - Ne jamais aller lire les `.py`, utiliser ce contrat + `docs/protocol.md` + `docs/host.manifest.example.json`.

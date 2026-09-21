@@ -158,3 +158,87 @@ def catalog_status(
         st = states.get(e["id"], {"installed": False, "size_bytes": 0})
         rows.append({**e, **st, "active": e["id"] == active_id})
     return rows
+
+
+# Espace memoire historique : ses vecteurs existent deja sans suffixe.
+# Le garder sans suffixe preserve les donnees existantes.
+HISTORIC_MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
+
+
+def memory_namespace(model_id: Optional[str]) -> str:
+    """Suffixe d'espace memoire pour un modele (R6 : jamais de melange).
+
+    "" pour le modele historique (compat donnees existantes),
+    "__<8 hex>" sinon. Stable, charset SQLite sûr.
+    """
+    import hashlib
+
+    if not model_id or model_id == HISTORIC_MODEL_ID:
+        return ""
+    return "__" + hashlib.sha1(model_id.encode("utf-8")).hexdigest()[:8]
+
+
+def vec_table(base: str, model_id: Optional[str]) -> str:
+    """Nom de table vectorielle namespacée. Ex : vec_lessons__a1b2c3d4."""
+    return base + memory_namespace(model_id)
+
+
+def model_dim(model_id: Optional[str], default: int = 384,
+              extra: Optional[List[Dict[str, Any]]] = None) -> int:
+    """Dimension d'embedding d'apres le catalogue, default sinon."""
+    if not model_id:
+        return default
+    for e in get_catalog(extra):
+        if e["id"] == model_id and e.get("dim"):
+            try:
+                return int(e["dim"])
+            except (TypeError, ValueError):
+                return default
+    return default
+
+
+def precheck_download(model_id: Optional[str],
+                      cache_dir: Optional[Path] = None,
+                      extra: Optional[List[Dict[str, Any]]] = None,
+                      check_network: bool = False) -> Dict[str, Any]:
+    """Verifie qu'un telechargement est raisonnable AVANT de lancer.
+
+    Retour : {"ok", "reason", "free_bytes", "needed_bytes", "network_ok"}.
+    - lite/remote : rien a telecharger -> ok.
+    - local : marge 30% sur size_mb catalogue + espace disque du cache.
+    - Reseau : test best-effort (huggingface.co:443, 5 s) si check_network.
+    Fonction pure cote disque (testable).
+    """
+    import shutil
+
+    if not model_id or model_id in ("lite-hash", "hash", "lite") \
+            or model_id.startswith("remote:"):
+        return {"ok": True, "reason": "nothing to download",
+                "free_bytes": -1, "needed_bytes": 0, "network_ok": None}
+    size_mb = 0
+    for e in get_catalog(extra):
+        if e["id"] == model_id:
+            size_mb = int(e.get("size_mb") or 0)
+            break
+    needed = int(size_mb * 1024 * 1024 * 1.3)
+    base = Path(cache_dir) if cache_dir else default_cache_dir()
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        free = shutil.disk_usage(str(base)).free
+    except OSError as exc:
+        return {"ok": False, "reason": f"cache inaccessible : {exc}",
+                "free_bytes": 0, "needed_bytes": needed, "network_ok": None}
+    if free < needed:
+        return {"ok": False,
+                "reason": f"espace insuffisant : besoin ~{needed // 1048576} Mo, libre {free // 1048576} Mo",
+                "free_bytes": free, "needed_bytes": needed, "network_ok": None}
+    network_ok = None
+    if check_network:
+        import socket
+        try:
+            socket.create_connection(("huggingface.co", 443), timeout=5).close()
+            network_ok = True
+        except OSError:
+            network_ok = False
+    return {"ok": True, "reason": "ok", "free_bytes": free,
+            "needed_bytes": needed, "network_ok": network_ok}

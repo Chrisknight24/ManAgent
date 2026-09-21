@@ -80,8 +80,9 @@ Toi (hôte)                    ManAgent
 | Action | À quoi ça sert | Exemple `payload` |
 |---|---|---|
 | `embeddings.catalog` | liste des modèles + installés ou pas | `{}` |
-| `embeddings.prepare` | télécharger/précharger un modèle (avec progression) | `{"id": "sentence-transformers/all-MiniLM-L6-v2", "force": false, "set_default": false}` |
-| `embeddings.set_default` | changer de modèle à chaud | `{"id": "lite-hash"}` |
+| `embeddings.prepare` | télécharger/précharger un modèle (avec progression). Pré-check espace disque avant ; erreur claire si insuffisant | `{"id": "sentence-transformers/all-MiniLM-L6-v2", "force": false, "set_default": false}` |
+| `embeddings.cancel` | annuler un téléchargement (reprise auto au prochain prepare) | `{"id": "..."}` |
+| `embeddings.set_default` | changer de modèle à chaud. Mémoire séparée par modèle (anciennes données préservées, non mélangées) | `{"id": "lite-hash"}` |
 
 ### Compétences (skills : brouillon → test → production → quarantaine)
 | Action | À quoi ça sert | Exemple `payload` |
@@ -123,6 +124,7 @@ Action inconnue → `{"type":"error","message":"Unknown action: ..."}`. Jamais d
 }
 ```
 - `hitl_policy` : strict (demande souvent), balanced, autonomous (demande rarement).
+- `environment` : `simulated` = dev/tests, `real` = hôte production.
 - `protocol_version` : version du langage ("1"). Renvoyée dans `runtime.configured`.
   Absente = accepté + avertissement (transition). Différente = erreur bruyante
   `protocol version mismatch`, pas de session. À monter à chaque changement incompatible.
@@ -148,7 +150,8 @@ Mission : `mission.started`, `plan.generated`, `step.status_changed`, `plan.aban
 Streaming : `thinking.started`, `response.chunk`, `response.completed`, `thinking.finished`.
 Outils : `tool.requested`, `executor.run_tool`, `tools_manager.decision/execution/result/error`.
 Skills : `checkpoint.reached`, `breakout.occurred`, `execution.completed`, `skill.state_changed`.
-Embeddings : `embedding.download_started/finished/error`, `embedding.active_changed`, `host.manifest_updated`.
+Embeddings : `embedding.download_started/finished/error/cancelled`, `embedding.active_changed`, `host.manifest_updated`.
+Séquence : l'hôte appelle `embeddings.catalog` juste après `runtime.configured` (attendre `runtime.ready` sinon).
 Apprentissage : `learner.analyze_started/finished`, `discovery.session_start/step/session_end`.
 
 ## 9. Règles du jeu
