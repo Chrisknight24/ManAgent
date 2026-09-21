@@ -29,6 +29,7 @@ a = Analysis(
         ("prompts", "prompts"),
         ("rules.md", "."),
         ("locale", "locale"),
+        ("pyproject.toml", "."),
     ],
     hiddenimports=[
         "pydantic", "jinja2", "aiohttp", "httpx",

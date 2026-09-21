@@ -1,0 +1,9 @@
+USER_LOG — Colle tes logs ci-dessous (un bloc par test, avec date/heure).
+Fichier local uniquement : jamais envoye sur git (voir .gitignore).
+Inutile de tout mettre dans le tchat : ecris ici, dis-moi juste "log ajoute".
+
+--------------------------------------------------------------------
+[AAAA-MM-JJ HH:MM] Test : ...
+--------------------------------------------------------------------
+(colle ici)
+
