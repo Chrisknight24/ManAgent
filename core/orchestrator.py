@@ -1765,6 +1765,32 @@ class Orchestrator(Supervisor, Entity):
         Logger.info(f"[Orchestrator] ⚖️ Validation du plan du Solver '{child_solver_id}' (is_root={is_root}, objectif cible : '{target_goal}')")
         await self.propagate_event(Events.STATUS_UPDATE, {"message": _("L'Orchestrateur vérifie la conformité et la sécurité du plan généré...")})
 
+        # Référentiels déterministes pour le gate fail-fast (aucune hallucination
+        # d'outil/skill ne passe le juge sans appel LLM).
+        _known_tools: set = set()
+        _prod_skills: set = set()
+        try:
+            tm = getattr(self.runtime_state, "tools_manager", None)
+            if tm is not None and hasattr(tm, "known_tool_names"):
+                _known_tools = set(tm.known_tool_names())
+        except Exception:
+            pass
+        try:
+            reg = getattr(self.runtime_state, "skill_registry", None)
+            if reg is not None and hasattr(reg, "list_all_skills"):
+                for _s in reg.list_all_skills() or []:
+                    if isinstance(_s, dict) and str(_s.get("state", "")) == "PRODUCTION":
+                        _sid = _s.get("id") or _s.get("skill_id")
+                        if _sid:
+                            _prod_skills.add(str(_sid))
+        except Exception:
+            pass
+        _availability_summary = (
+            f"Outils disponibles ({len(_known_tools)}) : "
+            + (", ".join(sorted(_known_tools)[:40]) if _known_tools else "(aucun)")
+            + f" | Skills en PRODUCTION ({len(_prod_skills)}) : "
+            + (", ".join(sorted(_prod_skills)[:40]) if _prod_skills else "(aucun)")
+        )
         validator = PlanValidator(
             llm=self.llm,
             prompt_loader=self._prompt_loader,
@@ -1773,6 +1799,9 @@ class Orchestrator(Supervisor, Entity):
             request_human_confirmation=self._request_human_confirmation,
             hitl_policy=getattr(self.runtime_state, "hitl_policy", "balanced"),
             human_validation_history=self.runtime_state.approved_human_actions_by_mission.get(mission_id, []),
+            available_tools=_known_tools,
+            production_skills=_prod_skills,
+            availability_summary=_availability_summary,
         )
         outcome = await validator.validate(
             plan=plan,
@@ -2302,10 +2331,14 @@ class Orchestrator(Supervisor, Entity):
         if "absent" in pv_msg:
             Logger.warning(f"[Orchestrator] {pv_msg}")
         self.runtime_state.protocol_version = payload.get("protocol_version") or PROTOCOL_VERSION
+        # Secrets via environnement : "env:NOM" (jamais en clair, rotation par listes).
+        from utils.config import resolve_payload_env
+        payload, _env_missing = resolve_payload_env(payload)
+        for _m in _env_missing:
+            Logger.warning(f"[Orchestrator] Variable d'environnement absente : {_m} (chaîne vide utilisée).")
         self.runtime_state.cancel_requested = False
         if hasattr(self.runtime_state, "cancel_requested_for_turn"):
             self.runtime_state.cancel_requested_for_turn = False
-        payload = packet.payload
         self.runtime_state.system_prompt = payload.get("system_prompt", "")
         self.runtime_state.language = payload.get("language", "en")
         self.runtime_state.environment = payload.get("environment", "simulated")

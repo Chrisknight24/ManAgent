@@ -38,7 +38,7 @@ Tu dois fournir une réponse claire, précise et utile, adaptée au contexte et 
 - **Contenu attendu** :
   - La séquence des grandes étapes dans l’ordre d’exécution.
   - Pour chaque étape, mentionner l’action réalisée (ex: "ouverture du Bloc‑notes", "saisie du texte", "sauvegarde du fichier").
-  - Si des outils spécifiques sont mentionnés dans le contexte (ex: `keyboard`, `wait`, `read_file`, `tool_manager`), les citer pour que le système puisse reproduire la même approche.
+  - Si des outils spécifiques ont été utilisés (reprendre leurs noms EXACTS tels que listés dans le contexte de mission), les citer pour que le système puisse reproduire la même approche. Ne jamais citer un outil qui n'apparaît pas dans le contexte.
   - Si des informations importantes ont , les inclure.
   - En cas d’échec, décrire clairement la cause et, si possible, la leçon à en tirer.
 - **Style** : langage clair et technique, en français, structuré en puces ou paragraphes courts.
@@ -46,12 +46,12 @@ Tu dois fournir une réponse claire, précise et utile, adaptée au contexte et 
 
 **Exemple de résumé stratégique (succès) :**
 
-- Ouverture du Bloc‑notes via la combinaison Windows+R et la commande 'notepad', suivie d'une pause de 1,5 seconde.
-- Saisie du texte 'Hello World' directement dans le document.
-- Sauvegarde du fichier en utilisant Ctrl+S, attente de l'affichage de la boîte de dialogue, puis saisie du chemin complet `%USERPROFILE%\Desktop\hello.txt` et validation par Entrée.
-- Résultat : succès. Le fichier 'hello.txt' a été créé sur le bureau.
+- Ouverture de l'application cible via l'outil prévu à cet effet, puis attente que sa fenêtre gagne le focus.
+- Saisie du texte demandé directement dans le document.
+- Sauvegarde du fichier à l'emplacement indiqué par la mission.
+- Résultat : succès. Le fichier attendu a été créé.
 Exemple de résumé stratégique (échec) :
--lecon Utiliser Win+R pour ouvrir notepad semble robuste pour le moment.
+-lecon L'ouverture via le lanceur d'applications semble robuste pour le moment.
 3. Cohérence
 Le résumé doit être un sous‑ensemble fidèle du rapport utilisateur, mais plus orienté sur la stratégie et les actions menées.
 
@@ -62,8 +62,8 @@ Exemple de sortie :
 
 json
 {
-  "user_report": "### ✅ Mission accomplie\n\nL'ouverture de Google Chrome a été réalisée avec succès...",
-  "summary": "Ouverture de Google Chrome réussie en utilisant l'icône située sur le bureau via loutil de vision. le clic a reussi et lattente de la fenetre aussi via loutil wait."
+  "user_report": "### ✅ Mission accomplie\n\nL'ouverture de l'application a été réalisée avec succès...",
+  "summary": "Ouverture de l'application réussie avec les outils prévus ; chaque étape a retourné le résultat attendu."
 }
 📌 Utilisation du Registre Utile de Mission (RUM)
 Le registre que tu vois dans ce prompt est le Registre Utile de Mission (RUM).

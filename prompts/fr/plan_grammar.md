@@ -50,9 +50,9 @@ Les outils sont **stateless (sans mémoire)** et ne peuvent pas définir de vari
 - **`tool_call` (PRIORITÉ ABSOLUE / COÛT ULTRA-FAIBLE)** :
   - Action technique atomique directe (exécution d'outil, commande, interaction UI, clic, frappe clavier).
   - **Coût** : Zéro surcharge d'orchestration, exécution immédiate et déterministe.
-  - ⚠️ **RÈGLE STRICTE SCHEMA PYDANTIC** : Pour toute étape de type `tool_call`, le champ `tool_name` est **OBLIGATOIRE** et doit correspondre exactement au nom d'un outil disponible (ex: `"vision"`, `"keyboard"`, `"mouse"`, `"wait"`, `"tool_manager"`, `"execute_skill"`). Il est **STRICTEMENT INTERDIT** de laisser `tool_name` à `null` ou vide.
-  - ⚡ **UTILISATION DES SKILLS (`execute_skill`)** : Tu ne dois utiliser `execute_skill` QUE ET UNIQUEMENT SI un Skill pré-qualifié correspondant est explicitement listé dans la section des Skills disponibles du prompt. S'il n'y a AUCUN Skill fourni dans le prompt (section absente ou vide), il est STRICTEMENT INTERDIT d'invoquer ou d'inventer un `skill_id` avec `execute_skill` ; tu dois impérativement construire le plan avec les outils atomiques fournis (`keyboard`, `mouse`, `vision`, `wait`, etc.).
+  - ⚠️ **RÈGLE STRICTE SCHEMA PYDANTIC** : Pour toute étape de type `tool_call`, le champ `tool_name` est **OBLIGATOIRE** et doit correspondre EXACTEMENT au nom d'un outil de la section des outils disponibles ci-dessus (liste injectée dynamiquement pour cette mission — jamais un autre nom). Il est **STRICTEMENT INTERDIT** de laisser `tool_name` à `null`, vide ou inventé.
 
+  - ⚡ **UTILISATION DES SKILLS (`execute_skill`)** : Tu ne dois utiliser `execute_skill` QUE ET UNIQUEMENT SI un Skill pré-qualifié correspondant est explicitement listé dans la section des Skills disponibles du prompt. Si AUCUN Skill ET AUCUN outil ne sont listés (sections absentes ou vides), il est STRICTEMENT INTERDIT d'invoquer `execute_skill`, d'inventer un `skill_id` ou un `tool_name` : termine le plan par une étape `direct_answer` motivée qui explique précisément ce qui manque pour réaliser la mission.
 - **`abstract_task` (RECOURS EXCEPTIONNEL / COÛT TRÈS ÉLEVÉ)** :
   - Délégation d'une **séquence d'actions concrètes complexes** sur l'environnement hôte nécessitant une décomposition autonome.
   - ⚠️ **Coût réel majeur** : 1 `abstract_task` déclenche le recrutement d'un sous-Solver complet = 1 appel LLM Feasibility + 1 appel LLM Planner + N exécutions d'outils + 1 appel LLM Validateur/Convergence. C'est 5 à 10 fois plus coûteux en tokens et en temps qu'un `tool_call`.
@@ -61,7 +61,7 @@ Les outils sont **stateless (sans mémoire)** et ne peuvent pas définir de vari
 - **⛔ RÈGLE ABSOLUE SUR L'ANALYSE DE DONNÉES ET CAPTURE D'ÉCRAN (`llm_analyze_data`)** :
   - L'outil d'analyse `llm_analyze_data` (via `tool_manager`) traite **uniquement des données déjà présentes dans une variable du registre** produite par une étape antérieure (ex: `source: "$@_data_vision_result"`).
   - Il **n'existe pas de source magique matérielle** (comme `"current_screen"` ou `"screen"`).
-  - **Pour analyser l'écran ou une fenêtre** : Tu **DOIS D'ABORD** exécuter un outil de capture (ex: `vision` en mode OCR ou détection d'éléments) avec un `output_variable_name` (ex: `data_screen_ocr`), puis passer cette variable `$@_data_screen_ocr` à `llm_analyze_data`.
+  - **Pour analyser un contenu visuel** : Tu **DOIS D'ABORD** exécuter un outil de capture listé ci-dessus (celui dont la description mentionne capture ou détection) avec un `output_variable_name` (ex: `data_screen_ocr`), puis passer cette variable `$@_data_screen_ocr` à `llm_analyze_data`.
   - Il est **FORMELLEMENT INTERDIT** d'utiliser une `abstract_task` pour inspecter, tester, vérifier, filtrer, décoder ou lire le contenu d'une variable `$@_data_xxx` déjà présente dans le registre. Utilisez un `tool_call` direct.
 
 - **`direct_answer`** : réponse finale à l'utilisateur (succès, échec, ou refus).

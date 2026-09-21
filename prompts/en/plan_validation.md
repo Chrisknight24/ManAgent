@@ -43,6 +43,17 @@ Ton rôle est STRICTEMENT délimité aux 3 missions suivantes :
 
 ---
 
+## 🧰 Disponibilités vérifiées (fait déterministe, pas une opinion)
+
+{{ availability_summary }}
+
+**Règles :**
+- Un plan qui n'utilise QUE des outils/skills listés ci-dessus est recevable sur ce point.
+- Un refus motivé par l'absence d'outils (« aucun outil disponible pour X ») est un plan VALIDE (`is_conformant: true`) quand la liste ci-dessus est vide ou ne couvre pas le besoin — ne demandez jamais de « tenter quand même » l'inexistant.
+- Ne contredisez jamais un refus déterministe déjà prononcé en amont.
+
+---
+
 ## 🗺️ Arbre d'exécution simplifié de la mission
 
 {{ mission_history_summary }}

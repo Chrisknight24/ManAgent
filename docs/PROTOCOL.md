@@ -124,6 +124,7 @@ Action inconnue → `{"type":"error","message":"Unknown action: ..."}`. Jamais d
 }
 ```
 - `hitl_policy` : strict (demande souvent), balanced, autonomous (demande rarement).
+- Secrets : écrivez `"env:NOM_VARIABLE"` au lieu de la clé en clair (ex : `"api_key": "env:MANAGENT_GEMINI_KEY"`). Listes acceptées pour la rotation multi-clés. Variable absente = chaîne vide + avertissement.
 - `environment` : `simulated` = dev/tests, `real` = hôte production.
 - `protocol_version` : version du langage ("1"). Renvoyée dans `runtime.configured`.
   Absente = accepté + avertissement (transition). Différente = erreur bruyante

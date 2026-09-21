@@ -352,6 +352,30 @@ class ToolsManager(Entity):
         internal_tools = self._get_internal_tools_view()
         return external_tools + internal_tools
 
+    def known_tool_names(self) -> set:
+        """Noms d'outils connus (externes + internes + manifeste), sans valider les args.
+
+        Sert au gate déterministe de validation des plans (fail-fast).
+        """
+        names = set(self._tools.keys())
+        names.update(self._internal_tool_handlers.keys())
+        try:
+            names.update(self._internal_tools_metadata.keys())
+        except AttributeError:
+            pass
+        names.update(("tool_manager", "analyze_data", "load_literal_data", "execute_skill"))
+        manifest = self._host_manifest
+        if manifest is None and self.runtime_state:
+            manifest = getattr(self.runtime_state, "host_manifest", None)
+        if manifest:
+            for t in getattr(manifest, "tools", []) or []:
+                if isinstance(t, dict) and t.get("name"):
+                    names.add(t["name"])
+            for c in getattr(manifest, "capabilities", []) or []:
+                if isinstance(c, str) and c:
+                    names.add(c)
+        return {n for n in names if n}
+
     def validate_tool_call(self, tool_name: str, arguments: dict) -> bool:
         """
         Valide un appel d'outil de manière strictement agnostique.

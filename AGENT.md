@@ -31,6 +31,7 @@ GO REQUIS : oui
 - `requirements.txt` / `pyproject.toml` doivent refléter les vrais imports.
 - Tests : si un test échoue après un changement code, mettre à jour le test OU corriger le code, jamais ignorer.
 - Chaque mission ajoute des tests rapides (fonctions pures de préférence, mS pas minutes).
+- Référence de vérité pour les missions : les logs de l'HÔTE (pas la console ManAgent). Toujours trancher : problème hôte vs problème cerveau, en restant agnostique des deux côtés.
 - Docs avant code pour toute feature visible.
 
 ## 4. Agnosticisme ManAgent (CRITIQUE, non négociable)

@@ -44,6 +44,41 @@ def _normalize_text(text: str) -> str:
     return t
 
 
+def find_unknown_plan_tools(plan: Any, known_tool_names=None,
+                            production_skill_ids=None) -> List[str]:
+    """Gate déterministe (fail-fast) : outils/skills du plan qui N'EXISTENT PAS.
+
+    - Étapes `tool_call` avec `tool_name` hors `known_tool_names` → "tool:<nom>".
+    - `execute_skill` avec `skill_id` hors `production_skill_ids` → "skill:<id>".
+    - Si les référentiels sont None → pas de vérification (rétro-compat).
+    Fonction pure, sans LLM, testable vite.
+    """
+    if known_tool_names is None and production_skill_ids is None:
+        return []
+    known = set(known_tool_names or [])
+    prod = set(production_skill_ids or [])
+    unknown: List[str] = []
+    for step in getattr(plan, "steps", []) or []:
+        stype = getattr(getattr(step, "type", None), "value", getattr(step, "type", None))
+        if stype != "tool_call":
+            continue
+        tname = (getattr(step, "tool_name", None) or "").strip()
+        if not tname or tname not in known:
+            unknown.append(f"tool:{tname or '?'}")
+            continue
+        if tname == "execute_skill" and production_skill_ids is not None:
+            sid = ""
+            try:
+                import json as _json
+                args = _json.loads(getattr(step, "tool_args_json", "{}") or "{}")
+                sid = str(args.get("skill_id", "") or "").strip()
+            except Exception:
+                sid = ""
+            if not sid or sid not in prod:
+                unknown.append(f"skill:{sid or '?'}")
+    return unknown
+
+
 class PlanValidationOutcome:
     """
     Résultat riche de la validation. Remplace le simple bool historique de
@@ -91,6 +126,9 @@ class PlanValidator:
         ] = None,
         hitl_policy: str = "balanced",
         human_validation_history: Optional[List[Dict[str, Any]]] = None,
+        available_tools: Optional[Set[str]] = None,
+        production_skills: Optional[Set[str]] = None,
+        availability_summary: Optional[str] = None,
     ):
         self._llm = llm
         self._prompt_loader = prompt_loader
@@ -99,6 +137,9 @@ class PlanValidator:
         self._request_human_confirmation = request_human_confirmation
         self._hitl_policy = hitl_policy or "balanced"
         self._human_validation_history = human_validation_history or []
+        self._available_tools = set(available_tools) if available_tools else None
+        self._production_skills = set(production_skills) if production_skills else None
+        self._availability_summary = availability_summary or ""
 
     def _summarize_human_validation_history(self) -> str:
         """Synthétise l'historique des arbitrages humains survenus durant la mission courante."""
@@ -401,6 +442,23 @@ class PlanValidator:
         all_warnings.extend(recursion_warnings)
         pattern_warning = "\n\n".join(all_warnings) if all_warnings else None
 
+        # Gate déterministe (fail-fast) : outil/skill inexistant = refus net,
+        # SANS appel LLM (économise tentatives + temps + coût).
+        unknown = find_unknown_plan_tools(
+            plan, self._available_tools, self._production_skills
+        )
+        if unknown:
+            details = ", ".join(unknown[:8])
+            return PlanValidationOutcome(
+                is_valid=False,
+                reason=_(
+                    "Plan refusé sans appel au juge : outil/skill inexistant ({details}). "
+                    "N'utilisez que les outils listés et les skills en PRODUCTION ; "
+                    "sinon terminez en réponse directe motivée."
+                ).format(details=details),
+                risk_level=RiskLevel.MEDIUM,
+            )
+
         mission_history_summary = self.summarize_mission_history(mission_history_tree)
         declared_irreversible = [s.id for s in plan.steps if getattr(s, "is_irreversible", False)]
 
@@ -415,6 +473,9 @@ class PlanValidator:
             declared_irreversible_steps=declared_irreversible,
             hitl_policy=self._hitl_policy,
             human_validation_history=self._summarize_human_validation_history(),
+            availability_summary=self._availability_summary or _(
+                "(disponibilités non transmises — jugez sur le plan seul)"
+            ),
         )
 
         try:
