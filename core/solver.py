@@ -374,6 +374,9 @@ class Solver(Supervisor, Entity):
                 final_result = None
                 execution_attempt = 0
                 attempt_counter = 0
+                # Anti faux-succès (Alerte 1) : cumul inter-tentatives.
+                seen_tool_steps_total = 0
+                material_success_total = 0
 
                 while execution_attempt < MAX_EXECUTION_TRIES:
                     if self.runtime_state.cancel_requested:
@@ -557,7 +560,26 @@ class Solver(Supervisor, Entity):
                         self.context = result.final_context
                         self.current_attempt.ended_at = time.time()
 
+                        try:
+                            seen_tool_steps_total += sum(
+                                1 for s in (proposed_plan.steps or [])
+                                if getattr(getattr(s, "type", None), "value", getattr(s, "type", None)) == "tool_call"
+                            )
+                            material_success_total += int(getattr(result, "material_success_count", 0) or 0)
+                        except Exception:
+                            pass
                         if result.status == ExecutionStatus.SUCCESS:
+                            from core.plan_models import is_mission_success
+                            _ok, _why = is_mission_success(
+                                seen_tool_steps_total > 0, material_success_total
+                            )
+                            if not _ok:
+                                Logger.error(f"[Solver:{self.id}] ❌ Faux-succès bloqué : {_why}")
+                                self.current_attempt.outcome = "failed"
+                                self.current_attempt.failure_class = FailureClass.EXECUTION_FAILURE
+                                self.current_attempt.failure_reason = _why
+                                self.context += _("\n[Échec] {}.").format(_why)
+                                continue
                             self.current_attempt.outcome = "success"
                             self.current_attempt.failure_class = FailureClass.NONE
                             success = True

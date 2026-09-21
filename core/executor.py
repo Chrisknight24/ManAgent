@@ -49,6 +49,9 @@ class Executor:
         user_responses: List[str] = []
         executed_steps_trace: List[str] = []
         accumulated_context = current_context
+        # Anti faux-succès (Alerte 1) : seules les actions matérielles comptent.
+        tool_call_count = 0
+        material_success_count = 0
 
         if not hasattr(self.solver.runtime_state, 'mission_rum'):
             self.solver.runtime_state.mission_rum = {}
@@ -118,6 +121,8 @@ class Executor:
 
                             continue
 
+                    if step.type == StepType.TOOL_CALL:
+                        tool_call_count += 1
                     Logger.info(f"[Executor] ⚙️ Traitement de l'étape [{step.id}] -> {step.description}")
                     await self.solver.propagate_event(Events.STEP_STATUS_CHANGED, {
                         "step_id": step.id,
@@ -230,6 +235,8 @@ class Executor:
                     if convergence.is_convergent:
                         Logger.info(f"[Executor] ✅ Étape [{step.id}] validée.")
                         step.status = ExecutionStatus.SUCCESS
+                        if step.type == StepType.TOOL_CALL:
+                            material_success_count += 1
                         # Ne pas tronquer l'output pour le contexte final, seule l'affichage dans la trace est modifié
                         step.result_context = execution_output
                         node.status = ExecutionStatus.SUCCESS
@@ -315,7 +322,9 @@ class Executor:
                 final_context=final_context,
                 response=final_user_text or _("Mission [{}] accomplie.").format(self.solver.id),
                 resolved_data=self.solver.variable_registry,
-                failure_class=None
+                failure_class=None,
+                material_success_count=material_success_count,
+                tool_call_count=tool_call_count,
             )
 
         except Exception as e:

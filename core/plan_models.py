@@ -207,6 +207,8 @@ class SolverResult(BaseModel):
     execution_tree: Optional[ExecutionTree] = None
     failure_bundle: Optional[Any] = None
     breakout_report: Optional[Any] = None
+    material_success_count: int = Field(default=0, description=_("Étapes tool_call convergées (actions matérielles réussies)."))
+    tool_call_count: int = Field(default=0, description=_("Étapes tool_call tentées (hors sautées)."))
     failure_class: Optional[FailureClass] = Field(
         None,
         description=_("Classe d'échec détectée par l'Executor (EXECUTION_FAILURE ou CONVERGENCE_FAILURE).")
@@ -214,6 +216,25 @@ class SolverResult(BaseModel):
     target_entity: Optional[str] = Field(
         None,
         description=_("Entité tenue pour responsable, fixée par le code au point d'échec exact (Executor pour EXECUTION_FAILURE/CONVERGENCE_FAILURE).")
+    )
+
+
+def is_mission_success(has_tool_steps: bool, material_successes: int) -> tuple:
+    """Règle anti faux-succès (Alerte 1) : une mission n'est un succès que si
+    une action MATÉRIELLE a réussi — les affirmations (direct_answer) ne
+    comptent jamais.
+
+    - Aucune étape outil dans aucun plan -> (True, "") : réponse/refus direct OK.
+    - Étapes outil vues -> (material_successes > 0, raison sinon).
+    Fonction pure, testable vite.
+    """
+    if not has_tool_steps:
+        return True, ""
+    if material_successes > 0:
+        return True, ""
+    return False, (
+        "Aucune action matérielle réussie : la mission ne peut pas être "
+        "déclarée succès sur de simples affirmations."
     )
 
 

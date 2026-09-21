@@ -4,7 +4,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.plan_models import Plan, PlanStep, StepType
+from core.plan_models import Plan, PlanStep, StepType, is_mission_success
 from core.plan_validator import find_unknown_plan_tools
 
 
@@ -46,3 +46,10 @@ def test_non_tool_steps_ignored():
     plan = _plan(PlanStep(id="s1", description="d", type=StepType.DIRECT_ANSWER,
                           expected_result="any"))
     assert find_unknown_plan_tools(plan, set(), set()) == []
+
+
+def test_mission_success_needs_material_action():
+    assert is_mission_success(False, 0) == (True, "")
+    assert is_mission_success(True, 2)[0] is True
+    ok, why = is_mission_success(True, 0)
+    assert ok is False and "matérielle" in why
