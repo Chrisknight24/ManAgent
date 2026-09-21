@@ -31,6 +31,7 @@ build/
 
 # Fichier d'echange local des logs (jamais sur git)
 user_log.txt
+user_logs.txt
 
 # OS
 Thumbs.db
