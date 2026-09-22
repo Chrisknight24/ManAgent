@@ -5,7 +5,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.plan_models import Plan, PlanStep, StepType, is_mission_success
-from core.plan_validator import find_unknown_plan_tools
+from core.plan_validator import find_unknown_plan_tools, find_malformed_step_args
 
 
 def _plan(*steps):
@@ -53,3 +53,12 @@ def test_mission_success_needs_material_action():
     assert is_mission_success(True, 2)[0] is True
     ok, why = is_mission_success(True, 0)
     assert ok is False and "matérielle" in why
+
+
+def test_malformed_args_flagged():
+    bad = _plan(_tool_step("type_text", '{"text": "x"} ", "text": "y"}'))
+    assert find_malformed_step_args(bad) == ["s1"]
+    good = _plan(_tool_step("type_text", '{"text": "Bonjour"}'))
+    assert find_malformed_step_args(good) == []
+    empty = _plan(_tool_step("type_text", "{}"))
+    assert find_malformed_step_args(empty) == []

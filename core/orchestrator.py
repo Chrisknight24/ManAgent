@@ -1703,6 +1703,19 @@ class Orchestrator(Supervisor, Entity):
         Logger.info(f"[Orchestrator] ✅ Interaction consolidée pour la session {session_id}")
 
         # 12. Émettre la réponse finale
+        # Marqueur de fin de mission (l'hôte sort de son mode run dessus).
+        # Émis sur succès comme sur échec propre (déjà couvert par MISSION_FAILED
+        # sur les chemins d'exception) — jamais de fin silencieuse.
+        try:
+            _done_success = bool(mission_cache and mission_cache.status == "success")
+        except Exception:
+            _done_success = False
+        await self.propagate_event(Events.EXECUTION_COMPLETED, {
+            "mission_id": mission_id,
+            "session_id": session_id,
+            "success": _done_success,
+            "status": "success" if _done_success else "failed",
+        })
         await self.propagate_event(Events.RESPONSE_COMPLETED, {"content": final_response})
         return ResponsePacket(type="response", status="success", payload={"message": final_response})
 

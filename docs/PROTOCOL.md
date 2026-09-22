@@ -147,7 +147,7 @@ L'hôte exécute (vrai clic, vraie touche...) puis répond :
 ## 8. Événements à connaître (observabilité)
 
 Santé : `runtime.ready`, `runtime.configured`, `runtime.error`, `heartbeat`.
-Mission : `mission.started`, `plan.generated`, `step.status_changed`, `plan.abandoned`, `mission.failed`.
+Mission : `mission.started`, `plan.generated`, `step.status_changed`, `plan.abandoned`, `mission.failed` (échec), `execution.completed` (fin de mission, succès comme échec — l'hôte sort de son mode run dessus).
 Streaming : `thinking.started`, `response.chunk`, `response.completed`, `thinking.finished`.
 Outils : `tool.requested`, `executor.run_tool`, `tools_manager.decision/execution/result/error`.
 Skills : `checkpoint.reached`, `breakout.occurred`, `execution.completed`, `skill.state_changed`.

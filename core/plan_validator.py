@@ -79,6 +79,29 @@ def find_unknown_plan_tools(plan: Any, known_tool_names=None,
     return unknown
 
 
+def find_malformed_step_args(plan: Any) -> List[str]:
+    """Gate déterministe (fail-fast) : `tool_args_json` qui ne parse pas.
+
+    Retourne les ids d'étapes fautives. Un JSON d'args malformé (clés
+    dupliquées, traîne) tuait l'executor avant tout appel hôte (Mission-1).
+    Fonction pure, sans LLM, testée vite.
+    """
+    import json as _json
+
+    bad: List[str] = []
+    for step in getattr(plan, "steps", []) or []:
+        raw = getattr(step, "tool_args_json", None)
+        if raw is None or (isinstance(raw, str) and raw.strip() in ("", "{}")):
+            continue
+        if isinstance(raw, dict):
+            continue
+        try:
+            _json.loads(raw)
+        except Exception:
+            bad.append(str(getattr(step, "id", "?")))
+    return bad
+
+
 class PlanValidationOutcome:
     """
     Résultat riche de la validation. Remplace le simple bool historique de
@@ -442,18 +465,22 @@ class PlanValidator:
         all_warnings.extend(recursion_warnings)
         pattern_warning = "\n\n".join(all_warnings) if all_warnings else None
 
-        # Gate déterministe (fail-fast) : outil/skill inexistant = refus net,
-        # SANS appel LLM (économise tentatives + temps + coût).
+        # Gate déterministe (fail-fast) : outil/skill inexistant ou args
+        # illisibles = refus net, SANS appel LLM (économise tentatives + coût).
         unknown = find_unknown_plan_tools(
             plan, self._available_tools, self._production_skills
         )
-        if unknown:
-            details = ", ".join(unknown[:8])
+        malformed = find_malformed_step_args(plan)
+        problems = [f"inconnu:{u}" for u in unknown]
+        problems += [f"args illisibles étape:{s}" for s in malformed]
+        if problems:
+            details = ", ".join(problems[:8])
             return PlanValidationOutcome(
                 is_valid=False,
                 reason=_(
-                    "Plan refusé sans appel au juge : outil/skill inexistant ({details}). "
-                    "N'utilisez que les outils listés et les skills en PRODUCTION ; "
+                    "Plan refusé sans appel au juge : {details}. "
+                    "N'utilisez que les outils listés et les skills en PRODUCTION, "
+                    "avec des arguments JSON valides ; "
                     "sinon terminez en réponse directe motivée."
                 ).format(details=details),
                 risk_level=RiskLevel.MEDIUM,
