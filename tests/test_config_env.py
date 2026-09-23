@@ -4,7 +4,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.config import resolve_env_refs, resolve_payload_env
+from utils.config import resolve_env_refs, resolve_payload_env, resolve_hitl_policy
 
 
 def test_resolves_simple_ref(monkeypatch):
@@ -29,3 +29,12 @@ def test_nested_lists_rotation(monkeypatch):
 
 def test_non_strings_untouched():
     assert resolve_env_refs({"n": 3, "b": True, "x": None}) == {"n": 3, "b": True, "x": None}
+
+
+def test_hitl_top_level_wins_and_nested_fallback():
+    assert resolve_hitl_policy({"hitl_policy": "strict"}) == "strict"
+    assert resolve_hitl_policy({"runtime_configuration": {"hitl_policy": "autonomous"}}) == "autonomous"
+    assert resolve_hitl_policy({"hitl_policy": "strict",
+                                "runtime_configuration": {"hitl_policy": "autonomous"}}) == "strict"
+    assert resolve_hitl_policy({}) == "balanced"
+    assert resolve_hitl_policy({"hitl_policy": "n’importe quoi"}) == "balanced"

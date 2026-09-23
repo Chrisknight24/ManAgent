@@ -2355,7 +2355,8 @@ class Orchestrator(Supervisor, Entity):
         self.runtime_state.system_prompt = payload.get("system_prompt", "")
         self.runtime_state.language = payload.get("language", "en")
         self.runtime_state.environment = payload.get("environment", "simulated")
-        self.runtime_state.hitl_policy = payload.get("hitl_policy", "balanced")
+        from utils.config import resolve_hitl_policy
+        self.runtime_state.hitl_policy = resolve_hitl_policy(payload)
         Logger.info(f"[Orchestrator] Environnement = {self.runtime_state.environment}, HITL policy = {self.runtime_state.hitl_policy}")
         self.runtime_state.presentator_detail_level = payload.get("presentator_detail_level",
                                                                   "brief")
@@ -2643,10 +2644,12 @@ class Orchestrator(Supervisor, Entity):
             "embeddings_mode": getattr(self.runtime_state, "embeddings_mode", "lite"),
             "active_embedding_model": getattr(self.runtime_state, "active_embedding_model", None),
             "protocol_version": PROTOCOL_VERSION,
+            "hitl_policy": getattr(self.runtime_state, "hitl_policy", "balanced"),
         })
         return ResponsePacket(type="response", status="success", payload={
             "models_count": len(validated_models),
             "embeddings_mode": getattr(self.runtime_state, "embeddings_mode", "lite"),
             "active_embedding_model": getattr(self.runtime_state, "active_embedding_model", None),
             "protocol_version": PROTOCOL_VERSION,
+            "hitl_policy": getattr(self.runtime_state, "hitl_policy", "balanced"),
         })

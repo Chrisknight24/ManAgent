@@ -283,74 +283,91 @@ class Planner(Entity):
         all_steps_by_id = {step.id: step for step in plan.steps}
         steps_seen_so_far = set()
 
-        for step_idx, step in enumerate(plan.steps):
-            # 1. Collecter les variables utilisées dans cette étape
-            used_in_this_step = set()
-            for field in [step.execute_if, step.response_text, step.tool_args_json, step.step_context, step.description]:
+        def _produced_names(st) -> set:
+            """Noms produits par une étape (pour exempter sa propre prose)."""
+            names = {f"bool_{st.id}", f"data_{st.id}"}
+            if getattr(st, "output_variable_name", None):
+                out_name = st.output_variable_name
+                clean = re.sub(r'^(bool_|data_)+', '', out_name)
+                names.update({out_name, clean, f"bool_{clean}", f"data_{clean}"})
+            return names
+
+        def _collect_used(*fields) -> set:
+            used = set()
+            for field in fields:
                 if field:
                     matches = re.findall(r'(?:\$@_|@\$_)([a-zA-Z0-9_]+)', str(field))
-                    used_in_this_step.update(matches)
+                    used.update(matches)
+            return used
 
-            # 2. Vérification de disponibilité / causalité
-            for raw_var in used_in_this_step:
-                clean_root = re.sub(r'^(bool_|data_)+', '', raw_var)
-                is_bool_ref = raw_var.startswith("bool_")
-                is_data_ref = raw_var.startswith("data_")
-                canonical_var = f"bool_{clean_root}" if is_bool_ref else (f"data_{clean_root}" if is_data_ref else raw_var)
-                var = canonical_var
+        def _check_var(raw_var: str, known: set, step, step_idx: int) -> None:
+            clean_root = re.sub(r'^(bool_|data_)+', '', raw_var)
+            is_bool_ref = raw_var.startswith("bool_")
+            is_data_ref = raw_var.startswith("data_")
+            canonical_var = f"bool_{clean_root}" if is_bool_ref else (f"data_{clean_root}" if is_data_ref else raw_var)
+            var = canonical_var
 
-                is_available = False
-                if raw_var in known_vars or canonical_var in known_vars:
-                    is_available = True
-                elif f"bool_{clean_root}" in known_vars or f"data_{clean_root}" in known_vars or clean_root in known_vars:
-                    is_available = True
-                elif clean_root in all_steps_by_id and clean_root in steps_seen_so_far:
-                    is_available = True
+            is_available = False
+            if raw_var in known or canonical_var in known:
+                is_available = True
+            elif f"bool_{clean_root}" in known or f"data_{clean_root}" in known or clean_root in known:
+                is_available = True
+            elif clean_root in all_steps_by_id and clean_root in steps_seen_so_far:
+                is_available = True
 
-                if not is_available:
-                    # Vérifier si la variable fait référence à une étape connue
-                    matched_step_id = None
-                    if clean_root in all_steps_by_id:
-                        matched_step_id = clean_root
+            if not is_available:
+                # Vérifier si la variable fait référence à une étape connue
+                matched_step_id = None
+                if clean_root in all_steps_by_id:
+                    matched_step_id = clean_root
 
-                    # Vérifier si elle correspond à l'output_variable_name d'une étape future
-                    future_step = None
-                    for future_idx in range(step_idx + 1, len(plan.steps)):
-                        cand_step = plan.steps[future_idx]
-                        if cand_step.output_variable_name:
-                            out_name = cand_step.output_variable_name
-                            cand_clean = re.sub(r'^(bool_|data_)+', '', out_name)
-                            if clean_root == cand_clean or var == out_name:
-                                future_step = cand_step
-                                break
+                # Vérifier si elle correspond à l'output_variable_name d'une étape future
+                future_step = None
+                for future_idx in range(step_idx + 1, len(plan.steps)):
+                    cand_step = plan.steps[future_idx]
+                    if cand_step.output_variable_name:
+                        out_name = cand_step.output_variable_name
+                        cand_clean = re.sub(r'^(bool_|data_)+', '', out_name)
+                        if clean_root == cand_clean or var == out_name:
+                            future_step = cand_step
+                            break
 
-                    if matched_step_id:
-                        target_step = all_steps_by_id[matched_step_id]
-                        if target_step.type == StepType.DIRECT_ANSWER:
-                            errors.append(
-                                _("L'étape '{}' tente d'utiliser la variable '{}' associée à l'étape '{}' de type 'direct_answer' (les réponses directes ne produisent pas de données pour d'autres étapes).")
-                                .format(step.id, var, matched_step_id)
-                            )
-                        elif matched_step_id not in steps_seen_so_far:
-                            errors.append(
-                                _("L'étape '{}' tente d'utiliser la variable '{}' provenant de l'étape future '{}' (erreur de causalité : l'étape n'a pas encore été exécutée).")
-                                .format(step.id, var, matched_step_id)
-                            )
-                        else:
-                            errors.append(
-                                _("L'étape '{}' tente d'utiliser la variable '{}' issue de l'étape '{}' qui n'a pas produit de données valides.")
-                                .format(step.id, var, matched_step_id)
-                            )
-                    elif future_step:
+                if matched_step_id:
+                    target_step = all_steps_by_id[matched_step_id]
+                    if target_step.type == StepType.DIRECT_ANSWER:
                         errors.append(
-                            _("L'étape '{}' tente d'utiliser la variable '{}' issue de l'étape future '{}' (erreur de causalité temporelle).")
-                            .format(step.id, var, future_step.id)
+                            _("L'étape '{}' tente d'utiliser la variable '{}' associée à l'étape '{}' de type 'direct_answer' (les réponses directes ne produisent pas de données pour d'autres étapes).")
+                            .format(step.id, var, matched_step_id)
+                        )
+                    elif matched_step_id not in steps_seen_so_far:
+                        errors.append(
+                            _("L'étape '{}' tente d'utiliser la variable '{}' provenant de l'étape future '{}' (erreur de causalité : l'étape n'a pas encore été exécutée).")
+                            .format(step.id, var, matched_step_id)
                         )
                     else:
                         errors.append(
-                            _("L'étape '{}' tente d'utiliser la variable inconnue '{}' qui n'a été produite par aucune étape antérieure ni par le contexte.")
-                            .format(step.id, var)
+                            _("L'étape '{}' tente d'utiliser la variable '{}' issue de l'étape '{}' qui n'a pas produit de données valides.")
+                            .format(step.id, var, matched_step_id)
                         )
+                elif future_step:
+                    errors.append(
+                        _("L'étape '{}' tente d'utiliser la variable '{}' issue de l'étape future '{}' (erreur de causalité temporelle).")
+                        .format(step.id, var, future_step.id)
+                    )
+                else:
+                    errors.append(
+                        _("L'étape '{}' tente d'utiliser la variable inconnue '{}' qui n'a été produite par aucune étape antérieure ni par le contexte.")
+                        .format(step.id, var)
+                    )
+
+        for step_idx, step in enumerate(plan.steps):
+            # 1. Champs exécutables : antériorités seules (strict).
+            for raw_var in _collect_used(step.execute_if, step.tool_args_json):
+                _check_var(raw_var, known_vars, step, step_idx)
+            # 1b. Prose : sa propre sortie = déclaration, pas usage.
+            prose_known = set(known_vars) | _produced_names(step)
+            for raw_var in _collect_used(step.response_text, step.step_context, step.description):
+                _check_var(raw_var, prose_known, step, step_idx)
 
             # 3. Enregistrer les variables produites par cette étape
             steps_seen_so_far.add(step.id)

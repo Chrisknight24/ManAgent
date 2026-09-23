@@ -39,3 +39,22 @@ def resolve_payload_env(payload: dict) -> Tuple[dict, list]:
     """Résout un payload configure complet. Retour (payload, missing)."""
     missing: list = []
     return resolve_env_refs(payload, missing), missing
+
+
+VALID_HITL_POLICIES = ("strict", "balanced", "autonomous")
+
+
+def resolve_hitl_policy(payload: dict) -> str:
+    """Lit hitl_policy (racine prioritaire, sinon runtime_configuration).
+
+    Valeur inconnue/absente -> "balanced". Fonction pure, testée.
+    """
+    if not isinstance(payload, dict):
+        return "balanced"
+    raw = payload.get("hitl_policy")
+    if not raw:
+        runtime_cfg = payload.get("runtime_configuration") or {}
+        if isinstance(runtime_cfg, dict):
+            raw = runtime_cfg.get("hitl_policy")
+    val = str(raw or "").strip().lower()
+    return val if val in VALID_HITL_POLICIES else "balanced"

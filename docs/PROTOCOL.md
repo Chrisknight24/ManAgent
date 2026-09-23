@@ -123,7 +123,7 @@ Action inconnue → `{"type":"error","message":"Unknown action: ..."}`. Jamais d
   "embedding_catalog_extra": [...]
 }
 ```
-- `hitl_policy` : strict (demande souvent), balanced, autonomous (demande rarement).
+- `hitl_policy` : `strict` (confirmation à chaque risque), `balanced` (dispense si déjà approuvé dans la mission), `autonomous` (confirmations contournées). Lu à la racine OU dans `runtime_configuration` (racine prioritaire), renvoyé dans `runtime.configured`. Observable : fréquence des `human_validation` + refus par prudence.
 - Secrets : écrivez `"env:NOM_VARIABLE"` au lieu de la clé en clair (ex : `"api_key": "env:MANAGENT_GEMINI_KEY"`). Listes acceptées pour la rotation multi-clés. Variable absente = chaîne vide + avertissement.
 - `environment` : `simulated` = dev/tests, `real` = hôte production.
 - `protocol_version` : version du langage ("1"). Renvoyée dans `runtime.configured`.
