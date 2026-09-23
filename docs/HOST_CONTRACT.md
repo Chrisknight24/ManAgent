@@ -101,15 +101,29 @@ Séquence recommandée pour l'écran modèles de l'hôte :
 | `learner.analyze` | analyse post-mission |
 | `system.warmup` / `system.reset_data` / `data.*` | maintenance |
 
-## 5. Boucle outils (host exécute, ManAgent décide)
+## 5. Boucle outils (l'hôte exécute, ManAgent décide)
 
-ManAgent ne clique jamais lui-même. Il demande (event `tool.requested`) :
-`{"type":"event","event":"tool.requested","payload":{"call_id":"...","tool_name":"click","arguments":{...}}}`
-L'hôte exécute côté C++ puis répond :
+ManAgent ne fait jamais le travail lui-même. Il demande (event `tool.requested`) :
+`{"type":"event","event":"tool.requested","payload":{"call_id":"...","tool_name":"...","arguments":{...}}}`
+L'hôte fait le VRAI travail (pas du faux), puis répond TOUJOURS avec ce format :
 ```json
 {"type":"request","action":"tool.result","payload":{"call_id":"...","result":"..."}}
 ```
+Le champ `result` est lui-même du JSON en texte, avec 3 clés simples :
+- `result` : `true` (ça a marché) ou `false` (raté). Comparé à ce que le plan attendait.
+- `data` : le résultat utile (optionnel : texte, objet, liste, ce que tu veux).
+- `error_reason` : pourquoi ça a raté, avec les mots (si raté). Long texte accepté.
+
+Exemple succès — l'outil a additionné :
+```json
+{"call_id":"abc123","result":"{\"result\": true, \"data\": {\"total\": 42}}"}
+```
+Exemple échec honnête — l'élément n'existe pas :
+```json
+{"call_id":"abc123","result":"{\"result\": false, \"error_reason\": \"bouton introuvable à l'écran\"}"}
+```
 `call_id` = le ticket de suivi (obligatoire, tel quel). Mauvais ticket → erreur claire.
+Grosse donnée (> ~3000 caractères) = rangée à part et paginée, pas de panique.
 
 ## 6. Observabilité (tout est observable)
 

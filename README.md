@@ -57,5 +57,15 @@ Ne mets pas le repo git dans `build/`. Garde-le ailleurs, ex : `Documents/QtProj
 - `tests/` : pytest
 - `tools/` : internal tools, observability
 
+## Essayer en 5 minutes (sans clé API, sans coder)
+
+```bash
+python examples/minimal_host.py
+```
+Ce mini-hôte lance ManAgent, se présente avec 2 faux outils, affiche
+le catalogue des modèles et les stats mémoire. Ensuite, lisez
+`docs/HOST_CONTRACT.md` (§5 : comment renvoyer un résultat d'outil)
+et `docs/host.manifest.example.json` (manifeste complet à copier).
+
 ## Contributing
 Voir `CONTRIBUTING.md`. License MIT.

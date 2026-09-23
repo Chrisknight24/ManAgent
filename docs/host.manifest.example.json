@@ -1,36 +1,69 @@
 {
-  "host_name": "AutoCUse-Qt",
-  "host_version": "0.3.0",
-  "capabilities": ["mouse", "keyboard", "uia", "vision", "flow_engine", "embeddings-local"],
+  "host_name": "exemple-hote",
+  "host_version": "0.1.0",
+  "capabilities": ["clavier", "souris", "vision", "attente", "infos-systeme"],
   "tools": [
     {
-      "name": "click",
-      "description": "Clique souris sur coordonnées",
+      "name": "cliquer",
+      "description": "Clique à un endroit de l'écran. Renvoie true si le clic est parti.",
       "parameters": {
         "type": "object",
         "properties": {
-          "x": { "type": "integer" },
-          "y": { "type": "integer" }
+          "x": { "type": "integer", "description": "Position horizontale en pixels." },
+          "y": { "type": "integer", "description": "Position verticale en pixels." }
         },
         "required": ["x", "y"]
       }
     },
     {
-      "name": "type_text",
-      "description": "Frappe clavier",
+      "name": "taper_texte",
+      "description": "Tape du texte au clavier. Renvoie true si envoyé.",
       "parameters": {
         "type": "object",
         "properties": {
-          "text": { "type": "string" }
+          "texte": { "type": "string", "description": "Le texte à taper." }
         },
-        "required": ["text"]
+        "required": ["texte"]
+      }
+    },
+    {
+      "name": "lire_ecran",
+      "description": "Décrit ce qui est visible à l'écran. Renvoie la description dans data.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "question": { "type": "string", "description": "Que chercher (ex: où est le bouton OK ?)." }
+        },
+        "required": ["question"]
+      }
+    },
+    {
+      "name": "attendre",
+      "description": "Attend un moment. Renvoie true quand c'est fini.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "duree_ms": { "type": "integer", "description": "Durée en millisecondes." }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "info_systeme",
+      "description": "Donne une info sur la machine. Renvoie la réponse dans data.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "sujet": { "type": "string", "description": "os, memoire ou processus." }
+        },
+        "required": ["sujet"]
       }
     }
   ],
   "environment": {
     "os": "windows-11",
-    "screen": "1920x1080",
-    "locale": "fr-FR"
+    "ecran": "1920x1080",
+    "langue": "fr-FR"
   },
   "metadata": {
     "managent_min_version": "0.1.0"
