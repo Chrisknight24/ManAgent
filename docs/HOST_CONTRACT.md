@@ -3,7 +3,7 @@
 ManAgent est une boîte noire (black box = on l'utilise sans voir l'intérieur).
 L'hôte (Qt, Web, CLI) ne touche JAMAIS aux `.py`. Il lance un processus, envoie du JSON sur stdin (entrée standard), lit du JSON sur stdout (sortie standard).
 
-Référence complète : `docs/protocol.md`. Ce contrat est le résumé stable pour intégrateur.
+Référence complète : `docs/PROTOCOL.md`. Ce contrat est le résumé stable pour intégrateur.
 
 ## 1. Lancement (launch)
 
@@ -26,7 +26,7 @@ Santé (healthcheck) : si pas de `runtime.ready` en 15s → tuer le QProcess et 
 
 Requête (hôte → ManAgent), voir `transport/packet_models.py:17` :
 ```json
-{"id":"req_001","type":"request","action":"chat.send","payload":{"message":"Bonjour"}}
+{"id":"req_001","type":"request","action":"chat.send","payload":{"content":"Bonjour"}}
 ```
 
 Réponse (ManAgent → hôte) :

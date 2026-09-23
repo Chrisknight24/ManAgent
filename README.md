@@ -9,7 +9,11 @@ Event-driven (piloté par événements) agent runtime. Parle JSON via stdin/stdo
 - Progressive disclosure, discovery engine, learner, skills engine
 - Multi-providers + multi-clés avec fallback
 - i18n FR/EN, prompts versionnés dans `prompts/base|fr|en`
-- Protocole détaillé : `docs/protocol.md`
+- Protocole détaillé : `docs/PROTOCOL.md` ([English](docs/en/PROTOCOL.md))
+
+## Docs
+- [EN] English: [HOST_CONTRACT](docs/en/HOST_CONTRACT.md) · [PROTOCOL](docs/en/PROTOCOL.md) · [DEPLOY](docs/en/DEPLOY.md)
+- [FR] Français : [HOST_CONTRACT](docs/HOST_CONTRACT.md) · [PROTOCOL](docs/PROTOCOL.md) · [DEPLOY](docs/DEPLOY.md)
 
 ## Install
 ```bash
