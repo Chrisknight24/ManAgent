@@ -28,8 +28,10 @@ Voici un conseil stratégique synthétisé à partir de missions passées simila
 [Aucune mission similaire disponible.]
 {% endif %}
 
-## OUTILS DISPONIBLES
+## OUTILS DISPONIBLES (`[perception]` = lit sans changer, `[action]` = change)
 {{ tools }}
+
+{{ tools_guidance }}
 
 {% if skills %}
 ## ⚡ SKILLS COMPOSITES DISPONIBLES (MÉTA-OUTILS QUALIFIÉS)

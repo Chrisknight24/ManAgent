@@ -142,6 +142,44 @@ def find_direct_perception_calls(plan: Any, perception_tool_names=None) -> List[
     return bad
 
 
+def repair_direct_perception_calls(plan: Any, perception_tool_names=None) -> list:
+    """Réécrit EN PLACE les appels perception directs en `perceive_understand`.
+
+    Au lieu de refuser en boucle un planner qui ne sait pas se corriger :
+    question = description de l'étape, source = outil + args d'origine.
+    Retourne les ids réparés. Pur hormis la mutation du plan (pratique du
+    code : les plans sont déjà mutés ailleurs).
+    """
+    import json as _json
+
+    if not perception_tool_names:
+        return []
+    targets = set(perception_tool_names)
+    repaired: List[str] = []
+    for step in getattr(plan, "steps", []) or []:
+        stype = getattr(getattr(step, "type", None), "value", getattr(step, "type", None))
+        if stype != "tool_call":
+            continue
+        tname = (getattr(step, "tool_name", None) or "").strip()
+        if tname not in targets:
+            continue
+        try:
+            src_args = _json.loads(getattr(step, "tool_args_json", "{}") or "{}")
+            if not isinstance(src_args, dict):
+                src_args = {}
+        except Exception:
+            src_args = {}
+        step.tool_name = "perceive_understand"
+        step.tool_args_json = _json.dumps({
+            "question": getattr(step, "description", "") or "",
+            "source_tool": tname,
+            "source_args": src_args,
+            "format_response": "",
+        }, ensure_ascii=False)
+        repaired.append(str(getattr(step, "id", "?")))
+    return repaired
+
+
 class PlanValidationOutcome:
     """
     Résultat riche de la validation. Remplace le simple bool historique de

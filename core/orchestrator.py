@@ -1751,6 +1751,31 @@ class Orchestrator(Supervisor, Entity):
     # =====================================================
     # IMPLÉMENTATION DE SUPERVISOR
     # =====================================================
+    def _plan_gate_sets(self) -> tuple:
+        """Référentiels du gate déterministe (connus, prod, perception)."""
+        _known: set = set()
+        _prod: set = set()
+        _perception: set = set()
+        try:
+            tm = getattr(self.runtime_state, "tools_manager", None)
+            if tm is not None and hasattr(tm, "known_tool_names"):
+                _known = set(tm.known_tool_names())
+            if tm is not None and hasattr(tm, "perception_tool_names"):
+                _perception = set(tm.perception_tool_names())
+        except Exception:
+            pass
+        try:
+            reg = getattr(self.runtime_state, "skill_registry", None)
+            if reg is not None and hasattr(reg, "list_all_skills"):
+                for _s in reg.list_all_skills() or []:
+                    if isinstance(_s, dict) and str(_s.get("state", "")) == "PRODUCTION":
+                        _sid = _s.get("id") or _s.get("skill_id")
+                        if _sid:
+                            _prod.add(str(_sid))
+        except Exception:
+            pass
+        return _known, _prod, _perception
+
     async def validate_plan(
         self,
         plan: Plan,
@@ -1788,27 +1813,7 @@ class Orchestrator(Supervisor, Entity):
 
         # Référentiels déterministes pour le gate fail-fast (aucune hallucination
         # d'outil/skill ne passe le juge sans appel LLM).
-        _known_tools: set = set()
-        _prod_skills: set = set()
-        _perception_tools: set = set()
-        try:
-            tm = getattr(self.runtime_state, "tools_manager", None)
-            if tm is not None and hasattr(tm, "known_tool_names"):
-                _known_tools = set(tm.known_tool_names())
-            if tm is not None and hasattr(tm, "perception_tool_names"):
-                _perception_tools = set(tm.perception_tool_names())
-        except Exception:
-            pass
-        try:
-            reg = getattr(self.runtime_state, "skill_registry", None)
-            if reg is not None and hasattr(reg, "list_all_skills"):
-                for _s in reg.list_all_skills() or []:
-                    if isinstance(_s, dict) and str(_s.get("state", "")) == "PRODUCTION":
-                        _sid = _s.get("id") or _s.get("skill_id")
-                        if _sid:
-                            _prod_skills.add(str(_sid))
-        except Exception:
-            pass
+        _known_tools, _prod_skills, _perception_tools = self._plan_gate_sets()
         _availability_summary = (
             f"Outils disponibles ({len(_known_tools)}) : "
             + (", ".join(sorted(_known_tools)[:40]) if _known_tools else "(aucun)")
@@ -1835,6 +1840,38 @@ class Orchestrator(Supervisor, Entity):
             previous_attempts=previous_attempts,
             mission_history_tree=mission_history_tree,
         )
+
+        # Réparation auto (pas de refus en boucle) : si le SEUL grief est de
+        # la perception directe, on réécrit en perceive_understand et on
+        # re-valide une fois. Le planner faible ne sait pas se corriger seul.
+        if not outcome.is_valid:
+            from core.plan_validator import (
+                find_unknown_plan_tools,
+                find_malformed_step_args,
+                find_reserved_plan_tools,
+                find_direct_perception_calls,
+                repair_direct_perception_calls,
+            )
+            _only_perception = (
+                not find_unknown_plan_tools(plan, _known_tools, _prod_skills)
+                and not find_malformed_step_args(plan)
+                and not find_reserved_plan_tools(plan)
+                and bool(find_direct_perception_calls(plan, _perception_tools))
+            )
+            if _only_perception:
+                _repaired_ids = repair_direct_perception_calls(plan, _perception_tools)
+                if _repaired_ids:
+                    Logger.info(
+                        f"[Orchestrator] 🔧 Réparation auto perception : {len(_repaired_ids)} étape(s) "
+                        f"réécrites en perceive_understand ({', '.join(_repaired_ids[:5])})."
+                    )
+                    outcome = await validator.validate(
+                        plan=plan,
+                        child_solver_id=child_solver_id,
+                        target_goal=target_goal,
+                        previous_attempts=previous_attempts,
+                        mission_history_tree=mission_history_tree,
+                    )
 
         Logger.event(
             "plan_validation_decision",

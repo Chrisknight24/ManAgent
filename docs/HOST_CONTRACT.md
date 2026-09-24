@@ -146,6 +146,10 @@ Grosse donnée (> ~3000 caractères) = rangée à part et paginée, pas de paniq
 
 Événements stables à logger côté hôte : `planner.start/finished`, `plan.generated`, `tools_manager.decision/execution/result`, `checkpoint.reached`, `breakout.occurred`, `execution.completed`, `learner.analyze_finished`. Voir `core/constants.py:31`, `transport/packet_models.py:39`.
 
+Inspection des prompts (debug) : lancez avec `MANAGENT_RECORD_PROMPTS=1` —
+chaque prompt rendu est copié dans `prompts_log/` (dossier de données) avec
+la liste des variables (noms seuls, jamais les valeurs/secrets).
+
 ## 7. Plan-first + rules
 
 ManAgent répond toujours par un plan validé. L'utilisateur peut contraindre avec `rules.md` (confirmation humaine, rejets, niveaux de risque). L'hôte n'a pas besoin de relire les prompts.

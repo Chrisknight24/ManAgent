@@ -740,7 +740,15 @@ class Solver(Supervisor, Entity):
         Logger.info(f"[Solver:{self.id}] 🤔 Évaluation de la faisabilité...")
 
         tools_view = await self.runtime_state.tools_manager.get_tools_view(goal_query=self.goal)
-        formatted_tools = [f"- {t['name']} ({t['role']}): {t['description']}" for t in tools_view]
+        formatted_tools = [
+            f"- {t['name']} [{t.get('kind', 'action')}] ({t['role']}): {t['description']}"
+            for t in tools_view
+        ]
+        try:
+            tools_guidance = get_prompt_loader().load(
+                "_kinds_legend.md", lang=self.runtime_state.language)
+        except Exception:
+            tools_guidance = ""
 
         skills_text = self._format_candidate_skills(getattr(self, "_candidate_skills", []) or [])
 
@@ -767,6 +775,7 @@ class Solver(Supervisor, Entity):
             goal=self.goal,
             context=self.context,
             tools="\n".join(formatted_tools),
+            tools_guidance=tools_guidance,
             skills=skills_text,
             similar_missions=similar_missions_context,
             registry=registry_text,

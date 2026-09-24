@@ -33,7 +33,7 @@ Tu es le PLANNER central. Ton rôle est de découper un objectif en un plan d’
   Arguments : {{ tool.parameters | tojson }}
 {% endfor %}
 
-📖 **Lire le monde (à ton choix, jamais d'obligation)** : si tu as besoin de voir avant de décider, ou de vérifier après avoir agi, utilise l'outil de lecture `perceive_understand` (question + outil source + format de réponse attendu) — JAMAIS d'appel direct à un outil externe marqué `[perception]`. Sinon, agis directement avec les outils `[action]` listés.
+{% include "_kinds_legend.md" %}
 
 {% if skills %}
 ## ⚡ SKILLS COMPOSITES DISPONIBLES (MÉTA-OUTILS QUALIFIÉS)

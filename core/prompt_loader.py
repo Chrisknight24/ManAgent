@@ -125,17 +125,46 @@ class PromptLoader:
         env = self._get_env(lang)
         try:
             template = env.get_template(template_name)
-            return template.render(**safe_kwargs)
+            rendered = template.render(**safe_kwargs)
+            self._maybe_record(template_name, lang, rendered, safe_kwargs)
+            return rendered
         except Exception as e:
             if lang != self.default_lang:
                 try:
                     env_default = self._get_env(self.default_lang)
                     template = env_default.get_template(template_name)
-                    return template.render(**safe_kwargs)
+                    rendered = template.render(**safe_kwargs)
+                    self._maybe_record(template_name, self.default_lang, rendered, safe_kwargs)
+                    return rendered
                 except Exception:
                     pass
             Logger.error(f"[PromptLoader] Impossible de charger '{template_name}' via jinja2 : {e}")
             return f"Prompt template '{template_name}'"
+
+    _record_counter = 0
+
+    def _maybe_record(self, template_name: str, lang: str, rendered: str, variables: dict) -> None:
+        """Enregistre le prompt rendu pour inspection live (opt-in).
+
+        Actif si MANAGENT_RECORD_PROMPTS=1. Écrit dans ./prompts_log/
+        (donc data dir au runtime) : contenu rendu + NOMS des variables
+        (jamais les valeurs : secrets). Best-effort, jamais bloquant.
+        """
+        try:
+            import os as _os
+            if _os.environ.get("MANAGENT_RECORD_PROMPTS") != "1":
+                return
+            PromptLoader._record_counter += 1
+            safe_base = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in template_name)
+            out_dir = _os.path.join(_os.getcwd(), "prompts_log")
+            _os.makedirs(out_dir, exist_ok=True)
+            fname = f"{PromptLoader._record_counter:04d}_{safe_base}.{lang}.md"
+            with open(_os.path.join(out_dir, fname), "w", encoding="utf-8") as f:
+                f.write(rendered)
+            with open(_os.path.join(out_dir, fname + ".vars.txt"), "w", encoding="utf-8") as f:
+                f.write("\n".join(sorted(str(k) for k in (variables or {}).keys())))
+        except Exception:
+            pass
 
 _loader: Optional[PromptLoader] = None
 

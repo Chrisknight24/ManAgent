@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tools.tools_manager import ToolsManager
 from tools import internal_tools as IT
 from core.plan_models import Plan, PlanStep, StepType
-from core.plan_validator import find_direct_perception_calls
+from core.plan_validator import find_direct_perception_calls, repair_direct_perception_calls
 
 
 def _tool_step(tool_name, sid="s1", args="{}"):
@@ -53,6 +53,21 @@ def test_gate_direct_perception():
     ])
     assert find_direct_perception_calls(plan, {"lidar_scan"}) == ["s1"]
     assert find_direct_perception_calls(plan, None) == []
+
+
+def test_repair_rewrites_in_place():
+    plan = Plan(goal="voir la porte", steps=[
+        _tool_step("lidar_scan", "s1"),
+    ])
+    plan.steps[0].description = "Scanner autour pour trouver la porte."
+    ids = repair_direct_perception_calls(plan, {"lidar_scan"})
+    assert ids == ["s1"]
+    assert plan.steps[0].tool_name == "perceive_understand"
+    import json
+    args = json.loads(plan.steps[0].tool_args_json)
+    assert args["source_tool"] == "lidar_scan"
+    assert "porte" in args["question"]
+    assert find_direct_perception_calls(plan, {"lidar_scan"}) == []
 
 
 class _FakeMgr:
