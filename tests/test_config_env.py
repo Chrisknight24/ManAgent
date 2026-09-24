@@ -31,6 +31,13 @@ def test_non_strings_untouched():
     assert resolve_env_refs({"n": 3, "b": True, "x": None}) == {"n": 3, "b": True, "x": None}
 
 
+def test_runtime_stamp_shape():
+    from utils.paths import runtime_stamp
+    st = runtime_stamp()
+    assert set(st) == {"managent_version", "git_commit", "dirty", "frozen"}
+    assert isinstance(st["dirty"], bool) and isinstance(st["frozen"], bool)
+
+
 def test_hitl_top_level_wins_and_nested_fallback():
     assert resolve_hitl_policy({"hitl_policy": "strict"}) == "strict"
     assert resolve_hitl_policy({"runtime_configuration": {"hitl_policy": "autonomous"}}) == "autonomous"

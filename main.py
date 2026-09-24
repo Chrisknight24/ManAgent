@@ -32,7 +32,10 @@ async def main():
     orchestrator = Orchestrator(provider_manager, event_bus, runtime_state)
 
     Logger.info("Runtime initialized with Planner and Executor.")
-    await transport.send_packet({"type": "event", "event": Events.RUNTIME_READY, "payload": {}})
+    from utils.paths import runtime_stamp
+    _stamp = runtime_stamp()
+    Logger.info(f"Build stamp: {_stamp}")
+    await transport.send_packet({"type": "event", "event": Events.RUNTIME_READY, "payload": _stamp})
 
     while True:
         try:

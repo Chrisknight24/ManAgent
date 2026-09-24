@@ -25,7 +25,9 @@ Toi (hôte)                    ManAgent
 <python-ou-managent.exe> <chemin-vers-main.py-ou-rien>
 ```
 
-- Premier message attendu : `{"type":"event","event":"runtime.ready","payload":{}}`
+- Premier message attendu : `{"type":"event","event":"runtime.ready","payload":{...}}`
+  avec la carte d'identité (`managent_version`, `git_commit`, `dirty`, `frozen`).
+  `dirty=true` = code non committé : pas de mission conjointe dessus.
 - Pas de `runtime.ready` en 15 s → tuer et relancer.
 - Avec l'exe, le dossier de travail doit contenir `rules.md` (sinon règles vides).
 

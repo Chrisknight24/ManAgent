@@ -52,6 +52,45 @@ def get_version() -> str:
     return "unknown"
 
 
+def get_git_info(timeout_s: float = 5.0) -> tuple:
+    """(commit court, arbre sale ?) depuis le repo source. Hors repo : ("unknown", False).
+
+    Best-effort (jamais de crash) : chaque mission sait quel code tournait.
+    """
+    import subprocess
+
+    try:
+        root = exe_dir() if not is_frozen() else None
+        if root is None or not (root / ".git").exists():
+            return "unknown", False
+        commit = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(root), capture_output=True, text=True,
+            timeout=timeout_s,
+        )
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(root), capture_output=True, text=True,
+            timeout=timeout_s,
+        )
+        sha = (commit.stdout or "").strip() or "unknown"
+        dirty = bool((status.stdout or "").strip())
+        return sha, dirty
+    except Exception:
+        return "unknown", False
+
+
+def runtime_stamp() -> dict:
+    """Carte d'identité du runtime pour `runtime.ready` (traçabilité)."""
+    sha, dirty = get_git_info()
+    return {
+        "managent_version": get_version(),
+        "git_commit": sha,
+        "dirty": dirty,
+        "frozen": is_frozen(),
+    }
+
+
 def resolve_data_dir(cli_value=None) -> Path:
     """Calcule le data dir effectif (sans le creer)."""
     if cli_value:
