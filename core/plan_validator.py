@@ -102,6 +102,46 @@ def find_malformed_step_args(plan: Any) -> List[str]:
     return bad
 
 
+# Outils réservés au validateur/superviseur : le planner ne doit jamais
+# les émettre en tool_call (ils contourneraient la politique HITL).
+# `force_user_options` RESTE un outil normal (décision Christian).
+RESERVED_PLANNER_TOOLS = frozenset({"human_validation"})
+
+
+def find_reserved_plan_tools(plan: Any) -> List[str]:
+    """Étapes tool_call utilisant un outil réservé. Gate déterministe."""
+    bad: List[str] = []
+    for step in getattr(plan, "steps", []) or []:
+        stype = getattr(getattr(step, "type", None), "value", getattr(step, "type", None))
+        if stype != "tool_call":
+            continue
+        tname = (getattr(step, "tool_name", None) or "").strip()
+        if tname in RESERVED_PLANNER_TOOLS:
+            bad.append(str(getattr(step, "id", "?")))
+    return bad
+
+
+def find_direct_perception_calls(plan: Any, perception_tool_names=None) -> List[str]:
+    """Étapes tool_call directes vers un outil de perception externe.
+
+    La lecture du monde passe UNIQUEMENT par `perceive_understand`
+    (le LLM ne tient pas le pattern tout seul). Gate déterministe.
+    Sans référentiel (None) : pas de vérification (rétro-compat).
+    """
+    if not perception_tool_names:
+        return []
+    targets = set(perception_tool_names)
+    bad: List[str] = []
+    for step in getattr(plan, "steps", []) or []:
+        stype = getattr(getattr(step, "type", None), "value", getattr(step, "type", None))
+        if stype != "tool_call":
+            continue
+        tname = (getattr(step, "tool_name", None) or "").strip()
+        if tname in targets:
+            bad.append(str(getattr(step, "id", "?")))
+    return bad
+
+
 class PlanValidationOutcome:
     """
     Résultat riche de la validation. Remplace le simple bool historique de
@@ -151,6 +191,7 @@ class PlanValidator:
         human_validation_history: Optional[List[Dict[str, Any]]] = None,
         available_tools: Optional[Set[str]] = None,
         production_skills: Optional[Set[str]] = None,
+        perception_tools: Optional[Set[str]] = None,
         availability_summary: Optional[str] = None,
     ):
         self._llm = llm
@@ -162,6 +203,7 @@ class PlanValidator:
         self._human_validation_history = human_validation_history or []
         self._available_tools = set(available_tools) if available_tools else None
         self._production_skills = set(production_skills) if production_skills else None
+        self._perception_tools = set(perception_tools) if perception_tools else None
         self._availability_summary = availability_summary or ""
 
     def _summarize_human_validation_history(self) -> str:
@@ -215,6 +257,14 @@ class PlanValidator:
         ]
 
         if not sensitive_current_steps:
+            return True
+
+        # 3b. Clé stable inter-replans : mêmes outils sensibles déjà approuvés
+        # (un échec purement technique ne rouvre pas la validation).
+        current_tools = {
+            (getattr(s, "tool_name", "") or "") for s in sensitive_current_steps
+        } - {""}
+        if current_tools and current_tools <= approved_tools:
             return True
 
         # 4. Vérifier la convergence pour chaque étape sensible
@@ -471,8 +521,16 @@ class PlanValidator:
             plan, self._available_tools, self._production_skills
         )
         malformed = find_malformed_step_args(plan)
+        reserved = find_reserved_plan_tools(plan)
+        direct_perception = find_direct_perception_calls(plan, self._perception_tools)
         problems = [f"inconnu:{u}" for u in unknown]
         problems += [f"args illisibles étape:{s}" for s in malformed]
+        problems += [f"outil réservé au validateur étape:{s}" for s in reserved]
+        problems += [
+            f"perception directe interdite étape:{s} "
+            "(lire le monde uniquement via perceive_understand)"
+            for s in direct_perception
+        ]
         if problems:
             details = ", ".join(problems[:8])
             return PlanValidationOutcome(

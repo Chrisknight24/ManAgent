@@ -5,6 +5,7 @@
   "tools": [
     {
       "name": "cliquer",
+      "kind": "action",
       "description": "Clique à un endroit de l'écran. Renvoie true si le clic est parti.",
       "parameters": {
         "type": "object",
@@ -17,6 +18,7 @@
     },
     {
       "name": "taper_texte",
+      "kind": "action",
       "description": "Tape du texte au clavier. Renvoie true si envoyé.",
       "parameters": {
         "type": "object",
@@ -28,7 +30,8 @@
     },
     {
       "name": "lire_ecran",
-      "description": "Décrit ce qui est visible à l'écran. Renvoie la description dans data.",
+      "kind": "perception",
+      "description": "Décrit ce qui est visible à l'écran. Appelé uniquement via perceive_understand, jamais en direct.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -39,6 +42,7 @@
     },
     {
       "name": "attendre",
+      "kind": "action",
       "description": "Attend un moment. Renvoie true quand c'est fini.",
       "parameters": {
         "type": "object",
@@ -50,7 +54,8 @@
     },
     {
       "name": "info_systeme",
-      "description": "Donne une info sur la machine. Renvoie la réponse dans data.",
+      "kind": "perception",
+      "description": "Donne une info sur la machine. Appelé uniquement via perceive_understand, jamais en direct.",
       "parameters": {
         "type": "object",
         "properties": {

@@ -642,6 +642,14 @@ class Orchestrator(Supervisor, Entity):
         forced_provider = payload.get("forced_provider", "")
         forced_model = payload.get("forced_model", "")
         session_id = payload.get("session_id", "")
+        # Supervision à chaud (Q4) : l'hôte peut joindre hitl_policy à chaque
+        # tour (miroir du réglage global, déjà synchronisé côté hôte).
+        _turn_policy = payload.get("hitl_policy")
+        if _turn_policy:
+            from utils.config import resolve_hitl_policy
+            self.runtime_state.hitl_policy = resolve_hitl_policy(
+                {"hitl_policy": _turn_policy}
+            )
 
         # 1. Charger / créer le contexte de session
         session_memory = await self._load_session_context(session_id)
@@ -1782,10 +1790,13 @@ class Orchestrator(Supervisor, Entity):
         # d'outil/skill ne passe le juge sans appel LLM).
         _known_tools: set = set()
         _prod_skills: set = set()
+        _perception_tools: set = set()
         try:
             tm = getattr(self.runtime_state, "tools_manager", None)
             if tm is not None and hasattr(tm, "known_tool_names"):
                 _known_tools = set(tm.known_tool_names())
+            if tm is not None and hasattr(tm, "perception_tool_names"):
+                _perception_tools = set(tm.perception_tool_names())
         except Exception:
             pass
         try:
@@ -1814,6 +1825,7 @@ class Orchestrator(Supervisor, Entity):
             human_validation_history=self.runtime_state.approved_human_actions_by_mission.get(mission_id, []),
             available_tools=_known_tools,
             production_skills=_prod_skills,
+            perception_tools=_perception_tools,
             availability_summary=_availability_summary,
         )
         outcome = await validator.validate(

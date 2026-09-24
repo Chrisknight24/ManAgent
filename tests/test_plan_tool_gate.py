@@ -5,7 +5,12 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.plan_models import Plan, PlanStep, StepType, is_mission_success
-from core.plan_validator import find_unknown_plan_tools, find_malformed_step_args
+from core.plan_validator import (
+    find_unknown_plan_tools,
+    find_malformed_step_args,
+    find_reserved_plan_tools,
+    PlanValidator,
+)
 
 
 def _plan(*steps):
@@ -62,3 +67,39 @@ def test_malformed_args_flagged():
     assert find_malformed_step_args(good) == []
     empty = _plan(_tool_step("type_text", "{}"))
     assert find_malformed_step_args(empty) == []
+
+
+def test_reserved_tool_flagged():
+    plan = _plan(_tool_step("human_validation"))
+    assert find_reserved_plan_tools(plan) == ["s1"]
+    ok_plan = _plan(_tool_step("force_user_options"))
+    assert find_reserved_plan_tools(ok_plan) == []
+
+
+def test_implicit_validation_survives_replan():
+    from types import SimpleNamespace
+    v = PlanValidator(llm=None, prompt_loader=None, rules_text="",
+                      human_validation_history=[{
+                          "approved": True, "risk_level": "critical",
+                          "goal": "fermer", "steps": ["Fermer avec Alt+F4"],
+                          "tools": ["press_key"],
+                      }])
+    step = _tool_step("press_key", '{"key": "ALT+F4"}')
+    step.is_irreversible = True
+    plan = _plan(step)
+    decision = SimpleNamespace(irreversibility_flags=["s1"])
+    assert v._check_implicit_validation(plan, decision) is True
+
+
+def test_implicit_validation_new_tool_fails():
+    from types import SimpleNamespace
+    v = PlanValidator(llm=None, prompt_loader=None, rules_text="",
+                      human_validation_history=[{
+                          "approved": True, "risk_level": "low",
+                          "goal": "x", "steps": [], "tools": ["perceive"],
+                      }])
+    step = _tool_step("press_key", '{"key": "ALT+F4"}')
+    step.is_irreversible = True
+    plan = _plan(step)
+    decision = SimpleNamespace(irreversibility_flags=["s1"])
+    assert v._check_implicit_validation(plan, decision) is False

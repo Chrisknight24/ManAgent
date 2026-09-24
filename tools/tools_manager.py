@@ -71,6 +71,7 @@ class ToolsManager(Entity):
                 llm_analyze_data,
                 llm_analyze_multi_data,
                 execute_skill_tool,
+                perceive_understand,
             )
 
             self.register_internal_tool(
@@ -179,9 +180,38 @@ class ToolsManager(Entity):
                 ]
             )
 
+            self.register_internal_tool(
+                name="perceive_understand",
+                handler=perceive_understand,
+                description=_(
+                    "Outil de LECTURE du monde (méta-outil) : perçoit via un outil "
+                    "EXTERNE (hôte) puis fait comprendre le résultat par LLM. "
+                    "Seule voie autorisée pour lire le monde — jamais d'appel direct "
+                    "à un outil externe de perception. "
+                    "Requiert 'question' + ('source_tool' avec 'source_args' optionnels, "
+                    "ou 'source_data' déjà disponible) + 'format_response' optionnel "
+                    "(format strict attendu, ex: 'un identifiant', sinon rapport libre)."
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string", "description": "Que chercher/comprendre, en langage naturel"},
+                        "source_tool": {"type": "string", "description": "Nom d'un outil EXTERNE (hôte) à appeler"},
+                        "source_args": {"type": "object", "description": "Arguments de l'outil source"},
+                        "source_data": {"type": "string", "description": "Variable déjà disponible (alternative à source_tool)"},
+                        "format_response": {"type": "string", "description": "Format strict attendu de la réponse (vide = rapport libre)"}
+                    },
+                    "required": ["question"]
+                },
+                capabilities=[
+                    "lire le monde via un outil externe puis le faire comprendre par LLM",
+                    "extraire une valeur précise (identifiant, nombre, oui/non) d'une perception",
+                ]
+            )
+
             Logger.debug(
                 "[ToolsManager] Outils internes enregistrés : "
-                "extract_json_value, llm_analyze_data, llm_analyze_multi_data, execute_skill."
+                "extract_json_value, llm_analyze_data, llm_analyze_multi_data, execute_skill, perceive_understand."
             )
         except ImportError as e:
             Logger.warning(f"[ToolsManager] Impossible d'importer les outils internes : {e}")
@@ -229,8 +259,35 @@ class ToolsManager(Entity):
 
         return [
             {
+                "name": "perceive_understand",
+                "role": "Lecture du monde (méta-outil)",
+                "kind": "perception",
+                "description": _(
+                    "LIT le monde via un outil externe puis le fait comprendre par LLM. "
+                    "Seule voie autorisée pour lire le monde (jamais d'appel direct "
+                    "à un outil externe de perception). "
+                    "Paramètres : 'question' (que chercher, langage naturel), "
+                    "'source_tool' (outil externe hôte) + 'source_args' ou 'source_data' "
+                    "(variable déjà disponible), 'format_response' optionnel "
+                    "(format strict attendu, vide = rapport libre)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string"},
+                        "source_tool": {"type": "string"},
+                        "source_args": {"type": "object"},
+                        "source_data": {"type": "string"},
+                        "format_response": {"type": "string"}
+                    },
+                    "required": ["question"]
+                },
+                "source": "internal"
+            },
+            {
                 "name": "execute_skill",
                 "role": "Skill Composite",
+                "kind": "action",
                 "description": _(
                     "Exécute un Skill composite ManAgent pré-qualifié (méta-outil déterministe). "
                     "Idéal et prioritaire pour accomplir un flux d'actions récurrent avec zéro surcoût LLM. "
@@ -249,6 +306,7 @@ class ToolsManager(Entity):
             {
                 "name": "tool_manager",
                 "role": "Analyse de données (interne)",
+                "kind": "perception",
                 "description": description,
                 "parameters": {
                     "type": "object",
@@ -262,6 +320,7 @@ class ToolsManager(Entity):
             {
                 "name": "load_literal_data",
                 "role": "Injection de données",
+                "kind": "utility",
                 "description": _("Permet d'injecter une valeur littérale brute (texte, JSON, liste, chiffre) dans le registre en la retournant telle quelle. Utilisez impérativement 'output_variable_name' dans l'étape du plan pour la sauvegarder."),
                 "parameters": {
                     "type": "object",
@@ -323,15 +382,16 @@ class ToolsManager(Entity):
             return self.runtime_state.host_manifest
         return None
 
-    def register_tool(self, name: str, role: str, description: str, parameters_schema: dict, source: str = "external") -> None:
+    def register_tool(self, name: str, role: str, description: str, parameters_schema: dict, source: str = "external", kind: str = "action") -> None:
         self._tools[name] = {
             "name": name,
             "role": role,
+            "kind": kind or "action",
             "description": description,
             "parameters": parameters_schema,
             "source": source
         }
-        Logger.debug(f"[ToolsManager] Outil enregistré : {name} (source={source})")
+        Logger.debug(f"[ToolsManager] Outil enregistré : {name} (source={source}, kind={kind})")
 
     def load_tools_from_payload(self, tools_payload: List[Dict]) -> None:
         for tool_def in tools_payload:
@@ -343,7 +403,8 @@ class ToolsManager(Entity):
                 role=tool_def.get("role", "Action_Matérielle"),
                 description=tool_def.get("description", ""),
                 parameters_schema=tool_def.get("parameters", {}),
-                source=tool_def.get("source", "external")
+                source=tool_def.get("source", "external"),
+                kind=tool_def.get("kind", "action"),
             )
 
     async def get_tools_view(self, goal_query: str = None) -> List[Dict]:
@@ -351,6 +412,18 @@ class ToolsManager(Entity):
         external_tools = list(self._tools.values())
         internal_tools = self._get_internal_tools_view()
         return external_tools + internal_tools
+
+    def perception_tool_names(self) -> set:
+        """Outils EXTERNES qui lisent le monde (kind=perception).
+
+        Le planner ne doit jamais les appeler en direct : uniquement via
+        l'outil de lecture `perceive_understand` (gate déterministe).
+        """
+        return {
+            name for name, t in self._tools.items()
+            if isinstance(t, dict) and t.get("source", "external") == "external"
+            and (t.get("kind") or "action") == "perception"
+        }
 
     def known_tool_names(self) -> set:
         """Noms d'outils connus (externes + internes + manifeste), sans valider les args.

@@ -70,7 +70,7 @@ Toi (hôte)                    ManAgent
 ### Conversation / mission
 | Action | À quoi ça sert | Exemple `payload` |
 |---|---|---|
-| `chat.send` | envoyer un message / mission. `forced_provider` + `forced_model` OPTIONNELS : sans eux, auto-routage (modèle avec capacité `text`, override explicite si fournis) | `{"content": "Résume ce texte...", "session_id": "", "forced_provider": "gemini", "forced_model": "gemini-3.5-flash-lite"}` |
+| `chat.send` | envoyer un message / mission. `forced_provider` + `forced_model` OPTIONNELS (auto-routage sinon). `hitl_policy` OPTIONNEL par tour (`strict`/`balanced`/`autonomous`, miroir du global) | `{"content": "Résume ce texte...", "session_id": "", "forced_provider": "gemini", "forced_model": "gemini-3.5-flash-lite"}` |
 | `chat.stop` | arrêter d'urgence ce qui tourne | `{}` |
 | `chat.reset` | tout arrêter + oublier la mission en cours | `{}` |
 | `session.delete` | effacer une session (RAM + base) | `{"session_id": "..."}` |

@@ -55,9 +55,26 @@ Règle : `action` est toujours en minuscules avec un point (`runtime.configure`,
   "providers":[{"name":"groq","api_key":"gsk_xxx","model":"llama-3.3-70b-versatile"}]
 }}
 ```
-2. `host.manifest.register` — déclarer l'hôte (voir `core/host_manifest.py:18`, exemple `docs/host.manifest.example.json`).
+2. `host.manifest.register` — déclarer l'hôte (exemple `docs/host.manifest.example.json`).
+   Chaque outil déclare `kind` : `"perception"` (lit le monde sans le changer)
+   ou `"action"` (le change). Sans `kind` = traité comme action (prudence).
+   Vocabulaire ouvert : un robot déclare pareil (`lidar_scan` = perception...).
 3. `chat.send` — envoyer missions.
 4. Écouter `response.chunk` / `response.completed` + `plan.generated` / `execution.completed`.
+
+## 3a. Lire le monde (méta-outil `perceive_understand`)
+
+Règle : le planner n'appelle JAMAIS un outil `[perception]` en direct.
+Pour voir avant de décider ou vérifier après avoir agi, il utilise :
+```json
+{"tool_name": "perceive_understand", "question": "où est la porte ?",
+ "source_tool": "lidar_scan", "source_args": {},
+ "format_response": "direction et distance en mètres"}
+```
+- `question` : que chercher, en langage naturel (obligatoire).
+- `source_tool` + `source_args` : quel outil hôte appeler (ou `source_data` : variable déjà disponible).
+- `format_response` : format strict attendu (vide = rapport libre).
+Le système appelle la source, fait comprendre par LLM, renvoie la valeur.
 
 ## 3b. Embeddings (lite / local / full)
 

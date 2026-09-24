@@ -578,3 +578,79 @@ async def execute_skill_tool(args: Dict[str, Any], runtime_state) -> Dict[str, A
         "error_reason": exec_result.get("error_message") or (None if is_success else "Échec d'exécution du skill"),
         "message": f"Skill '{skill_id}' exécuté avec succès ({len(exec_result.get('passed_checkpoints', []))} checkpoints)." if is_success else f"Rupture ou échec sur le Skill '{skill_id}'."
     }
+
+
+# Noms d'outils internes : jamais utilisables comme source de perceive_understand
+# (pas de LLM-dans-LLM, pas d'auto-appel).
+_INTERNAL_TOOL_NAMES = frozenset({
+    "extract_json_value", "llm_analyze_data", "llm_analyze_multi_data",
+    "execute_skill", "tool_manager", "analyze_data", "load_literal_data",
+    "perceive_understand",
+})
+
+
+async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, Any]:
+    """
+    Méta-outil de lecture : perçoit le monde via un outil EXTERNE (hôte),
+    puis fait comprendre le résultat par LLM. Seule voie autorisée pour lire
+    le monde (jamais d'appel direct à un outil de perception externe).
+
+    Args:
+        args: {
+            "question": str (requis, langage naturel : que chercher/comprendre),
+            "source_tool": str (outil externe hôte, ex déclaré au manifeste),
+            "source_args": dict (optionnel, arguments de l'outil source),
+            "source_data": str (optionnel, variable déjà disponible — alternative
+                à source_tool, pas de nouvel appel monde dans ce cas),
+            "format_response": str (optionnel, format strict attendu de la
+                réponse, ex: "un identifiant", "un nombre", "oui/non".
+                Vide = rapport libre.)
+        }
+
+    Retourne: dict {"result": bool, "data": Any, "error_reason": str}.
+    """
+    question = (args.get("question") or "").strip()
+    source_tool = (args.get("source_tool") or "").strip()
+    source_args = args.get("source_args") or {}
+    source_data = (args.get("source_data") or "").strip()
+    format_response = (args.get("format_response") or "").strip()
+
+    if not question:
+        msg = _("Le paramètre 'question' est requis.")
+        return {"result": False, "data": None, "error_reason": msg, "message": msg}
+    if not source_tool and not source_data:
+        msg = _("'source_tool' ou 'source_data' requis (d'où lire le monde).")
+        return {"result": False, "data": None, "error_reason": msg, "message": msg}
+
+    raw_data = None
+    if source_data:
+        raw_data = await resolve_variable(source_data, runtime_state)
+        if raw_data is None:
+            msg = _("Variable '{source}' introuvable.").format(source=source_data)
+            return {"result": False, "data": None, "error_reason": msg, "message": msg}
+    else:
+        if source_tool in _INTERNAL_TOOL_NAMES:
+            msg = _("'{tool}' est interne : la source doit être un outil externe (hôte).").format(tool=source_tool)
+            return {"result": False, "data": None, "error_reason": msg, "message": msg}
+        tools_mgr = getattr(runtime_state, "tools_manager", None)
+        if tools_mgr is None or not hasattr(tools_mgr, "execute_tool"):
+            msg = _("Aucun gestionnaire d'outils pour appeler la source.")
+            return {"result": False, "data": None, "error_reason": msg, "message": msg}
+        try:
+            result_str = await tools_mgr.execute_tool(source_tool, dict(source_args))
+            parsed = json.loads(result_str) if isinstance(result_str, str) else result_str
+        except Exception as e:
+            msg = _("La source '{tool}' a échoué : {err}").format(tool=source_tool, err=e)
+            return {"result": False, "data": None, "error_reason": msg, "message": msg}
+        if isinstance(parsed, dict) and not parsed.get("result", True):
+            msg = str(parsed.get("error_reason") or parsed.get("message") or _("Source en échec."))
+            return {"result": False, "data": None, "error_reason": msg, "message": msg}
+        raw_data = parsed.get("data", parsed) if isinstance(parsed, dict) else parsed
+
+    query = question
+    if format_response:
+        query = (
+            f"{question}\nRéponds UNIQUEMENT avec le format strict suivant : "
+            f"{format_response}. Rien d'autre."
+        )
+    return await _run_llm_analysis(raw_data, query, runtime_state, tag="perceive_understand")
