@@ -85,8 +85,6 @@ def test_planner_constructs_without_world_by_default():
     # __init__ réel avec fakes légers
     Planner.__init__(p, name="t", llm=llm, runtime_state=rs)
     assert "world" not in p.get_data_providers()
-    # Seul le solver enregistre le provider "world" ; ni l'orchestrateur
-    # (décisions directes) ni le presentator ne le voient.
     import ast
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     for rel in ("core/orchestrator.py", "core/presentator.py", "core/learner.py"):
@@ -95,3 +93,51 @@ def test_planner_constructs_without_world_by_default():
         assert "register_data_provider('world'" not in src, rel
     src_solver = open(os.path.join(root, "core", "solver.py"), encoding="utf-8").read()
     assert 'register_data_provider("world"' in src_solver
+
+
+def _retry_planner(enable_world_pd):
+    from types import SimpleNamespace
+    from core.planner import Planner
+    from core.plan_models import Plan, PlanStep, StepType
+    seen = {}
+
+    async def fake_gen(prompt, schema, tag=None, with_discovery=False,
+                       mission_id=None, media_assets=None):
+        seen["with_discovery"] = with_discovery
+        s = PlanStep(id="s1", description="ok", type=StepType.DIRECT_ANSWER,
+                     expected_result="any", response_text="fini.")
+        return Plan(goal="g", steps=[s])
+
+    class FakeMgr:
+        async def get_tools_view(self, goal_query=None):
+            return []
+
+    llm = SimpleNamespace(
+        requirement=SimpleNamespace(role_name="general"),
+        provider_id="x", model_id="y", _discovery_enabled=True,
+        update_discovery_providers=lambda providers: None,
+        provider_manager=SimpleNamespace(
+            get_model_metadata=lambda mid: None),
+        generate_structured=fake_gen)
+    rs = SimpleNamespace(discovery_engine=SimpleNamespace(), language="en",
+                         tools_manager=FakeMgr())
+    p = Planner.__new__(Planner)
+    Planner.__init__(p, name="t", llm=llm, runtime_state=rs)
+    import asyncio
+    plan = asyncio.run(p.propose_plan(
+        goal="g", context="", strategy="s", variable_registry={},
+        enable_world_pd=enable_world_pd))
+    return p, plan, seen
+
+
+def test_planner_first_pass_no_world():
+    p, plan, seen = _retry_planner(False)
+    assert "world" not in p.get_data_providers()
+    assert seen["with_discovery"] is False
+    assert len(plan.steps) == 1
+
+
+def test_planner_retry_gets_world():
+    p, plan, seen = _retry_planner(True)
+    assert "world" in p.get_data_providers()
+    assert seen["with_discovery"] is True
