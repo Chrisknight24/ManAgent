@@ -125,6 +125,17 @@ class Solver(Supervisor, Entity):
                     _("[Solver:{id}] DataProvider 'registry' enregistré pour le Solver (Root).")
                     .format(id=self.id)
                 )
+                # Monde vivant : exposé au seul solver root (jamais sous-solvers,
+                # jamais orchestrateur/presentator/learner).
+                try:
+                    from core.discovery.providers.world_provider import WorldProvider
+                    self.register_data_provider("world", WorldProvider())
+                    Logger.info(
+                        _("[Solver:{id}] DataProvider 'world' enregistré (Root seul).")
+                        .format(id=self.id)
+                    )
+                except Exception as e:
+                    Logger.warning(f"[Solver:{id}] WorldProvider indisponible : {e}")
 
                 # Activation explicite de la Progressive Disclosure pour le Root Solver
                 if not self.llm._discovery_enabled:
@@ -409,7 +420,8 @@ class Solver(Supervisor, Entity):
                                     context=self.context,
                                     strategy=decision.refined_strategy,
                                     variable_registry=self.variable_registry,
-                                    candidate_skills=getattr(self, "_candidate_skills", []) or []
+                                    candidate_skills=getattr(self, "_candidate_skills", []) or [],
+                                    enable_world_pd=attempt_counter > 1,
                                 )
                             self.current_attempt.proposed_plan = proposed_plan.model_dump(mode='json')
                             self.current_attempt.advice_injected = getattr(self.planner, "_cached_advice", None) or None
@@ -619,6 +631,21 @@ class Solver(Supervisor, Entity):
                             })
 
                 self.execution_tree.ended_at = time.time()
+
+                if success and final_result is not None:
+                    # Vérification finale ROOT : le but est-il VRAIMENT atteint ?
+                    # (les sous-solvers sont déjà revérifiés par leur parent ;
+                    # le root n'avait personne au-dessus de lui).
+                    if getattr(self, "depth", 0) == 0:
+                        _ok, _why = await self._verify_mission_convergence(final_result)
+                        if not _ok:
+                            Logger.error(f"[Solver:{self.id}] ❌ Vérification finale : {_why}")
+                            success = False
+                            final_result = None
+                            self.current_attempt.outcome = "failed"
+                            self.current_attempt.failure_class = FailureClass.CONVERGENCE_FAILURE
+                            self.current_attempt.failure_reason = _why
+                            self.context += _("\n[Échec] {}.").format(_why)
 
                 if success and final_result is not None:
                     self.execution_tree.status = "success"
@@ -903,6 +930,35 @@ class Solver(Supervisor, Entity):
 
     async def process(self, *args, **kwargs) -> Any:
         return await self.run()
+
+    async def _verify_mission_convergence(self, final_result) -> tuple:
+        """Vérification finale ROOT : le but est-il VRAIMENT atteint ?
+
+        Un appel sémantique (PD-capable : peut inspecter le monde en cas de
+        doute). Échec infra -> on ne tue PAS la mission (fail-open + warning).
+        Retour (ok, raison).
+        """
+        try:
+            from core.plan_models import ConvergenceDecision
+            loader = get_prompt_loader()
+            prompt = loader.load(
+                "convergence.md",
+                lang=self.runtime_state.language,
+                step_description=self.goal,
+                expected_result=self.goal,
+                actual_result=(getattr(final_result, "final_context", "") or "")[-4000:],
+            )
+            decision = await self.llm.generate_structured(
+                prompt=prompt,
+                schema=ConvergenceDecision,
+                tag="final_convergence",
+            )
+            if getattr(decision, "is_convergent", False):
+                return True, ""
+            return False, str(getattr(decision, "reason", "") or _("But non atteint."))
+        except Exception as e:
+            Logger.warning(f"[Solver:{self.id}] Vérification finale impossible ({e}) — mission conservée.")
+            return True, ""
 
     async def _handle_skill_lifecycle_post_execution(self, is_success: bool):
         """

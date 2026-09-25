@@ -4,7 +4,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.plan_models import Plan, PlanStep, StepType, is_mission_success
+from core.plan_models import Plan, PlanStep, StepType, is_mission_success, is_simple_data_condition
 from core.plan_validator import (
     find_unknown_plan_tools,
     find_malformed_step_args,
@@ -58,6 +58,23 @@ def test_mission_success_needs_material_action():
     assert is_mission_success(True, 2)[0] is True
     ok, why = is_mission_success(True, 0)
     assert ok is False and "matérielle" in why
+
+
+def test_simple_data_condition():
+    assert is_simple_data_condition('$@_data_fenetre == "cmd"') is True
+    assert is_simple_data_condition('$@_a == "x" and $@_b != "y"') is True
+    assert is_simple_data_condition('$@_bool_x == True') is True
+    assert is_simple_data_condition('$@_data_x.result == "y"') is False
+    assert is_simple_data_condition('"a" in $@_data_x') is False
+    assert is_simple_data_condition('$@_data_x.startswith("y")') is False
+
+
+def test_step_accepts_simple_data_condition():
+    s = PlanStep(id="s1", description="d", type=StepType.TOOL_CALL,
+                 tool_name="perceive", tool_args_json="{}",
+                 expected_result="true",
+                 execute_if='$@_data_fenetre == "cmd"')
+    assert s.execute_if == '$@_data_fenetre == "cmd"'
 
 
 def test_malformed_args_flagged():

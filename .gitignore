@@ -32,6 +32,8 @@ build/
 # Fichier d'echange local des logs (jamais sur git)
 user_log.txt
 user_logs.txt
+# Prompts enregistrés en debug (jamais sur git)
+prompts_log/
 
 # OS
 Thumbs.db

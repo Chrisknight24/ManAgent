@@ -2686,6 +2686,15 @@ class Orchestrator(Supervisor, Entity):
             )
             self.runtime_state.discovery_engine.register_explorer(history_explorer)
             Logger.info("[Orchestrator] HistoryExplorer enregistré.")
+
+            # Explorer monde vivant : enregistré globalement (le moteur sait
+            # l'appeler), mais exposé aux seules entités autorisées via leur
+            # provider (solver root, planner en retry, convergence).
+            from core.discovery.explorers.world_explorer import WorldExplorer
+            self.runtime_state.discovery_engine.register_explorer(
+                WorldExplorer(self.runtime_state)
+            )
+            Logger.info("[Orchestrator] WorldExplorer enregistré.")
         else:
             Logger.warning("[Orchestrator] DiscoveryEngine non disponible, impossible d'enregistrer les Explorers.")        
         await self.propagate_event(Events.RUNTIME_CONFIGURED, {

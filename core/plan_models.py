@@ -139,8 +139,8 @@ class PlanStep(BaseModel):
         
         if self.execute_if:
             v_lower = self.execute_if.lower()
-            if "_data" in v_lower:
-                raise ValueError("CRITICAL REJECTION: Le champ 'execute_if' ne doit jamais analyser les variables de données complexes (ex: $@_data_nom). Utilisez uniquement le signal binaire $@_bool_nom.")
+            if "_data" in v_lower and not is_simple_data_condition(self.execute_if):
+                raise ValueError("CRITICAL REJECTION: Le champ 'execute_if' n'accepte que des signaux booléens ($@_bool_nom) ou des comparaisons simples ($@_data_x == \"texte\"). Pas de notation pointée, ni IN/CONTAINS.")
             if "." in self.execute_if:
                 raise ValueError("CRITICAL REJECTION: La notation pointée (ex: .result, .data) est strictement prohibée dans 'execute_if'.")
             if "contains" in v_lower or " in " in v_lower:
@@ -241,6 +241,47 @@ def is_mission_success(has_tool_steps: bool, material_successes: int) -> tuple:
 import re
 import hashlib
 from typing import List, Optional, Dict, Any
+
+
+def is_simple_data_condition(expr: str) -> bool:
+    """Dit si une condition n'utilise que des comparaisons simples.
+
+    Autorisé : `$@_data_x == "texte"`, `!=`, combinés par and/or (insensible
+    à la casse pour True/False). L'executor sait évaluer ça (égalité de
+    chaînes/valeurs interpolées). Interdit : notation pointée, IN/CONTAINS,
+    fonctions, tout le reste. Fonction pure, testée vite.
+    """
+    import ast as _ast
+
+    if not expr or not isinstance(expr, str):
+        return True
+    # Masque les variables $@_xxx / @$_xxx par des noms simples.
+    masked = re.sub(r'(?:\$@_|@\$_)([a-zA-Z0-9_]+)', r'VAR_\1', expr)
+    try:
+        tree = _ast.parse(masked, mode='eval')
+    except Exception:
+        return False
+
+    def _ok(node) -> bool:
+        if isinstance(node, _ast.Expression):
+            return _ok(node.body)
+        if isinstance(node, _ast.BoolOp):
+            return isinstance(node.op, (_ast.And, _ast.Or)) and all(_ok(v) for v in node.values)
+        if isinstance(node, _ast.Compare):
+            if not all(isinstance(o, (_ast.Eq, _ast.NotEq)) for o in node.ops):
+                return False
+            parts = [node.left] + list(node.comparators)
+            return all(isinstance(p, (_ast.Constant, _ast.Name)) for p in parts)
+        if isinstance(node, (_ast.Constant, _ast.Name)):
+            return True
+        return False
+
+    if "." in masked:
+        return False
+    low = masked.lower()
+    if " in " in f" {low} " or "contains" in low:
+        return False
+    return _ok(tree)
 
 FR_TO_EN_ACTIONS = {
     "ouvrir": "open",

@@ -8,6 +8,8 @@
 - Le mainteneur (Christian) doit valider avec `GO`.
 - Sans `GO` explicite : NE RIEN MODIFIER, NE RIEN COMMITTER, NE RIEN PUSHER.
 - Une seule mission à la fois. Pas d'actions cachées.
+- Commit local après chaque mission vérifiée (tests verts) : jamais de code
+  non committé qui tourne côté hôte. Push = GO séparé.
 
 Format attendu :
 ```

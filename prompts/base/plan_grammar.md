@@ -8,7 +8,9 @@ Chaque outil produit **deux sorties** :
 
 - **Conditions (`execute_if`)** : utilisent exclusivement le signal booléen (`$@_bool_xxx` ou `$@_bool_step_X`).  
   Exemple valide : `execute_if = "$@_bool_target_ready == True"` ou `execute_if = "$@_bool_step_1 == True"`  
-  ⛔ **Interdiction formelle** d'utiliser une variable de données (`$@_data_xxx`), la notation pointée (`.result`, `.data`), ou des opérateurs (`IN`, `CONTAINS`) dans les conditions `execute_if`. Seuls les signaux booléens (`$@_bool_...`) sont autorisés dans `execute_if`.
+  ✅ **RECETTE GARANTIE** : chaque étape N produit automatiquement `$@_bool_step_N` (True/False). Pour brancher sur l'étape N, écris TOUJOURS `$@_bool_step_N == True` (ou `== False`) — rien d'autre.  
+  ✅ **Comparaison de contenu autorisée** : `$@_data_nom == "texte exact"` (ou `!=`), combinable par `and`/`or`. Exemple : `$@_data_fenetre == "cmd"`.  
+  ⛔ **Interdiction formelle** de tout le reste dans `execute_if` : notation pointée (`.result`, `.data`), `IN`, `CONTAINS`, fonctions.
 
 ### DEUX FAÇONS DE GÉRER UN FALLBACK / CONDITIONNEL
 

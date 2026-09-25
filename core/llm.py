@@ -518,6 +518,16 @@ class Llm:
 
         discovery_section = self._build_discovery_section(schema, blocked_data_types)
 
+        # Économie tokens (générique) : sans rien d'exploitable, la boucle
+        # ne servirait qu'à brûler des appels (demande → échec → réessai).
+        if not (discovery_section or "").strip():
+            Logger.debug(
+                f"[LLM] PD sans matière (tag={tag}) : chemin legacy direct, 0 appel gaspillé."
+            )
+            return await self._generate_structured_legacy(
+                prompt, schema, tag, mission_id, media_assets=media_assets
+            )
+
         iteration = 0
         while iteration < self._max_iterations:
             iteration += 1
@@ -574,7 +584,6 @@ class Llm:
                             "Veuillez vous contenter des données actuellement disponibles ou utiliser un autre axe."
                         )
                         prompt_modified = prompt_modified + system_msg
-                        discovery_section = self._build_discovery_section(schema, blocked_data_types)
                         continue
 
                 discovery_history.append(current_signature)

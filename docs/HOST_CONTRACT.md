@@ -150,6 +150,12 @@ Inspection des prompts (debug) : lancez avec `MANAGENT_RECORD_PROMPTS=1` —
 chaque prompt rendu est copié dans `prompts_log/` (dossier de données) avec
 la liste des variables (noms seuls, jamais les valeurs/secrets).
 
+Monde vivant via discovery : les entités autorisées (solver, planner en
+retry, convergence) peuvent demander `world` (`inspect_state`,
+`locate_target`, `verify_effect`) quand les données en main ne suffisent pas
+— jamais systématiquement. Préavis hôte : chaque appel arrive en
+`tool.requested` comme d'habitude, rien de nouveau à câbler.
+
 ## 7. Plan-first + rules
 
 ManAgent répond toujours par un plan validé. L'utilisateur peut contraindre avec `rules.md` (confirmation humaine, rejets, niveaux de risque). L'hôte n'a pas besoin de relire les prompts.

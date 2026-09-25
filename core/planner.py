@@ -122,7 +122,8 @@ class Planner(Entity):
         strategy = kwargs.get("strategy", args[2] if len(args) > 2 else "")
         variable_registry = kwargs.get("variable_registry", args[3] if len(args) > 3 else {})
         candidate_skills = kwargs.get("candidate_skills", args[4] if len(args) > 4 else None)
-        return await self.propose_plan(goal, context, strategy, variable_registry, candidate_skills=candidate_skills)
+        enable_world_pd = kwargs.get("enable_world_pd", args[5] if len(args) > 5 else False)
+        return await self.propose_plan(goal, context, strategy, variable_registry, candidate_skills=candidate_skills, enable_world_pd=enable_world_pd)
 
     async def propose_plan(
         self,
@@ -130,7 +131,8 @@ class Planner(Entity):
         context: str,
         strategy: str,
         variable_registry: dict,
-        candidate_skills: Optional[Union[List[Dict[str, Any]], str]] = None
+        candidate_skills: Optional[Union[List[Dict[str, Any]], str]] = None,
+        enable_world_pd: bool = False,
     ) -> Plan:
         if hasattr(self.runtime_state, 'orchestrator') and self.runtime_state.orchestrator:
             await self.runtime_state.orchestrator.propagate_event(Events.STATUS_UPDATE, {"message": _("Le Planner génère un plan d'action structuré...")})
@@ -154,6 +156,20 @@ class Planner(Entity):
             Logger.info(f"[Planner] 💡 Conseil injecté ({len(advice)} caractères).")
 
         tools_view = await self.runtime_state.tools_manager.get_tools_view()
+        # Monde vivant : UNIQUEMENT en retry (premier passage inchangé :
+        # rapide, pas cher). Le solver active après le 1er échec.
+        if enable_world_pd and self.runtime_state.discovery_engine:
+            try:
+                from core.discovery.providers.world_provider import WorldProvider
+                self.register_data_provider("world", WorldProvider())
+                if self.llm and not self.llm._discovery_enabled:
+                    self.llm.enable_discovery(self.runtime_state.discovery_engine, self)
+                Logger.info(
+                    _("[Planner:{name}] Monde vivant exposé (retry seul).")
+                    .format(name=self.name)
+                )
+            except Exception as e:
+                Logger.warning(f"[Planner:{self.name}] World PD indisponible : {e}")
         loader = get_prompt_loader()
 
         skills_text = ""
@@ -246,7 +262,7 @@ class Planner(Entity):
             prompt=prompt,
             schema=Plan,
             tag="Plan",
-            with_discovery=False
+            with_discovery=enable_world_pd
         )
 
         try:

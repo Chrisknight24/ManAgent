@@ -163,3 +163,5 @@ Apprentissage : `learner.analyze_started/finished`, `discovery.session_start/ste
 2. Toujours configurer avant de discuter.
 3. On n'enlève jamais une action existante sans changer de version majeure.
 4. `rules.md` (côté ManAgent) contraint les plans : confirmations humaines, rejets, risques.
+5. Mission réussie = au moins une action matérielle réussie (les affirmations seules ne concluent jamais) ; vérification finale au root.
+6. Découverte (PD) à la demande uniquement ; sans matière exploitable, réponse directe sans boucle.
