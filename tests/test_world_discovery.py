@@ -14,8 +14,16 @@ from tools import internal_tools as IT
 def test_provider_declares_world_without_inventory():
     p = WorldProvider()
     assert p.get_data_type() == "world"
-    assert p.get_targets() == []
+    assert p.get_targets() == ["this_world"]
     assert "monde" in p.get_scope_description().lower() or "world" in p.get_scope_description().lower() or len(p.get_scope_description()) > 10
+
+
+def test_provider_alias_from_host_manifest():
+    from types import SimpleNamespace
+    manifest = SimpleNamespace(metadata={"world_alias": "atelier"})
+    rs = SimpleNamespace(host_manifest=manifest)
+    assert WorldProvider(rs).get_targets() == ["atelier"]
+    assert WorldProvider(None).get_targets() == ["this_world"]
 
 
 def _explorer(ns_manager):

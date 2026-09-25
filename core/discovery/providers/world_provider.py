@@ -3,17 +3,37 @@ core/discovery/providers/world_provider.py
 ==========================================
 DataProvider du monde vivant (état actuel hors registre).
 
-Le monde n'a pas d'inventaire : pas de cibles statiques. L'entité précise
-ce qu'elle cherche dans sa demande (target libre). Exposition verrouillée :
-solver root, planner en retry et convergence uniquement — jamais
-orchestrateur/presentator/learner, jamais sous-solvers.
+Pas d'inventaire : UNE cible fictive stable ("this_world" par défaut,
+surchargée par l'hôte via metadata `world_alias` du manifeste) pour
+satisfaire l'exigence de cible du discours PD — sans toucher aux .md.
+L'entité décrit ce qu'elle cherche en langage naturel dans sa demande.
+Exposition verrouillée : solver root, planner en retry et convergence
+uniquement — jamais orchestrateur/presentator/learner, jamais sous-solvers.
 """
 from typing import List, Any
 from core.discovery.data_provider import DataProvider
 
+DEFAULT_WORLD_TARGET = "this_world"
+
 
 class WorldProvider(DataProvider):
     """Déclare la capacité 'world' pour la Progressive Disclosure."""
+
+    def __init__(self, runtime_state=None):
+        self._runtime_state = runtime_state
+
+    def world_alias(self) -> str:
+        """Nom configurable par l'hôte (metadata `world_alias`), sinon défaut."""
+        try:
+            rs = self._runtime_state
+            manifest = getattr(rs, "host_manifest", None) if rs else None
+            meta = getattr(manifest, "metadata", None) if manifest else None
+            alias = (meta or {}).get("world_alias") if isinstance(meta, dict) else None
+            if alias and str(alias).strip():
+                return str(alias).strip()
+        except Exception:
+            pass
+        return DEFAULT_WORLD_TARGET
 
     def get_data_type(self) -> str:
         return "world"
@@ -26,8 +46,9 @@ class WorldProvider(DataProvider):
         )
 
     def get_targets(self) -> List[str]:
-        # Pas d'inventaire : la cible se décrit en langage naturel dans la demande.
-        return []
+        # Cible fictive stable : satisfait l'exigence de cible du discours PD
+        # sans inventaire (le détail se décrit en langage naturel).
+        return [self.world_alias()]
 
     def get_asset(self, target: str) -> Any:
         raise ValueError(

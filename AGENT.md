@@ -36,6 +36,12 @@ GO REQUIS : oui
 - Référence de vérité pour les missions : les logs de l'HÔTE (pas la console ManAgent). Toujours trancher : problème hôte vs problème cerveau, en restant agnostique des deux côtés.
 - Docs avant code pour toute feature visible.
 
+## 4. Mémoire anti-saturation (contexte limité !)
+- Logs de mission hôte : `C:\Users\CHRISTIAN\Documents\QtProjets\CondiFlow\user_logs.txt` (lecture seule, aval permanent pour les missions).
+- Prompts rendus des entités : `prompts_log/` DANS le dossier de travail ManAgent (pas ailleurs !) — actif si `MANAGENT_RECORD_PROMPTS=1` (variable User + relance de l'app hôte). Fichiers `NNNN_template.lang.md` (+ `.vars.txt` = noms seuls) ; corréler par ordre avec les events `llm_call` des user logs.
+- Pont inter-agents : `C:\Users\CHRISTIAN\Documents\AgentBridge\` (`REGLES.md`, `host_to_brain.md` à vider après résumé, `brain_to_host.md` écriture avec GO, `brain_notes.md` = registre durable).
+- Ce fichier + `brain_notes.md` = mémoire persistante : y inscrire règles, décisions, chemins.
+
 ## 4. Agnosticisme ManAgent (CRITIQUE, non négociable)
 - ManAgent est 100% agnostique (indépendant) sur 3 axes :
   1. Hôte (host) : app desktop Qt, robot, web, CLI, cloud — jamais de code supposé sur l'hôte. Tout passe par `host.manifest` + protocole JSON.

@@ -129,7 +129,7 @@ class Solver(Supervisor, Entity):
                 # jamais orchestrateur/presentator/learner).
                 try:
                     from core.discovery.providers.world_provider import WorldProvider
-                    self.register_data_provider("world", WorldProvider())
+                    self.register_data_provider("world", WorldProvider(self.runtime_state))
                     Logger.info(
                         _("[Solver:{id}] DataProvider 'world' enregistré (Root seul).")
                         .format(id=self.id)

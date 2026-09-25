@@ -161,7 +161,7 @@ class Planner(Entity):
         if enable_world_pd and self.runtime_state.discovery_engine:
             try:
                 from core.discovery.providers.world_provider import WorldProvider
-                self.register_data_provider("world", WorldProvider())
+                self.register_data_provider("world", WorldProvider(self.runtime_state))
                 if self.llm and not self.llm._discovery_enabled:
                     self.llm.enable_discovery(self.runtime_state.discovery_engine, self)
                 Logger.info(
