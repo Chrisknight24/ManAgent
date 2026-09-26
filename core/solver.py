@@ -383,6 +383,7 @@ class Solver(Supervisor, Entity):
 
                 success = False
                 final_result = None
+                final_verified_in_loop = False
                 execution_attempt = 0
                 attempt_counter = 0
                 # Anti faux-succès (Alerte 1) : cumul inter-tentatives.
@@ -592,6 +593,16 @@ class Solver(Supervisor, Entity):
                                 self.current_attempt.failure_reason = _why
                                 self.context += _("\n[Échec] {}.").format(_why)
                                 continue
+                            if getattr(self, "depth", 0) == 0:
+                                _fok, _fwhy = await self._verify_mission_convergence(result)
+                                if not _fok:
+                                    Logger.error(f"[Solver:{self.id}] ❌ Vérification finale (tour {execution_attempt}) : {_fwhy} — nouvel essai.")
+                                    self.current_attempt.outcome = "failed"
+                                    self.current_attempt.failure_class = FailureClass.CONVERGENCE_FAILURE
+                                    self.current_attempt.failure_reason = _fwhy
+                                    self.context += _("\n[Échec] {}.").format(_fwhy)
+                                    continue
+                                final_verified_in_loop = True
                             self.current_attempt.outcome = "success"
                             self.current_attempt.failure_class = FailureClass.NONE
                             success = True
@@ -636,7 +647,10 @@ class Solver(Supervisor, Entity):
                     # Vérification finale ROOT : le but est-il VRAIMENT atteint ?
                     # (les sous-solvers sont déjà revérifiés par leur parent ;
                     # le root n'avait personne au-dessus de lui).
-                    if getattr(self, "depth", 0) == 0:
+                    # Filet : déjà vérifiée dans la boucle en cas de succès —
+                    # on ne revérifie que si ce n'est pas fait (ex : sortie
+                    # de boucle sur annulation partielle).
+                    if getattr(self, "depth", 0) == 0 and not final_verified_in_loop:
                         _ok, _why = await self._verify_mission_convergence(final_result)
                         if not _ok:
                             Logger.error(f"[Solver:{self.id}] ❌ Vérification finale : {_why}")
