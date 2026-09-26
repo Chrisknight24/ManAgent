@@ -242,8 +242,35 @@ COMPACTOR_TAGS = {"MissionCompactor"}
 LEARNER_TAGS = {"ExtractedLesson", "Learner"}
 POST_EXECUTION_TAGS = COMPACTOR_TAGS | LEARNER_TAGS
 CONVERGENCE_TAGS = {"ConvergenceDecision"}
+ANALYSIS_TAGS = {"perceive_understand", "llm_analyze_data", "tools_manager_decision"}
 EXPLORER_PLAN_TAGS = {"explorer_plan_generation", "explorer_plan_generation_mission"}
 DISCOVERY_LLM_TAGS = EXPLORER_PLAN_TAGS | {"analyze_registry", "analyze_execution_tree", "discovery_semantic"}
+
+_ABSENCE_MARKERS = [
+    "aucun filtre", "aucune lunette", "aucun élément", "aucun element",
+    "n'est visible", "ne sont visibles", "pas visible", "pas visibles",
+    "introuvable", "not visible", "not present", "not found",
+    "no filter", "no sunglasses", "no products", "no results",
+    "nothing visible", "nothing found", "aucune recherche",
+]
+
+
+def _analysis_reports_absence(text) -> bool:
+    if not text:
+        return False
+    low = str(text).strip().lower()
+    return any(m in low for m in _ABSENCE_MARKERS)
+
+
+def _call_text(call) -> str:
+    resp = (call or {}).get("response") or {}
+    parts = [
+        str(resp.get("data") or ""),
+        str(resp.get("message") or ""),
+        str(resp.get("reason") or ""),
+        str((call or {}).get("prompt") or "")[:0],
+    ]
+    return " ".join(parts)
 
 def _parse_ts(ts) -> Optional[float]:
     if ts is None:
@@ -720,6 +747,62 @@ def attach_llm_calls_by_mission(episodes, llm_calls, events):
         if ep:
             ep.setdefault("_other_calls", []).append(call)
 
+    # POST-TRAITEMENT CENTRAL : bloc Analyse trié + résumé skills par solver.
+    # Avant : analyse dispersée au clic nœud, skills cumulés partout.
+    # Maintenant : ep._analysis_calls trié par heure, ep._skills_summary groupé.
+    for ep in episodes:
+        mid = ep.get("mission_id")
+        if not mid:
+            continue
+        analysis = []
+        for call in llm_calls:
+            if call.get("tag") not in ANALYSIS_TAGS:
+                continue
+            c_mid = call.get("mission_id")
+            c_sid = call.get("solver_id")
+            belongs = (c_mid == mid) or (c_mid and solver_to_mission.get(c_mid) == mid) or (c_sid and solver_to_mission.get(c_sid) == mid)
+            if not belongs:
+                continue
+            resp = call.get("response") or {}
+            txt = f"{resp.get('data') or ''} {resp.get('message') or ''}"
+            analysis.append({
+                "tag": call.get("tag"),
+                "solver_id": c_sid,
+                "step_id": call.get("step_id"),
+                "attempt_number": call.get("attempt_number"),
+                "ts": call.get("ts"),
+                "_ts": _parse_ts(call.get("ts")) or 0,
+                "duration_ms": call.get("duration_ms"),
+                "found": (None if call.get("tag") == "tools_manager_decision" else (not _analysis_reports_absence(txt))),
+                "summary": str(resp.get("data") or resp.get("message") or "")[:220],
+            })
+        analysis.sort(key=lambda a: a["_ts"])
+        ep["_analysis_calls"] = analysis
+
+        grouped = {}
+        for ev in (ep.get("_skill_lifecycle") or []):
+            sk = ev.get("skill_id") or "unknown"
+            g = grouped.setdefault(sk, {"skill_id": sk, "events": 0, "successes": 0,
+                                        "last_count": 0, "threshold": ev.get("threshold") or 2,
+                                        "last_state": None, "solvers": set()})
+            g["events"] += 1
+            if ev.get("event") in ("skill_created",):
+                g["last_state"] = ev.get("state")
+            if ev.get("is_success"):
+                g["successes"] += 1
+            if ev.get("consecutive_count") is not None:
+                g["last_count"] = ev.get("consecutive_count")
+            if ev.get("threshold"):
+                g["threshold"] = ev.get("threshold")
+            if ev.get("solver_id"):
+                g["solvers"].add(ev.get("solver_id"))
+        summary = []
+        for g in grouped.values():
+            g["solvers"] = sorted(g["solvers"])
+            summary.append(g)
+        summary.sort(key=lambda g: (-g["events"], g["skill_id"]))
+        ep["_skills_summary"] = summary
+
 def attach_routing_calls_to_turns(session_turns, llm_calls):
     turns_by_session = {}
     for turn in session_turns:
@@ -822,6 +905,7 @@ def build_data(
 
     # Solver Registries & Skill Lifecycle Events
     solver_registries = {}
+    unattached_skill_events = []
     for ev in events:
         if ev.get("event") == "solver_registry":
             solver_id = ev.get("solver_id")
@@ -832,7 +916,18 @@ def build_data(
             if mid and mid in ep_index:
                 ep_index[mid].setdefault("_skill_lifecycle", []).append(ev)
             elif not mid and ep_index:
-                list(ep_index.values())[-1].setdefault("_skill_lifecycle", []).append(ev)
+                # AVANT : allait à la dernière mission (cumul faux).
+                # MAINTENANT : rattacher par session si possible, sinon orphelins visibles.
+                sess = ev.get("session_id")
+                placed = False
+                if sess:
+                    for cand in episodes:
+                        if cand.get("session_id") == sess:
+                            cand.setdefault("_skill_lifecycle", []).append(ev)
+                            placed = True
+                            break
+                if not placed:
+                    unattached_skill_events.append(ev)
 
     for ep in episodes:
         ep["_registries"] = solver_registries
@@ -912,6 +1007,7 @@ def build_data(
         "target_session_id": target_session_id,
         "target_mission_id": target_mission_id,
         "clock_offset_detected": 0,
+        "unattached_skill_events": unattached_skill_events,
     }
 
 # =====================================================
@@ -2334,6 +2430,14 @@ function renderMissionDetail(missionId) {
     html += `</div>`;
   }
 
+  // Panneau central : Analyse écran / données (triée par heure, 1 ligne par appel).
+  // Avant : dispersée au clic nœud. Maintenant : visible d'un coup d'œil.
+  html += renderCentralAnalysis(ep);
+
+  // Panneau central : Skills cumulés résumés (groupés par skill, max 5 + voir plus).
+  // Avant : même liste répétée sous chaque solver. Maintenant : 1 seul résumé central.
+  html += renderCentralSkills(ep);
+
   // HTN Solver Execution Tree & Cognitive Phases
   html += `<div style="margin-top:18px;">
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
@@ -2385,6 +2489,50 @@ function renderMissionDetail(missionId) {
 
   html += `</div>`;
   pane.innerHTML = html;
+}
+
+// ==========================================
+// PANNEAU CENTRAL : ANALYSE + SKILLS RÉSUMÉS
+// ==========================================
+function renderCentralAnalysis(ep) {
+  const calls = ep._analysis_calls || [];
+  if (calls.length === 0) return '';
+  const rows = calls.map((c, idx) => {
+    const badge = c.found === false
+      ? '<span class="badge badge--failed">absent</span>'
+      : (c.found === true ? '<span class="badge badge--success">trouvé</span>' : '<span class="badge badge--pending">décision</span>');
+    const label = c.tag === 'perceive_understand' ? '👁️ Percevoir' : (c.tag === 'llm_analyze_data' ? '🔍 Analyser' : '🧰 Choisir outil');
+    const where = [c.solver_id ? String(c.solver_id).slice(0, 8) : '?', c.step_id || '?'].join(' · ');
+    return `<div class="discovery-chip-compact" style="cursor:default;" title="${esc(c.summary || '')}">
+      <span style="font-size:12px;">${label} ${badge} <span style="color:var(--text-faint); font-family:var(--mono); font-size:11px;">${esc(where)}</span><br/><span style="color:var(--text-muted);">${esc((c.summary || '').slice(0, 140))}</span></span>
+      <span style="font-size:11px; color:var(--text-faint); font-family:var(--mono); white-space:nowrap;">${c.duration_ms != null ? c.duration_ms + ' ms' : ''}</span>
+    </div>`;
+  }).join('');
+  return `<div style="margin-top:14px; margin-bottom:6px;">
+    <div class="discovery-accordion-header" onclick="toggleAccordion('central-analysis-${esc(ep.mission_id)}')">
+      <span>🔍 Analyse écran / données — central (${calls.length})</span><span>▼</span>
+    </div>
+    <div id="central-analysis-${esc(ep.mission_id)}"><div class="discovery-container-scroll">${rows}</div></div>
+  </div>`;
+}
+
+function renderCentralSkills(ep) {
+  const groups = ep._skills_summary || [];
+  if (groups.length === 0) return '';
+  const shown = groups.slice(0, 5);
+  const extra = groups.length - shown.length;
+  const rows = shown.map(g => {
+    const state = g.last_state ? ` · ${esc(g.last_state)}` : '';
+    return `<div class="discovery-chip-compact" style="cursor:default;">
+      <span style="font-size:12px;">⚡ <code>${esc(g.skill_id)}</code> <b>${g.last_count} / ${g.threshold}</b>${state} <span style="color:var(--text-faint);">(${g.events} events)</span></span>
+    </div>`;
+  }).join('');
+  return `<div style="margin-top:10px; margin-bottom:6px;">
+    <div class="discovery-accordion-header" onclick="toggleAccordion('central-skills-${esc(ep.mission_id)}')">
+      <span>⚡ Skills cumulés — résumé (${groups.length})</span><span>▼</span>
+    </div>
+    <div id="central-skills-${esc(ep.mission_id)}"><div class="discovery-container-scroll">${rows}${extra > 0 ? `<div style="font-size:11px; color:var(--text-faint);">+ ${extra} autre(s) — voir onglet Skills</div>` : ''}</div></div>
+  </div>`;
 }
 
 // ==========================================
@@ -2791,9 +2939,16 @@ function renderSolverNodeModern(ep, treeNode, depth) {
 }
 
 function renderSkillLifecycleImpact(ep, solverId) {
-  const lifecycleEvents = ep._skill_lifecycle || [];
+  const allLifecycle = ep._skill_lifecycle || [];
   const sigs = ep.signatures || [];
   const cleanSid = solverId ? solverId.replace(/^solver_/, '') : '';
+  // FILTRE : avant, tout le cumul sous chaque solver (doublons).
+  // Maintenant : seulement ce solver + events globaux sans solver.
+  const lifecycleEvents = allLifecycle.filter(ev => {
+    const sid = ev.solver_id || '';
+    if (!sid) return true;
+    return sid === solverId || sid === cleanSid || sid === ep.mission_id;
+  });
   const skillCalls = (ep._solver_skills && (ep._solver_skills[solverId] || ep._solver_skills[cleanSid] || ep._solver_skills['root_solver'])) || ep._skill_calls || [];
   
   let matchedSkill = null;
@@ -2840,7 +2995,10 @@ function renderSkillLifecycleImpact(ep, solverId) {
   }
 
   if (lifecycleEvents.length > 0) {
-    lifecycleEvents.forEach(ev => {
+    const MAX_SOLVER_EVENTS = 5;
+    const shownEvents = lifecycleEvents.slice(0, MAX_SOLVER_EVENTS);
+    const hiddenCount = lifecycleEvents.length - shownEvents.length;
+    shownEvents.forEach(ev => {
       if (ev.event === 'skill_created') {
         html += `<div style="margin-top:4px; color:var(--text); font-size:12px;">`;
         html += `✨ <b>Compétence Auto-Synthétisée</b> : <code>${esc(ev.skill_id)}</code> v${ev.version || 1} en état <strong>${esc(ev.state || 'SHADOW')}</strong> (${ev.meta_plan_steps || 0} étapes de méta-plan).<br/>`;
@@ -2880,6 +3038,9 @@ function renderSkillLifecycleImpact(ep, solverId) {
       }
       html += `</div>`;
     });
+    if (hiddenCount > 0) {
+      html += `<div style="margin-top:4px; font-size:11px; color:var(--text-faint);">+ ${hiddenCount} autre(s) — voir résumé central ci-dessus.</div>`;
+    }
   } else if (matchedSkill && solverId === 'root_solver') {
     const tp = matchedSkill.trust_profile || {};
     html += `<div style="margin-top:4px; color:var(--text-muted); font-size:12px;">`;
