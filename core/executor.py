@@ -974,6 +974,46 @@ class Executor:
         Logger.info(f"[Executor] [Analyse Sémantique] Invocation du LLM pour l'étape abstraite [{step.id}]...")
         return await self._evaluate_semantic_convergence(step, actual_result)
 
+    def _text_reports_absence(self, text: Optional[str]) -> bool:
+        """Détecte un constat d'absence (rien trouvé / pas visible).
+
+        Cas Amazon 0101 : l'outil rendait result=true avec
+        "Aucun filtre visible" ou "Aucune lunette visible".
+        Le rigide validait à tort. On refuse si le texte dit
+        clairement que l'élément cherché est absent.
+        Volontairement strict : on ne vise que la perception /
+        recherche d'éléments, pas les comptages (0 erreur = succès).
+        """
+        if not text:
+            return False
+        low = text.strip().lower()
+        markers = [
+            "aucun filtre",
+            "aucune lunette",
+            "aucun élément",
+            "aucun element",
+            "n'est visible",
+            "ne sont visibles",
+            "pas visible",
+            "pas visibles",
+            "introuvable",
+            "non présent",
+            "non present",
+            "n'est donc pas présent",
+            "aucune recherche",
+            "not visible",
+            "not present",
+            "not found",
+            "no filter",
+            "no sunglasses",
+            "no products",
+            "no results",
+            "no element",
+            "nothing visible",
+            "nothing found",
+        ]
+        return any(m in low for m in markers)
+
     def _verify_rigid_outcome(self, expected: str, actual: str, supplemental_data: Optional[str] = None, raw_success_flag: Optional[str] = None) -> Tuple[bool, str]:
         expected_clean = expected.strip().lower()
 
@@ -987,6 +1027,11 @@ class Executor:
             flag_clean = raw_success_flag.strip().lower()
             if flag_clean in ["true", "false"]:
                 if expected_clean == flag_clean:
+                    if expected_clean == "true":
+                        combined = f"{actual or ''} {supplemental_data or ''}"
+                        if self._text_reports_absence(combined):
+                            reason = _("Absence détectée : l'outil dit 'true' mais le texte dit que l'élément est absent. Raison : {}").format((supplemental_data or actual or "")[:300])
+                            return False, reason
                     return True, _("Validation stricte réussie.")
                 else:
                     reason = _("Rejet matériel : L'outil a renvoyé le statut '{}', mais le plan exigeait expressément '{}'.").format(flag_clean, expected_clean)
@@ -995,6 +1040,11 @@ class Executor:
                     return False, reason
 
         actual_clean = actual.strip().lower()
+        if expected_clean == "true":
+            combined = f"{actual or ''} {supplemental_data or ''}"
+            if self._text_reports_absence(combined):
+                reason = _("Absence détectée : le texte dit que l'élément est absent. Raison : {}").format((supplemental_data or actual or "")[:300])
+                return False, reason
         if expected_clean == actual_clean or (expected_clean == "true" and not actual_clean.startswith("erreur") and not actual_clean.startswith("error")):
             return True, _("Validation stricte réussie.")
 
