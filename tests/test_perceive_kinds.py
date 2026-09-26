@@ -14,6 +14,10 @@ from core.plan_validator import find_direct_perception_calls, repair_direct_perc
 
 
 def _tool_step(tool_name, sid="s1", args="{}"):
+    if tool_name == "perceive_understand" and (not args or args == "{}"):
+        import json as _json
+        args = _json.dumps({"question": "que voir ?",
+                            "source_tool": "lidar_scan", "source_args": {}})
     return PlanStep(id=sid, description="d", type=StepType.TOOL_CALL,
                     tool_name=tool_name, tool_args_json=args,
                     expected_result="true")

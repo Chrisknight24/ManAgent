@@ -136,6 +136,21 @@ class PlanStep(BaseModel):
         if self.type == StepType.TOOL_CALL:
             if not self.tool_name or not str(self.tool_name).strip():
                 raise ValueError(_("Un step de type 'tool_call' exige obligatoirement un 'tool_name' non vide."))
+            if str(self.tool_name).strip() == "perceive_understand":
+                raw_args = self.tool_args_json
+                try:
+                    parsed = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    question = str(parsed.get("question") or "").strip()
+                    source_tool = str(parsed.get("source_tool") or "").strip()
+                    source_data = str(parsed.get("source_data") or "").strip()
+                    if not question:
+                        raise ValueError(_("perceive_understand exige 'question' (que chercher)."))
+                    if not source_tool and not source_data:
+                        raise ValueError(_("perceive_understand exige 'source_tool' ou 'source_data' (d'où lire le monde)."))
+        
         
         if self.execute_if:
             v_lower = self.execute_if.lower()
