@@ -269,7 +269,8 @@ class SkillSynthesizer:
         combined_signature: str,
         primary_action: str,
         primary_object: str,
-        recent_trees: List[Dict[str, Any]]
+        recent_trees: List[Dict[str, Any]],
+        mission_id: Optional[str] = None,
     ) -> Optional[SkillManifest]:
         """
         Génère un SkillManifest en condensant les récents arbres d'exécution,
@@ -346,13 +347,15 @@ class SkillSynthesizer:
                     synthesis: SkillSynthesisResult = await self.llm.generate_structured(
                         prompt=prompt,
                         schema=SkillSynthesisResult,
-                        tag="SkillSynthesis"
+                        tag="SkillSynthesis",
+                        mission_id=mission_id,
                     )
             else:
                 synthesis: SkillSynthesisResult = await self.llm.generate_structured(
                     prompt=prompt,
                     schema=SkillSynthesisResult,
-                    tag="SkillSynthesis"
+                    tag="SkillSynthesis",
+                    mission_id=mission_id,
                 )
             Logger.info(f"[SkillSynthesizer] ✅ Synthèse réussie pour {skill_id}.")
         except Exception as e:

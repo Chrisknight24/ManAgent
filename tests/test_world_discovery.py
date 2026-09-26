@@ -149,3 +149,11 @@ def test_planner_retry_gets_world():
     p, plan, seen = _retry_planner(True)
     assert "world" in p.get_data_providers()
     assert seen["with_discovery"] is True
+
+
+def test_skills_llm_calls_carry_mission_id():
+    import inspect
+    from core.skills.synthesizer import SkillSynthesizer
+    from core.skills.repair_engine import SkillRepairEngine
+    assert "mission_id" in inspect.signature(SkillSynthesizer.synthesize).parameters
+    assert "mission_id" in inspect.signature(SkillRepairEngine.repair_skill).parameters

@@ -30,6 +30,24 @@ def is_anti_skill_lesson(recommendation: str, scope: str = "") -> bool:
     sc = (scope or "").lower()
     return "execute_skill" in sc or "execute_skill" in rec
 
+
+def dedupe_recommendations(lessons: list) -> list:
+    """Supprime les recommandations quasi-identiques (même texte normalisé).
+
+    Sans ça, 3 lignes « user aime X » sont réinjectées à chaque tour et
+    l'orchestrateur les recommande en boucle. Garde la 1re (meilleur score).
+    Fonction pure, testée vite.
+    """
+    seen = set()
+    out = []
+    for lesson in lessons or []:
+        norm = " ".join(str(lesson.get("recommendation", "") or "").lower().split())
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        out.append(lesson)
+    return out
+
 class ExtractedLesson(BaseModel):
     scope: str = Field(..., description="Identité STABLE et étroite de la leçon.")
     keywords: List[str] = Field(default_factory=list, description="Mots-clés LARGES de découvrabilité.")
@@ -322,6 +340,7 @@ class Advisor:
         
         selected = self.lesson_store.get_similar_lessons(goal_emb, entity_types, effective_env, top_k=5)
         selected = [c for c in selected if not is_anti_skill_lesson(c.get("recommendation", ""), c.get("scope", ""))]
+        selected = dedupe_recommendations(selected)
         selected = selected[:3]
         
         if not selected:

@@ -951,7 +951,8 @@ class Solver(Supervisor, Entity):
             decision = await self.llm.generate_structured(
                 prompt=prompt,
                 schema=ConvergenceDecision,
-                tag="final_convergence",
+                tag="ConvergenceDecision",
+                mission_id=self.id,
             )
             if getattr(decision, "is_convergent", False):
                 return True, ""
@@ -1063,7 +1064,8 @@ class Solver(Supervisor, Entity):
                                 combined_signature=combined_signature_text,
                                 primary_action=primary_action,
                                 primary_object=primary_obj,
-                                recent_trees=recent_trees
+                                recent_trees=recent_trees,
+                                mission_id=mission_id,
                             )
                             if created_manifest:
                                 Logger.event(
@@ -1211,7 +1213,8 @@ class Solver(Supervisor, Entity):
                                             combined_signature=combined_signature_text,
                                             primary_action=primary_action,
                                             primary_object=primary_obj,
-                                            recent_trees=recent_trees
+                                            recent_trees=recent_trees,
+                                            mission_id=mission_id,
                                         )
                         elif state == SkillState.PRODUCTION:
                             # Les métriques d'exécution réelle (succès ou breakout) sont déjà fidèlement
@@ -1236,7 +1239,8 @@ class Solver(Supervisor, Entity):
                                 combined_signature=combined_signature_text,
                                 primary_action=primary_action,
                                 primary_object=primary_obj,
-                                recent_trees=recent_trees
+                                recent_trees=recent_trees,
+                                mission_id=mission_id,
                             )
 
             elif not is_success and canonical_profile_id != -1:
@@ -1275,7 +1279,8 @@ class Solver(Supervisor, Entity):
                                     skill_id=skill_id,
                                     failed_version=ver,
                                     failure_bundle=getattr(self, "last_failure_bundle", None),
-                                    breakout_report=getattr(self, "last_breakout_report", None)
+                                    breakout_report=getattr(self, "last_breakout_report", None),
+                                    mission_id=mission_id,
                                 )
 
         except Exception as e:

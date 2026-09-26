@@ -25,7 +25,8 @@ class SkillRepairEngine:
         skill_id: str,
         failed_version: int,
         failure_bundle: Optional[FailureBundle] = None,
-        breakout_report: Optional[BreakoutReport] = None
+        breakout_report: Optional[BreakoutReport] = None,
+        mission_id: Optional[str] = None,
     ):
         """
         Tente de réparer un Skill tombé en QUARANTINE en générant une nouvelle version (vN+1) en DRAFT.
@@ -102,13 +103,15 @@ class SkillRepairEngine:
                     repair_result: SkillRepairResult = await self.llm.generate_structured(
                         prompt=prompt,
                         schema=SkillRepairResult,
-                        tag="SkillRepair"
+                        tag="SkillRepair",
+                        mission_id=mission_id,
                     )
             else:
                 repair_result: SkillRepairResult = await self.llm.generate_structured(
                     prompt=prompt,
                     schema=SkillRepairResult,
-                    tag="SkillRepair"
+                    tag="SkillRepair",
+                    mission_id=mission_id,
                 )
         except Exception as e:
             Logger.error(f"[SkillRepairEngine] ❌ Échec de la génération LLM pour la réparation: {e}")

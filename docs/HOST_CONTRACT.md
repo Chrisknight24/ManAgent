@@ -103,6 +103,13 @@ Séquence recommandée pour l'écran modèles de l'hôte :
 4. Bouton Annuler (pendant un download) → `{"action":"embeddings.cancel","payload":{"id":"..."}}` (reprise auto au prochain prepare). Le prepare vérifie l'espace disque avant et refuse clairement si insuffisant.
 4. Alternative en une fois : `runtime.configure {"embeddings":{"mode":"lite|local|remote",...}}` (voir §3b).
 
+## 3d. Nom du monde (alias, optionnel)
+
+La découverte d'état (`world`) affiche une cible fictive stable car le monde
+n'a pas d'inventaire : `"this_world"` par défaut. Pour un nom métier
+(ex : `"atelier"`, `"ligne-3"`), déclarez `"metadata": {"world_alias": "atelier"}`
+dans le manifeste. Pas de nouveau champ : `metadata` est libre.
+
 ## 4. Actions supportées (voir `core/constants.py:8`)
 
 | Action | Usage |

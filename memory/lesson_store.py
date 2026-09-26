@@ -177,6 +177,31 @@ class LessonStore:
             with self._get_connection() as conn:
                 self._ensure_extension_loaded(conn)
                 cursor = conn.cursor()
+                # Dédup faits sémantiques : même texte (normalisé) = on renforce
+                # au lieu de dupliquer (l'UI affichait "user aime" x N).
+                if scope == "semantic_fact" and recommendation:
+                    norm = " ".join(str(recommendation).lower().split())
+                    cursor.execute(
+                        "SELECT id, evidence_count, keywords_json FROM lessons "
+                        "WHERE scope = ? AND LOWER(TRIM(recommendation)) = ? "
+                        "ORDER BY id DESC LIMIT 5",
+                        (scope, norm),
+                    )
+                    for row in cursor.fetchall():
+                        lid, ev, kw_json = row[0], row[1], row[2]
+                        try:
+                            merged = sorted(set(json.loads(kw_json or "[]")) | set(keywords))
+                        except Exception:
+                            merged = sorted(set(keywords))
+                        cursor.execute(
+                            "UPDATE lessons SET evidence_count = ?, keywords_json = ?, "
+                            "last_verified_at = ? WHERE id = ?",
+                            (int(ev or 1) + 1, json.dumps(merged, ensure_ascii=False),
+                             datetime.now().isoformat(), lid),
+                        )
+                        conn.commit()
+                        Logger.debug(f"[LessonStore] Fait existant renforcé (id={lid}), pas de doublon.")
+                        return
                 initial_confidence = 2 / 3
                 sources = [mission_id] if mission_id else []
                 cursor.execute('''
