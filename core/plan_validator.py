@@ -180,6 +180,42 @@ def repair_direct_perception_calls(plan: Any, perception_tool_names=None) -> lis
     return repaired
 
 
+def find_ungrounded_final_answer(plan: Any) -> List[str]:
+    """Dernière étape `direct_answer` qui affirme sans preuve.
+
+    Règle générique (aucun métier, aucun hôte) : si le plan agit sur le
+    monde (au moins un `tool_call`), alors un `direct_answer` final
+    INCONDITIONNEL (sans `execute_if`) doit reprendre une donnée du
+    registre (`$@_...`) produite avant. Un texte libre qui affirme le
+    succès ("mission accomplie", "étapes décrites"...) n'est pas une
+    preuve : le validateur final le refuserait après exécution.
+    Les branches conditionnelles (ex : message d'échec) et les plans
+    purement bavards (aucun `tool_call`) sont ignorés.
+    Fonction pure, sans LLM, testable vite.
+    """
+    steps = list(getattr(plan, "steps", []) or [])
+    if not steps:
+        return []
+    has_tool = False
+    for step in steps:
+        stype = getattr(getattr(step, "type", None), "value", getattr(step, "type", None))
+        if stype == "tool_call":
+            has_tool = True
+            break
+    if not has_tool:
+        return []
+    last = steps[-1]
+    last_type = getattr(getattr(last, "type", None), "value", getattr(last, "type", None))
+    if last_type != "direct_answer":
+        return []
+    if getattr(last, "execute_if", None):
+        return []
+    text = f"{getattr(last, 'response_text', None) or ''} {getattr(last, 'description', None) or ''}"
+    if "$@_" in text:
+        return []
+    return [str(getattr(last, "id", "?"))]
+
+
 class PlanValidationOutcome:
     """
     Résultat riche de la validation. Remplace le simple bool historique de
@@ -561,6 +597,7 @@ class PlanValidator:
         malformed = find_malformed_step_args(plan)
         reserved = find_reserved_plan_tools(plan)
         direct_perception = find_direct_perception_calls(plan, self._perception_tools)
+        ungrounded = find_ungrounded_final_answer(plan)
         problems = [f"inconnu:{u}" for u in unknown]
         problems += [f"args illisibles étape:{s}" for s in malformed]
         problems += [f"outil réservé au validateur étape:{s}" for s in reserved]
@@ -568,6 +605,12 @@ class PlanValidator:
             f"perception directe interdite étape:{s} "
             "(lire le monde uniquement via perceive_understand)"
             for s in direct_perception
+        ]
+        problems += [
+            f"réponse finale non prouvée étape:{s} "
+            "(un direct_answer final sans référence $@_data_xxx affirme "
+            "au lieu de prouver : reprenez une donnée du registre)"
+            for s in ungrounded
         ]
         if problems:
             details = ", ".join(problems[:8])

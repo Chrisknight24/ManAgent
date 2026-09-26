@@ -69,6 +69,7 @@ Les outils sont **stateless (sans mémoire)** et ne peuvent pas définir de vari
   - Il est **FORMELLEMENT INTERDIT** d'utiliser une `abstract_task` pour inspecter, tester, vérifier, filtrer, décoder ou lire le contenu d'une variable `$@_data_xxx` déjà présente dans le registre. Utilisez un `tool_call` direct.
 
 - **`direct_answer`** : réponse finale à l'utilisateur (succès, échec, ou refus).
+  - ⛔ **Pas de parole d'évangile** : un `direct_answer` final SANS condition (`execute_if` vide) qui suit des `tool_call` doit reprendre une donnée du registre (`$@_data_xxx` produite avant). Un texte libre qui affirme le succès ("mission accomplie", "voici ce qui a été fait"...) sera REFUSÉ par le validateur. Prouver, pas raconter.
 
 ---
 
@@ -122,3 +123,4 @@ CHECKLIST AVANT DE RÉPONDRE :
 - [ ] Aucun `output_variable_name` n'est imbriqué dans `tool_args_json` ?
 - [ ] Les champs textuels (`description`, `result_context`, `response_text`) sont purs et ne contiennent aucun fragment de consigne de prompt ?
 - [ ] Les arguments d'outils sont-ils des valeurs scalaires/structurées sans pseudo-code résiduel ?
+- [ ] Le `direct_answer` final sans condition reprend-il une donnée `$@_data_xxx` produite avant (preuve, pas affirmation) ?
