@@ -703,7 +703,12 @@ class Llm:
         if mission_id is None and self.runtime_state:
             exec_ctx = getattr(self.runtime_state, 'execution_context', None)
             if exec_ctx:
-                mission_id = exec_ctx.get('mission_id')
+                try:
+                    mission_id = exec_ctx.get('mission_id')
+                except Exception:
+                    mission_id = None
+            if mission_id is None:
+                mission_id = getattr(self.runtime_state, 'mission_id', None)
         if mission_id is not None:
             event_fields["mission_id"] = mission_id
 
@@ -713,7 +718,10 @@ class Llm:
         if self.runtime_state:
             exec_ctx = getattr(self.runtime_state, 'execution_context', {})
             if exec_ctx:
-                solver_id = exec_ctx.get("solver_id")
+                try:
+                    solver_id = exec_ctx.get("solver_id")
+                except Exception:
+                    solver_id = None
                 if solver_id:
                     event_fields["solver_id"] = solver_id
                 attempt_num = exec_ctx.get("attempt_number")
@@ -722,6 +730,13 @@ class Llm:
                 step_id = exec_ctx.get("step_id")
                 if step_id:
                     event_fields["step_id"] = step_id
+                session_id = exec_ctx.get("session_id")
+                if session_id:
+                    event_fields["session_id"] = session_id
+            if "session_id" not in event_fields:
+                sess = getattr(self.runtime_state, "session_id", None)
+                if sess:
+                    event_fields["session_id"] = sess
 
         Logger.event("llm_call", **event_fields)
         

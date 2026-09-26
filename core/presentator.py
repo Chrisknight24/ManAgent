@@ -126,6 +126,7 @@ class Presentator(Entity):
         accumulated_response = kwargs.get("accumulated_response", args[3] if len(args) > 3 else "")
         mission_status = kwargs.get("mission_status", "success")
         error_reason = kwargs.get("error_reason", None)
+        mission_id = kwargs.get("mission_id", None)
 
         output = await self.generate_mission_output(
             goal=goal,
@@ -133,7 +134,8 @@ class Presentator(Entity):
             variable_registry=variable_registry,
             accumulated_response=accumulated_response,
             mission_status=mission_status,
-            error_reason=error_reason
+            error_reason=error_reason,
+            mission_id=mission_id
         )
         return output.user_report
 
@@ -190,6 +192,14 @@ class Presentator(Entity):
         mission_id: Optional[str] = None,
     ) -> PresentatorOutput:
         Logger.info(f"[Presentator] 📝 Génération structurée (rapport + résumé) pour statut: {mission_status}")
+
+        if mission_id is None and getattr(self, "runtime_state", None) is not None:
+            try:
+                exec_ctx = getattr(self.runtime_state, "execution_context", None)
+                if exec_ctx:
+                    mission_id = exec_ctx.get("mission_id")
+            except Exception:
+                pass
 
         # --- Utiliser le RUM si disponible, sinon le registre passé ---
         rum = getattr(self.runtime_state, 'mission_rum', None)
@@ -327,18 +337,19 @@ class Presentator(Entity):
     # ANCIENNES MÉTHODES CONSERVÉES POUR COMPATIBILITÉ
     # ============================================================
 
-    async def generate_mission_report(self, goal: str, final_context: str, variable_registry: dict, accumulated_response: str) -> str:
+    async def generate_mission_report(self, goal: str, final_context: str, variable_registry: dict, accumulated_response: str, mission_id: Optional[str] = None) -> str:
         Logger.info("[Presentator] 🎤 [LEGACY] Génération du rapport long uniquement.")
         output = await self.generate_mission_output(
             goal=goal,
             final_context=final_context,
             variable_registry=variable_registry,
             accumulated_response=accumulated_response,
-            mission_status="success"
+            mission_status="success",
+            mission_id=mission_id
         )
         return output.user_report
 
-    async def generate_error_report(self, goal: str, error_reason: str, final_context: str) -> str:
+    async def generate_error_report(self, goal: str, error_reason: str, final_context: str, mission_id: Optional[str] = None) -> str:
         Logger.info("[Presentator] 📝 [LEGACY] Génération du rapport d'échec long uniquement.")
         output = await self.generate_mission_output(
             goal=goal,
@@ -346,6 +357,7 @@ class Presentator(Entity):
             variable_registry={},
             accumulated_response="",
             mission_status="failed",
-            error_reason=error_reason
+            error_reason=error_reason,
+            mission_id=mission_id
         )
         return output.user_report

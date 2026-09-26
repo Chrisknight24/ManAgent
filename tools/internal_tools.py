@@ -282,11 +282,19 @@ async def _run_llm_analysis(data: Any, query: str, runtime_state, tag: str, medi
     )
 
     try:
+        explicit_mid = None
+        try:
+            exec_ctx = getattr(runtime_state, "execution_context", None)
+            if exec_ctx:
+                explicit_mid = exec_ctx.get("mission_id")
+        except Exception:
+            explicit_mid = None
         analysis: AnalysisResult = await llm.generate_structured(
             prompt=prompt,
             schema=AnalysisResult,
             tag=tag,
-            media_assets=media_assets
+            media_assets=media_assets,
+            mission_id=explicit_mid
         )
         msg = getattr(analysis, "message", None) or getattr(analysis, "error_reason", None) or _("Analyse terminée.")
         return {

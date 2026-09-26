@@ -631,22 +631,76 @@ def attach_llm_calls_by_mission(episodes, llm_calls, events):
                                 node.setdefault("_convergence_calls", []).append(call)
                                 break
                     continue
+            # FILET : convergence root sans attempt (ex : finale avant presentator).
+            # Avant : jetée (continue sec). Maintenant : rattachée à l'épisode
+            # et à la tentative root pour rester visible en html.
+            if ep:
+                ep.setdefault("_convergence_root_calls", []).append(call)
+                root_attempt = None
+                for (sid, _anum), att in attempt_index_global.items():
+                    if sid == target_mid or sid == (target_mid or "").replace("solver_", ""):
+                        root_attempt = att
+                        break
+                if root_attempt is not None:
+                    root_attempt.setdefault("_convergence_calls", []).append(call)
+                continue
             continue
 
         # 9. Presentator
         if tag in PRESENTATOR_TAGS:
             if ep:
                 ep.setdefault("_presentator_calls", []).append(call)
+                continue
+            # FILET : sans épisode (DB pas encore à jour), rattacher par session.
+            sess = call.get("session_id")
+            if sess:
+                for cand in episodes:
+                    turns = cand.get("session_id")
+                    if turns == sess:
+                        cand.setdefault("_presentator_calls", []).append(call)
+                        break
+                else:
+                    for cand in episodes:
+                        if cand.get("mission_id") == mid:
+                            cand.setdefault("_presentator_calls", []).append(call)
+                            break
             continue
 
         # 9.5 Skill Engine (Synthesis & Repair)
         if tag in {"SkillSynthesis", "SkillRepair"}:
+            if not ep and solver_id and solver_id in solver_to_mission:
+                ep = ep_index.get(solver_to_mission[solver_id])
+            if not ep and mid and mid in solver_to_mission:
+                ep = ep_index.get(solver_to_mission[mid])
             if ep:
                 ep.setdefault("_skill_calls", []).append(call)
                 if solver_id:
                     ep.setdefault("_solver_skills", {}).setdefault(solver_id, []).append(call)
                 else:
                     ep.setdefault("_solver_skills", {}).setdefault("root_solver", []).append(call)
+            continue
+
+        # 9.6 Analyse locale (perceive_understand + llm_analyze_data) :
+        # déjà rangée au nœud via section 10, mais on garde aussi une trace
+        # au niveau tentative pour éviter toute perte silencieuse.
+        if tag in {"llm_analyze_data", "perceive_understand"}:
+            if solver_id is not None and attempt_num is not None:
+                attempt = attempt_index_global.get((solver_id, attempt_num))
+                if attempt:
+                    step_id = call.get("step_id")
+                    attached = False
+                    if step_id:
+                        for node in attempt.get("nodes", []):
+                            if node.get("step_id") == step_id:
+                                node.setdefault("_node_calls", []).append(call)
+                                attached = True
+                                break
+                    if not attached:
+                        attempt.setdefault("_other_calls", []).append(call)
+                    continue
+            if ep:
+                ep.setdefault("_other_calls", []).append(call)
+                continue
             continue
 
         # 10. Steps & fallback
