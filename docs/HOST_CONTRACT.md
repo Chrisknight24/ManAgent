@@ -149,6 +149,29 @@ Exemple échec honnête — l'élément n'existe pas :
 `call_id` = le ticket de suivi (obligatoire, tel quel). Mauvais ticket → erreur claire.
 Grosse donnée (> ~3000 caractères) = rangée à part et paginée, pas de panique.
 
+## 5a. Sorties typées (optionnel, imposé par ManAgent)
+
+Par défaut, `data` est traité comme du texte. Si un outil renvoie une
+charge non textuelle (image, audio, PDF...), déclarez-la dans le manifeste,
+par outil, champ `returns` (liste). Vocabulaire imposé : types MIME
+standard (`image/jpeg`, `image/png`, `application/pdf`...), jamais de
+noms propres. Vos noms d'outils et de champs restent libres.
+```json
+{"name": "capturer_image", "kind": "perception",
+ "parameters": {"type": "object", "properties": {}, "required": []},
+ "returns": [
+   {"field": "image_base64", "asset": "image/jpeg",
+    "description": "Photo d'écran encodée base64."},
+   {"field": "cadre", "asset": "application/json",
+    "description": "Structure détectée."}
+ ]}
+```
+- `field` : chemin pointé dans `data` (ex : `image_base64`, ou `apercu.vignette`).
+- `asset` : type MIME imposé. Seuls les non-texte (`image/*`, `video/*`, `audio/*`, `application/pdf`) sont extraits en assets. Le reste reste inline.
+- ManAgent enregistre chaque charge comme asset typé et expose son adresse
+  (`outputs://...`) dans le registre. L'analyse d'image utilise l'adresse,
+  jamais le base64. Sans déclaration `returns`, comportement inchangé (texte).
+
 ## 6. Observabilité (tout est observable)
 
 Événements stables à logger côté hôte : `planner.start/finished`, `plan.generated`, `tools_manager.decision/execution/result`, `checkpoint.reached`, `breakout.occurred`, `execution.completed`, `learner.analyze_finished`. Voir `core/constants.py:31`, `transport/packet_models.py:39`.

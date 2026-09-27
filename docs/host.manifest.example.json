@@ -41,6 +41,28 @@
       }
     },
     {
+      "name": "capturer_image",
+      "kind": "perception",
+      "description": "Capture l'écran. Appelé uniquement via perceive_understand, jamais en direct.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "returns": [
+        {
+          "field": "image_base64",
+          "asset": "image/jpeg",
+          "description": "Photo d'écran encodée base64."
+        },
+        {
+          "field": "cadre",
+          "asset": "application/json",
+          "description": "Structure détectée."
+        }
+      ]
+    },
+    {
       "name": "attendre",
       "kind": "action",
       "description": "Attend un moment. Renvoie true quand c'est fini.",

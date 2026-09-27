@@ -112,6 +112,30 @@ Honest failure example:
 `call_id` = the tracking ticket (mandatory, verbatim). Large payloads
 (> ~3000 chars) are stored aside and paged, no panic.
 
+## 5a. Typed outputs (optional, imposed by ManAgent)
+
+By default, `data` is treated as text. If a tool returns a non-textual
+payload (image, audio, PDF...), declare it in the manifest, per tool,
+`returns` field (list). Imposed vocabulary: standard MIME types
+(`image/jpeg`, `image/png`, `application/pdf`...), never proper nouns.
+Your tool and field names stay free.
+```json
+{"name": "capture_image", "kind": "perception",
+ "parameters": {"type": "object", "properties": {}, "required": []},
+ "returns": [
+   {"field": "image_base64", "asset": "image/jpeg",
+    "description": "Base64-encoded screen photo."},
+   {"field": "frame", "asset": "application/json",
+    "description": "Detected structure."}
+ ]}
+```
+- `field`: dotted path inside `data` (e.g. `image_base64`, or `preview.thumb`).
+- `asset`: imposed MIME type. Only non-text (`image/*`, `video/*`,
+  `audio/*`, `application/pdf`) is extracted into assets. The rest stays inline.
+- ManAgent registers each payload as a typed asset and exposes its address
+  (`outputs://...`) in the registry. Image analysis uses the address,
+  never base64. Without a `returns` declaration, behavior is unchanged (text).
+
 ## 6. Observability
 
 Stable events to log host-side: `plan.generated`, `tools_manager.decision/execution/result`,

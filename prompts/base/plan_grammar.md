@@ -66,6 +66,7 @@ Les outils sont **stateless (sans mémoire)** et ne peuvent pas définir de vari
   - L'outil d'analyse `llm_analyze_data` (via `tool_manager`) traite **uniquement des données déjà présentes dans une variable du registre** produite par une étape antérieure (ex: `source: "$@_data_vision_result"`).
   - Il **n'existe pas de source magique matérielle** (comme `"current_screen"` ou `"screen"`).
   - **Pour analyser un contenu visuel** : Tu **DOIS D'ABORD** exécuter un outil de capture listé ci-dessus (celui dont la description mentionne capture ou détection) avec un `output_variable_name` (ex: `data_screen_ocr`), puis passer cette variable `$@_data_screen_ocr` à `llm_analyze_data`.
+  - **Image déclarée au manifeste** : si la capture déclare une sortie image, le système expose aussi `$@_data_<etape>_<champ>` (adresse d'image typée). Pour lire les pixels, passez CETTE variable à `llm_analyze_data`, jamais la sortie texte (`$@_data_<etape>` seul ne contient que du texte).
   - Il est **FORMELLEMENT INTERDIT** d'utiliser une `abstract_task` pour inspecter, tester, vérifier, filtrer, décoder ou lire le contenu d'une variable `$@_data_xxx` déjà présente dans le registre. Utilisez un `tool_call` direct.
 
 - **`direct_answer`** : réponse finale à l'utilisateur (succès, échec, ou refus).

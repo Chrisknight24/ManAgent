@@ -654,6 +654,45 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
             msg = str(parsed.get("error_reason") or parsed.get("message") or _("Source en échec."))
             return {"result": False, "data": None, "error_reason": msg, "message": msg}
         raw_data = parsed.get("data", parsed) if isinstance(parsed, dict) else parsed
+        # Charges typées déclarées (contrat `returns`) : les pixels passent
+        # par le canal média, jamais en base64 dans le prompt. Sans
+        # déclaration : repli texte actuel.
+        media_assets = None
+        try:
+            _returns = tools_mgr.get_tool_returns(source_tool) if hasattr(tools_mgr, "get_tool_returns") else []
+        except Exception:
+            _returns = []
+        if _returns and isinstance(raw_data, dict):
+            try:
+                from core.discovery.data_asset import extract_typed_payloads
+                _payloads = extract_typed_payloads(raw_data, _returns, target_prefix=f"perceive_{source_tool}")
+                if _payloads and hasattr(tools_mgr, "register_typed_assets"):
+                    _uris = tools_mgr.register_typed_assets(_payloads)
+                    media_assets = [a for a in _payloads if a.target_id in _uris]
+                    if media_assets:
+                        cleaned = dict(raw_data)
+                        for _asset in media_assets:
+                            _field = ""
+                            try:
+                                _field = (_asset.asset_meta.custom_attributes or {}).get("declared_field", "")
+                            except Exception:
+                                _field = ""
+                            _parts = _field.split(".") if _field else []
+                            _node = cleaned
+                            for _p in _parts[:-1]:
+                                if isinstance(_node, dict) and _p in _node:
+                                    _node = _node[_p]
+                                else:
+                                    _node = None
+                                    break
+                            if isinstance(_node, dict) and _parts and _parts[-1] in _node:
+                                _node[_parts[-1]] = (
+                                    f"[Image : {_uris[_asset.target_id]} ({len(_asset.raw_bytes)} octets)]"
+                                )
+                        raw_data = cleaned
+            except Exception as e:
+                Logger.warning(f"[perceive_understand] Normalisation impossible ({e}) — repli texte.")
+                media_assets = None
 
     query = question
     if format_response:
@@ -661,4 +700,6 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
             f"{question}\nRéponds UNIQUEMENT avec le format strict suivant : "
             f"{format_response}. Rien d'autre."
         )
+    if media_assets:
+        return await _run_llm_analysis(raw_data, query, runtime_state, tag="perceive_understand", media_assets=media_assets)
     return await _run_llm_analysis(raw_data, query, runtime_state, tag="perceive_understand")

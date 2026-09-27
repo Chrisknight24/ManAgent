@@ -89,13 +89,16 @@ class BaseProvider(ABC):
                         media_bytes = f.read()
                 except Exception as ex:
                     Logger.error(f"[BaseProvider] Erreur lecture fichier {filepath}: {ex}")
-            elif hasattr(asset, "raw_content"):
+            raw_bin = getattr(asset, "raw_bytes", None)
+            if media_bytes is None and isinstance(raw_bin, (bytes, bytearray)) and len(raw_bin) > 0:
+                media_bytes = bytes(raw_bin)
+            if media_bytes is None and hasattr(asset, "raw_content"):
                 raw = asset.raw_content
                 if isinstance(raw, bytes):
                     media_bytes = raw
                 elif isinstance(raw, str):
                     media_bytes = raw.encode("utf-8")
-            elif hasattr(asset, "dump_data"):
+            if media_bytes is None and hasattr(asset, "dump_data"):
                 try:
                     dumped = asset.dump_data()
                     if isinstance(dumped, bytes):

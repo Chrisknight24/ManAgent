@@ -382,16 +382,54 @@ class ToolsManager(Entity):
             return self.runtime_state.host_manifest
         return None
 
-    def register_tool(self, name: str, role: str, description: str, parameters_schema: dict, source: str = "external", kind: str = "action") -> None:
+    def register_tool(self, name: str, role: str, description: str, parameters_schema: dict, source: str = "external", kind: str = "action", returns: Optional[List[Dict]] = None) -> None:
         self._tools[name] = {
             "name": name,
             "role": role,
             "kind": kind or "action",
             "description": description,
             "parameters": parameters_schema,
-            "source": source
+            "source": source,
+            "returns": list(returns or []),
         }
         Logger.debug(f"[ToolsManager] Outil enregistré : {name} (source={source}, kind={kind})")
+
+    def get_tool_returns(self, tool_name: str) -> List[Dict]:
+        """Sorties typées déclarées au manifeste pour un outil (contrat `returns`).
+
+        Vocabulaire imposé par ManAgent (MIME). Liste vide = texte (repli actuel).
+        """
+        tool = self._tools.get(tool_name) if isinstance(getattr(self, "_tools", None), dict) else None
+        if not isinstance(tool, dict):
+            return []
+        declared = tool.get("returns") or []
+        return [d for d in declared if isinstance(d, dict) and d.get("field") and d.get("asset")]
+
+    def register_typed_assets(self, assets: List[Any], session_id: str = "default_session") -> Dict[str, str]:
+        """Enregistre des assets typés et renvoie {target_id: uri}.
+
+        Registre fichiers de session (schéma `outputs`). Échec = {} (fail-open).
+        """
+        uris: Dict[str, str] = {}
+        if not assets:
+            return uris
+        try:
+            registry = None
+            engine = getattr(self.runtime_state, "discovery_engine", None) if self.runtime_state else None
+            if engine:
+                explorer = engine.get_explorer("files")
+                if explorer and hasattr(explorer, "registry") and explorer.registry:
+                    registry = explorer.registry
+            if registry is None:
+                return uris
+            for asset in assets:
+                try:
+                    uris[asset.target_id] = registry.register_asset(asset, scheme="outputs")
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return uris
 
     def load_tools_from_payload(self, tools_payload: List[Dict]) -> None:
         for tool_def in tools_payload:
@@ -405,6 +443,7 @@ class ToolsManager(Entity):
                 parameters_schema=tool_def.get("parameters", {}),
                 source=tool_def.get("source", "external"),
                 kind=tool_def.get("kind", "action"),
+                returns=tool_def.get("returns"),
             )
 
     async def get_tools_view(self, goal_query: str = None) -> List[Dict]:

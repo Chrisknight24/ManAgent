@@ -1752,16 +1752,25 @@ class Orchestrator(Supervisor, Entity):
     # IMPLÉMENTATION DE SUPERVISOR
     # =====================================================
     def _plan_gate_sets(self) -> tuple:
-        """Référentiels du gate déterministe (connus, prod, perception)."""
+        """Référentiels du gate déterministe (connus, prod, perception, sorties typées)."""
         _known: set = set()
         _prod: set = set()
         _perception: set = set()
+        _returns: dict = {}
         try:
             tm = getattr(self.runtime_state, "tools_manager", None)
             if tm is not None and hasattr(tm, "known_tool_names"):
                 _known = set(tm.known_tool_names())
             if tm is not None and hasattr(tm, "perception_tool_names"):
                 _perception = set(tm.perception_tool_names())
+            if tm is not None and hasattr(tm, "get_tool_returns"):
+                for _t in _known:
+                    try:
+                        _decl = tm.get_tool_returns(_t)
+                    except Exception:
+                        _decl = []
+                    if _decl:
+                        _returns[_t] = _decl
         except Exception:
             pass
         try:
@@ -1774,7 +1783,7 @@ class Orchestrator(Supervisor, Entity):
                             _prod.add(str(_sid))
         except Exception:
             pass
-        return _known, _prod, _perception
+        return _known, _prod, _perception, _returns
 
     async def validate_plan(
         self,
@@ -1813,7 +1822,7 @@ class Orchestrator(Supervisor, Entity):
 
         # Référentiels déterministes pour le gate fail-fast (aucune hallucination
         # d'outil/skill ne passe le juge sans appel LLM).
-        _known_tools, _prod_skills, _perception_tools = self._plan_gate_sets()
+        _known_tools, _prod_skills, _perception_tools, _tool_returns = self._plan_gate_sets()
         _availability_summary = (
             f"Outils disponibles ({len(_known_tools)}) : "
             + (", ".join(sorted(_known_tools)[:40]) if _known_tools else "(aucun)")
@@ -1831,6 +1840,7 @@ class Orchestrator(Supervisor, Entity):
             available_tools=_known_tools,
             production_skills=_prod_skills,
             perception_tools=_perception_tools,
+            tool_returns=_tool_returns,
             availability_summary=_availability_summary,
         )
         outcome = await validator.validate(
@@ -1856,10 +1866,10 @@ class Orchestrator(Supervisor, Entity):
                 not find_unknown_plan_tools(plan, _known_tools, _prod_skills)
                 and not find_malformed_step_args(plan)
                 and not find_reserved_plan_tools(plan)
-                and bool(find_direct_perception_calls(plan, _perception_tools))
+                and bool(find_direct_perception_calls(plan, _perception_tools, _tool_returns))
             )
             if _only_perception:
-                _repaired_ids = repair_direct_perception_calls(plan, _perception_tools)
+                _repaired_ids = repair_direct_perception_calls(plan, _perception_tools, _tool_returns)
                 if _repaired_ids:
                     Logger.info(
                         f"[Orchestrator] 🔧 Réparation auto perception : {len(_repaired_ids)} étape(s) "

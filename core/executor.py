@@ -817,6 +817,49 @@ class Executor:
             if base_bool_id != step_bool_id:
                 self.solver.variable_registry[base_bool_id] = bool_entry
 
+            # --- 1b. Normalisation des charges typées déclarées (contrat `returns`) ---
+            # L'hôte étiquette (MIME imposés), nous convertissons en assets typés.
+            # Sans déclaration : rien ne change (repli texte). Fail-open total.
+            try:
+                _tools_mgr = getattr(self.solver.runtime_state, "tools_manager", None)
+                _returns = _tools_mgr.get_tool_returns(step.tool_name) if _tools_mgr and hasattr(_tools_mgr, "get_tool_returns") else []
+            except Exception:
+                _tools_mgr, _returns = None, []
+            if _returns and isinstance(actual_data, dict):
+                try:
+                    from core.discovery.data_asset import extract_typed_payloads
+                    _mission_short = re.sub(r'[^a-zA-Z0-9]', '', str(getattr(self.solver, "id", "") or ""))[:8]
+                    _clean_tool = re.sub(r'[^a-zA-Z0-9_\-]', '_', step.tool_name)
+                    _payloads = extract_typed_payloads(
+                        actual_data, _returns,
+                        target_prefix=f"m_{_mission_short}_step_{step.id}_{_clean_tool}",
+                    )
+                    if _payloads and _tools_mgr is not None and hasattr(_tools_mgr, "register_typed_assets"):
+                        _session = getattr(self.solver.runtime_state, "session_id", "default_session")
+                        _uris = _tools_mgr.register_typed_assets(_payloads, session_id=_session)
+                        for _asset in _payloads:
+                            _uri = _uris.get(_asset.target_id)
+                            if not _uri:
+                                continue
+                            _declared = ""
+                            try:
+                                _declared = (_asset.asset_meta.custom_attributes or {}).get("declared_field", "")
+                            except Exception:
+                                _declared = ""
+                            _leaf = re.sub(r'[^a-zA-Z0-9_\-]+', '_', _declared.split(".")[-1]).strip("_") or "media"
+                            _var = f"data_{base_step_id}_{_leaf}"
+                            self.solver.variable_registry[_var] = {
+                                "value": _uri,
+                                "asset": _asset,
+                                "type": "asset",
+                                "description": _("Image/donnée typée '{}' ({}). Passez '$@_{}' à llm_analyze_data pour analyse visuelle.").format(_leaf, _uri, _var),
+                                "source": self.solver.id,
+                                "timestamp": datetime.now().isoformat()
+                            }
+                            Logger.info(f"[Executor] Charge typée '{_leaf}' ({_uri}) exposée en '$@_{_var}'.")
+                except Exception as e:
+                    Logger.warning(f"[Executor] Normalisation des charges typées impossible ({e}) — repli texte.")
+
             # --- 2. Détermination de la description de données ---
             if actual_data is not None:
                 data_description = (

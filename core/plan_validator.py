@@ -121,12 +121,28 @@ def find_reserved_plan_tools(plan: Any) -> List[str]:
     return bad
 
 
-def find_direct_perception_calls(plan: Any, perception_tool_names=None) -> List[str]:
+def _tool_declares_media(tool_name: str, tool_returns: Any) -> bool:
+    """L'outil déclare-t-il des charges médias (le validateur le sait) ?"""
+    if not tool_returns or not isinstance(tool_returns, dict):
+        return False
+    declared = tool_returns.get(tool_name) or []
+    if not isinstance(declared, list):
+        return False
+    from core.discovery.data_asset import is_media_mime
+    return any(
+        isinstance(d, dict) and is_media_mime(str(d.get("asset") or ""))
+        for d in declared
+    )
+
+
+def find_direct_perception_calls(plan: Any, perception_tool_names=None, tool_returns=None) -> List[str]:
     """Étapes tool_call directes vers un outil de perception externe.
 
     La lecture du monde passe UNIQUEMENT par `perceive_understand`
     (le LLM ne tient pas le pattern tout seul). Gate déterministe.
     Sans référentiel (None) : pas de vérification (rétro-compat).
+    Outils à charges médias déclarées exclus : leur appel direct préserve
+    les pixels (normalisés en assets), la réécriture les tuerait.
     """
     if not perception_tool_names:
         return []
@@ -137,16 +153,17 @@ def find_direct_perception_calls(plan: Any, perception_tool_names=None) -> List[
         if stype != "tool_call":
             continue
         tname = (getattr(step, "tool_name", None) or "").strip()
-        if tname in targets:
+        if tname in targets and not _tool_declares_media(tname, tool_returns):
             bad.append(str(getattr(step, "id", "?")))
     return bad
 
 
-def repair_direct_perception_calls(plan: Any, perception_tool_names=None) -> list:
+def repair_direct_perception_calls(plan: Any, perception_tool_names=None, tool_returns=None) -> list:
     """Réécrit EN PLACE les appels perception directs en `perceive_understand`.
 
     Au lieu de refuser en boucle un planner qui ne sait pas se corriger :
     question = description de l'étape, source = outil + args d'origine.
+    Outils à charges médias déclarées exclus (pixels préservés).
     Retourne les ids réparés. Pur hormis la mutation du plan (pratique du
     code : les plans sont déjà mutés ailleurs).
     """
@@ -161,7 +178,7 @@ def repair_direct_perception_calls(plan: Any, perception_tool_names=None) -> lis
         if stype != "tool_call":
             continue
         tname = (getattr(step, "tool_name", None) or "").strip()
-        if tname not in targets:
+        if tname not in targets or _tool_declares_media(tname, tool_returns):
             continue
         try:
             src_args = _json.loads(getattr(step, "tool_args_json", "{}") or "{}")
@@ -266,6 +283,7 @@ class PlanValidator:
         available_tools: Optional[Set[str]] = None,
         production_skills: Optional[Set[str]] = None,
         perception_tools: Optional[Set[str]] = None,
+        tool_returns: Optional[Dict[str, Any]] = None,
         availability_summary: Optional[str] = None,
     ):
         self._llm = llm
@@ -278,6 +296,7 @@ class PlanValidator:
         self._available_tools = set(available_tools) if available_tools else None
         self._production_skills = set(production_skills) if production_skills else None
         self._perception_tools = set(perception_tools) if perception_tools else None
+        self._tool_returns = dict(tool_returns) if tool_returns else {}
         self._availability_summary = availability_summary or ""
 
     def _summarize_human_validation_history(self) -> str:
@@ -596,7 +615,7 @@ class PlanValidator:
         )
         malformed = find_malformed_step_args(plan)
         reserved = find_reserved_plan_tools(plan)
-        direct_perception = find_direct_perception_calls(plan, self._perception_tools)
+        direct_perception = find_direct_perception_calls(plan, self._perception_tools, self._tool_returns)
         ungrounded = find_ungrounded_final_answer(plan)
         problems = [f"inconnu:{u}" for u in unknown]
         problems += [f"args illisibles étape:{s}" for s in malformed]

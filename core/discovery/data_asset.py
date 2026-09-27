@@ -202,6 +202,107 @@ class GenericDataAsset(DataAsset):
         return self.raw_content
 
 
+MEDIA_MIME_PREFIXES = ("image/", "video/", "audio/")
+MEDIA_MIME_EXACT = frozenset({"application/pdf"})
+
+
+def is_media_mime(mime_type: str) -> bool:
+    """Un type MIME impose-t-il le canal média (pixels/sons, pas texte) ?"""
+    mime = (mime_type or "").strip().lower()
+    return mime in MEDIA_MIME_EXACT or mime.startswith(MEDIA_MIME_PREFIXES)
+
+
+def extract_typed_payloads(
+    data: Any,
+    returns_decl: Any,
+    target_prefix: str = "payload",
+    max_bytes: int = 5000000,
+) -> List["BinaryDataAsset"]:
+    """Extrait les charges typées d'un retour d'outil en assets binaires.
+
+    Générique : suit la déclaration `returns` du manifeste
+    ([{field, asset (MIME), description}]), jamais de nom d'outil en dur.
+    Seuls les MIME médias sont extraits ; le reste reste inline (repli texte).
+    Base64 invalide, champ absent ou trop gros = ignoré (fail-open).
+    Fonction pure, sans LLM, testable vite.
+    """
+    import base64
+    import mimetypes
+
+    found: List["BinaryDataAsset"] = []
+    if not isinstance(data, dict) or not isinstance(returns_decl, list):
+        return found
+    for decl in returns_decl:
+        if not isinstance(decl, dict):
+            continue
+        field_path = str(decl.get("field") or "").strip()
+        mime = str(decl.get("asset") or "").strip().lower()
+        if not field_path or not is_media_mime(mime):
+            continue
+        node: Any = data
+        for part in field_path.split("."):
+            if isinstance(node, dict) and part in node:
+                node = node[part]
+            else:
+                node = None
+                break
+        if not isinstance(node, str) or not node.strip():
+            continue
+        raw = node.strip()
+        if raw.startswith("data:") and "," in raw:
+            raw = raw.split(",", 1)[1].strip()
+        try:
+            blob = base64.b64decode(raw, validate=True)
+        except Exception:
+            continue
+        if not blob or len(blob) > max_bytes:
+            continue
+        leaf = re.sub(r'[^a-zA-Z0-9_\-]', '_', field_path.split(".")[-1]).strip("_") or "media"
+        ext = (mimetypes.guess_extension(mime) or "").lower() or ".bin"
+        filename = f"{leaf}{ext}"
+        target_id = f"{target_prefix}_{leaf}"
+        meta = AssetMetadata(
+            uri="",
+            data_type="outputs",
+            name=filename,
+            size_bytes=len(blob),
+            char_count=0,
+            line_count=0,
+            token_estimate=0,
+            mime_type=mime,
+            encoding="base64",
+            sha256_hash=hashlib.sha256(blob).hexdigest(),
+            capabilities=[],
+            custom_attributes={"declared_field": field_path},
+        )
+        found.append(BinaryDataAsset(
+            target_id=target_id,
+            metadata={},
+            asset_meta=meta,
+            filename=filename,
+            raw_bytes=blob,
+        ))
+    return found
+
+
+class BinaryDataAsset(DataAsset):
+    """
+    Asset binaire typé (image, audio, PDF...) issu d'une charge déclarée
+    au manifeste. Les octets ne sont jamais inline dans les prompts :
+    seuls l'URI et un résumé transitent, les pixels passent par le canal média.
+    """
+    filename: str = Field(default="", description="Nom de fichier avec extension du type MIME")
+    raw_bytes: bytes = Field(default=b"", description="Octets bruts décodés")
+
+    def dump_data(self) -> str:
+        mime = ""
+        try:
+            mime = (self.asset_meta.mime_type or "") if self.asset_meta else ""
+        except Exception:
+            mime = ""
+        return f"[Donnée binaire : {len(self.raw_bytes)} octets ({mime or 'type inconnu'})]"
+
+
 class ToolOutputDataAsset(DataAsset):
     """
     DataAsset représentant la sortie brute (ou volumineuse) d'un outil exécuté.

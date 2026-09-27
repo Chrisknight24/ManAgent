@@ -18,8 +18,22 @@
         "required": ["name"],
         "properties": {
           "name": { "type": "string" },
+          "kind": { "type": "string", "enum": ["perception", "action", "utility"] },
           "description": { "type": "string" },
-          "parameters": { "type": "object" }
+          "parameters": { "type": "object" },
+          "returns": {
+            "type": "array",
+            "description": "Typed output payloads (ManAgent vocabulary: MIME types). Optional; undeclared = text.",
+            "items": {
+              "type": "object",
+              "required": ["field", "asset"],
+              "properties": {
+                "field": { "type": "string", "description": "Dotted path inside result data." },
+                "asset": { "type": "string", "description": "Imposed MIME type (image/jpeg, application/json...)." },
+                "description": { "type": "string" }
+              }
+            }
+          }
         }
       }
     },
