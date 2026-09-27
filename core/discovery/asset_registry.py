@@ -1,7 +1,36 @@
 from typing import Dict, Any, List, Optional
 import os
 import hashlib
+import base64
 from .data_asset import DataAsset, AssetMetadata
+
+
+_BYTES_MARKER = "__bytes_base64__"
+
+
+def _safe_jsonable(obj: Any) -> Any:
+    """Rend un objet JSON-sérialisable : octets -> base64 marqué (pur)."""
+    if isinstance(obj, (bytes, bytearray)):
+        return {_BYTES_MARKER: base64.b64encode(bytes(obj)).decode("utf-8")}
+    if isinstance(obj, dict):
+        return {k: _safe_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_safe_jsonable(v) for v in obj]
+    return obj
+
+
+def _restore_jsonable(obj: Any) -> Any:
+    """Inverse de _safe_jsonable : base64 marqué -> octets (pur)."""
+    if isinstance(obj, dict):
+        if set(obj.keys()) == {_BYTES_MARKER} and isinstance(obj[_BYTES_MARKER], str):
+            try:
+                return base64.b64decode(obj[_BYTES_MARKER], validate=True)
+            except Exception:
+                return obj
+        return {k: _restore_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_restore_jsonable(v) for v in obj]
+    return obj
 
 
 class AssetRegistry:
@@ -9,6 +38,7 @@ class AssetRegistry:
     Registre d'Assets de session.
     Centralise l'indexation, le stockage et la résolution par URI de tous les DataAssets.
     """
+
     def __init__(self, session_id: str):
         self.session_id = session_id
         self._assets: Dict[str, DataAsset] = {}  # index par URI standardisée
@@ -135,11 +165,12 @@ class AssetRegistry:
     def to_dict(self) -> Dict[str, Any]:
         """
         Exporte tous les assets du registre sous forme de dictionnaire JSON-sérialisable.
+        Les octets (images...) partent en base64 marqué, jamais bruts.
         """
         serialized_assets = []
         for uri, asset in self._assets.items():
             try:
-                asset_dict = asset.model_dump()
+                asset_dict = _safe_jsonable(asset.model_dump())
                 asset_dict["_class_name"] = asset.__class__.__name__
                 serialized_assets.append(asset_dict)
             except Exception as e:
@@ -157,7 +188,7 @@ class AssetRegistry:
         if not data or not isinstance(data, dict) or "assets" not in data:
             return
 
-        from core.discovery.data_asset import DataAsset, ToolOutputDataAsset, GenericDataAsset
+        from core.discovery.data_asset import DataAsset, ToolOutputDataAsset, GenericDataAsset, BinaryDataAsset
         from core.discovery.input_ingestor import UserPayloadDataAsset, FileDataAsset
         from utils.logger import Logger
 
@@ -166,6 +197,7 @@ class AssetRegistry:
             "FileDataAsset": FileDataAsset,
             "UserPayloadDataAsset": UserPayloadDataAsset,
             "GenericDataAsset": GenericDataAsset,
+            "BinaryDataAsset": BinaryDataAsset,
             "DataAsset": GenericDataAsset,
         }
 
@@ -174,7 +206,7 @@ class AssetRegistry:
         for item in assets_list:
             if not isinstance(item, dict):
                 continue
-            item_copy = dict(item)
+            item_copy = _restore_jsonable(dict(item))
             cls_name = item_copy.pop("_class_name", "GenericDataAsset")
             cls = class_map.get(cls_name, GenericDataAsset)
             try:
