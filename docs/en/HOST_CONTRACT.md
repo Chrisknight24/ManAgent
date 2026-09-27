@@ -136,6 +136,14 @@ Your tool and field names stay free.
   (`outputs://...`) in the registry. Image analysis uses the address,
   never base64. Without a `returns` declaration, behavior is unchanged (text).
 
+Handled types, end to end (declaration → model):
+
+| Family | Examples | Actual handling |
+| `image/*` | jpeg, png, webp, gif, bmp | pixels to the model, if the model has vision, else clear refusal |
+| `application/pdf` | pdf | document to the model |
+| `video/*`, `audio/*` | mp4, mp3 | stored as assets, not yet sent to the model |
+| text, JSON, CSV | the rest | inline + forage by slices |
+
 ## 6. Observability
 
 Stable events to log host-side: `plan.generated`, `tools_manager.decision/execution/result`,

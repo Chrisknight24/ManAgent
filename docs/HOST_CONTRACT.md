@@ -172,6 +172,14 @@ noms propres. Vos noms d'outils et de champs restent libres.
   (`outputs://...`) dans le registre. L'analyse d'image utilise l'adresse,
   jamais le base64. Sans déclaration `returns`, comportement inchangé (texte).
 
+Types gérés, de bout en bout (déclaration → modèle) :
+
+| Famille | Exemples | Sort réel |
+| `image/*` | jpeg, png, webp, gif, bmp | pixels au modèle, si le modèle a la vision, sinon refus clair |
+| `application/pdf` | pdf | document au modèle |
+| `video/*`, `audio/*` | mp4, mp3 | enregistrés comme assets, pas encore envoyés au modèle |
+| texte, JSON, CSV | le reste | inline + forage par tranches |
+
 ## 6. Observabilité (tout est observable)
 
 Événements stables à logger côté hôte : `planner.start/finished`, `plan.generated`, `tools_manager.decision/execution/result`, `checkpoint.reached`, `breakout.occurred`, `execution.completed`, `learner.analyze_finished`. Voir `core/constants.py:31`, `transport/packet_models.py:39`.
