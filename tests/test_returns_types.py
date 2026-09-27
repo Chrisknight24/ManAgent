@@ -23,6 +23,7 @@ _DECL = [{"field": "image_base64", "asset": "image/jpeg", "description": "Photo.
 
 def test_mime_sain():
     assert is_media_mime("image/jpeg") is True
+    assert is_media_mime("image") is True
     assert is_media_mime("application/pdf") is True
     assert is_media_mime("text/plain") is False
     assert is_media_mime("application/json") is False
@@ -57,6 +58,31 @@ def test_mime_texte_reste_inline():
 def test_sans_declaration_rien():
     assert extract_typed_payloads({"image_base64": _FAKE_JPEG}, []) == []
     assert extract_typed_payloads({"image_base64": _FAKE_JPEG}, None) == []
+
+
+def test_image_generique_sniffe_png():
+    import struct
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"0" * 16).decode("utf-8")
+    out = extract_typed_payloads(
+        {"photo": png}, [{"field": "photo", "asset": "image"}])
+    assert len(out) == 1
+    assert out[0].asset_meta.mime_type == "image/png"
+    assert out[0].filename.endswith(".png")
+
+
+def test_image_generique_indechiffrable_ignoree():
+    blob = base64.b64encode(b"ceci n est pas une image du tout......").decode("utf-8")
+    out = extract_typed_payloads(
+        {"photo": blob}, [{"field": "photo", "asset": "image"}])
+    assert out == []
+
+
+def test_mime_declare_corrige_par_contenu():
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"0" * 16).decode("utf-8")
+    out = extract_typed_payloads(
+        {"photo": png}, [{"field": "photo", "asset": "image/jpeg"}])
+    assert len(out) == 1
+    assert out[0].asset_meta.mime_type == "image/png"
 
 
 def test_data_uri_acceptee():

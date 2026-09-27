@@ -204,12 +204,38 @@ class GenericDataAsset(DataAsset):
 
 MEDIA_MIME_PREFIXES = ("image/", "video/", "audio/")
 MEDIA_MIME_EXACT = frozenset({"application/pdf"})
+IMAGE_GENERIC_ALIAS = "image"
 
 
 def is_media_mime(mime_type: str) -> bool:
     """Un type MIME impose-t-il le canal média (pixels/sons, pas texte) ?"""
     mime = (mime_type or "").strip().lower()
-    return mime in MEDIA_MIME_EXACT or mime.startswith(MEDIA_MIME_PREFIXES)
+    return (
+        mime in MEDIA_MIME_EXACT
+        or mime == IMAGE_GENERIC_ALIAS
+        or mime.startswith(MEDIA_MIME_PREFIXES)
+    )
+
+
+def sniff_image_mime(blob: bytes) -> Optional[str]:
+    """Vrai type d'une image par signature magique (standard, aucun hôte).
+
+    Le contenu fait foi, pas la déclaration. Évite tout mensonge au routeur.
+    """
+    if not isinstance(blob, (bytes, bytearray)) or len(blob) < 4:
+        return None
+    head = bytes(blob[:12])
+    if head[:3] == b'\xff\xd8\xff':
+        return 'image/jpeg'
+    if head[:8] == b'\x89PNG\r\n\x1a\n':
+        return 'image/png'
+    if head[:6] in (b'GIF87a', b'GIF89a'):
+        return 'image/gif'
+    if head[:4] == b'RIFF' and head[8:12] == b'WEBP':
+        return 'image/webp'
+    if head[:2] == b'BM':
+        return 'image/bmp'
+    return None
 
 
 def extract_typed_payloads(
@@ -257,6 +283,11 @@ def extract_typed_payloads(
             continue
         if not blob or len(blob) > max_bytes:
             continue
+        if mime == IMAGE_GENERIC_ALIAS or mime.startswith("image/"):
+            sniffed = sniff_image_mime(blob)
+            if sniffed is None:
+                continue
+            mime = sniffed
         leaf = re.sub(r'[^a-zA-Z0-9_\-]', '_', field_path.split(".")[-1]).strip("_") or "media"
         ext = (mimetypes.guess_extension(mime) or "").lower() or ".bin"
         filename = f"{leaf}{ext}"

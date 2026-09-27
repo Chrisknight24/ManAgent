@@ -130,8 +130,10 @@ Your tool and field names stay free.
  ]}
 ```
 - `field`: dotted path inside `data` (e.g. `image_base64`, or `preview.thumb`).
-- `asset`: imposed MIME type. Only non-text (`image/*`, `video/*`,
-  `audio/*`, `application/pdf`) is extracted into assets. The rest stays inline.
+- `asset`: imposed type. Plain `image` is enough: ManAgent checks the bytes
+  (magic signature) and labels the true type. A full MIME (`image/jpeg`...)
+  stays recommended but content wins. Only non-text (`image`, `image/*`,
+  `video/*`, `audio/*`, `application/pdf`) is extracted into assets. The rest stays inline.
 - ManAgent registers each payload as a typed asset and exposes its address
   (`outputs://...`) in the registry. Image analysis uses the address,
   never base64. Without a `returns` declaration, behavior is unchanged (text).

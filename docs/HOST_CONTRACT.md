@@ -167,7 +167,10 @@ noms propres. Vos noms d'outils et de champs restent libres.
  ]}
 ```
 - `field` : chemin pointé dans `data` (ex : `image_base64`, ou `apercu.vignette`).
-- `asset` : type MIME imposé. Seuls les non-texte (`image/*`, `video/*`, `audio/*`, `application/pdf`) sont extraits en assets. Le reste reste inline.
+- `asset` : type imposé. `image` seul suffit : ManAgent vérifie les octets
+  (signature magique) et étiquette le vrai type. Un MIME plein (`image/jpeg`...)
+  reste conseillé mais le contenu fait foi. Seuls les non-texte (`image`, `image/*`,
+  `video/*`, `audio/*`, `application/pdf`) sont extraits en assets. Le reste reste inline.
 - ManAgent enregistre chaque charge comme asset typé et expose son adresse
   (`outputs://...`) dans le registre. L'analyse d'image utilise l'adresse,
   jamais le base64. Sans déclaration `returns`, comportement inchangé (texte).
