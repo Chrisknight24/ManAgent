@@ -1054,6 +1054,43 @@ class Executor:
 
         return False, reason
 
+    def _ensure_convergence_discovery(self):
+        """Active la PD pour la convergence d'étape, puis restaure.
+
+        La convergence doit pouvoir inspecter le registre et re-percevoir
+        le monde en cas de doute (registre + monde, jamais skills).
+        Root : déjà actif, on ne touche à rien. Sous-solver : activation
+        temporaire sur son LLM isolé (providers hérités du parent),
+        désactivation après l'appel pour garder l'isolation.
+        Retourne une fonction de restauration (no-op si rien fait).
+        """
+        solver = getattr(self, "solver", None)
+        runtime_state = getattr(solver, "runtime_state", None) if solver else None
+        engine = getattr(runtime_state, "discovery_engine", None) if runtime_state else None
+        llm = getattr(solver, "llm", None) if solver else None
+        if not engine or not llm:
+            return lambda: None
+        if getattr(llm, "_discovery_enabled", False):
+            return lambda: None
+        try:
+            llm.enable_discovery(engine, solver)
+            llm.set_data_context(getattr(solver, "variable_registry", None))
+        except Exception as e:
+            Logger.warning(f"[Executor] PD convergence indisponible ({e}) — mode legacy.")
+
+            def _noop():
+                return None
+
+            return _noop
+
+        def _restore():
+            try:
+                llm.disable_discovery()
+            except Exception:
+                pass
+
+        return _restore
+
     async def _evaluate_semantic_convergence(self, step: PlanStep, actual_result: str) -> ConvergenceDecision:
         mission_id = None
         if hasattr(self.solver, 'runtime_state') and self.solver.runtime_state:
@@ -1067,17 +1104,23 @@ class Executor:
             expected_result=step.expected_result,
             actual_result=actual_result
         )
+        restore = self._ensure_convergence_discovery()
         try:
             return await self.solver.llm.generate_structured(
                 prompt=prompt,
                 schema=ConvergenceDecision,
                 tag="ConvergenceDecision",
                 mission_id=mission_id,
-                with_discovery=False
+                with_discovery=True
             )
         except Exception as e:
             Logger.error(f"[Executor] 🔥 Panne de l'infrastructure de validation sémantique à l'étape [{step.id}] : {str(e)}")
             raise e
+        finally:
+            try:
+                restore()
+            except Exception:
+                pass
 
     # =====================================================
     # UTILITAIRES (JSON, conditions, etc.)
