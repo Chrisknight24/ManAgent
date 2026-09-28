@@ -30,6 +30,7 @@ class RuntimeState:
         self.solver_registry: Dict[str, Dict] = {}
         self.current_mission_id = None
         self.depth_extensions_granted: Dict[str, int] = {}
+        self.retry_extensions_granted: Dict[str, int] = {}
         self.execution_context = ExecutionContext()
         self.embedding_manager = EmbeddingProviderManager()
         self.active_embedding_model: Optional[str] = None

@@ -106,4 +106,4 @@ def test_final_failure_three_times_gives_up():
     s = _solver([False])
     res = asyncio.run(s.run())
     assert res.status == ExecutionStatus.FAILED
-    assert s.calls["plans"] == 3
+    assert s.calls["plans"] == 2

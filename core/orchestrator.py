@@ -31,7 +31,7 @@ from utils.logger import Logger
 # Nouveaux imports pour l'architecture HTN (Hierarchical Task Network)
 from .supervisor import Supervisor
 from .plan_models import Plan, ExecutionStatus, OrchestratorDecision, PlanValidationDecision, DepthEscalationDecision, AssetInjection, drop_unknown_injected_assets
-from .plan_validator import PlanValidator, PlanValidationOutcome, review_depth_escalation, DepthEscalationOutcome
+from .plan_validator import PlanValidator, PlanValidationOutcome, review_depth_escalation, DepthEscalationOutcome, review_retry_extension, RetryExtensionOutcome
 from core.execution_models import PlanAttempt
 from .solver import Solver
 from core.entity import Entity
@@ -67,7 +67,7 @@ from core.discovery.providers.files_provider import FilesProvider
 from core.discovery.explorers.files_explorer import FilesExplorer
 from core.discovery.providers.mission_history_provider import MissionHistoryProvider
 from core.discovery.explorers.mission_history_explorer import MissionHistoryExplorer
-from core.constants import MAX_INSIGHTS_PER_TARGET, MAX_DEPTH_EXTENSIONS
+from core.constants import MAX_INSIGHTS_PER_TARGET, MAX_DEPTH_EXTENSIONS, MAX_RETRY_EXTENSIONS
 
 class Orchestrator(Supervisor, Entity):
     """
@@ -1109,6 +1109,57 @@ class Orchestrator(Supervisor, Entity):
         else:
             Logger.warning(
                 f"[Orchestrator] 🛑 Extension de profondeur refusée par le juge pour la mission "
+                f"{mission_id} : {outcome.reason}"
+            )
+
+        return outcome.approved
+
+    async def request_retry_extension(self, solver_id: str, progress_summary: str) -> bool:
+        """Arbitre UNE rallonge du budget d'exécution (miroir profondeur).
+
+        Plafond absolu MAX_RETRY_EXTENSIONS par mission, non négociable.
+        """
+        mission_id = self.runtime_state.execution_context.get("mission_id") or "unknown"
+
+        granted_so_far = self.runtime_state.retry_extensions_granted.get(mission_id, 0)
+        if granted_so_far >= MAX_RETRY_EXTENSIONS:
+            Logger.warning(
+                f"[Orchestrator] 🛑 Rallonge d'exécution refusée pour la mission {mission_id} "
+                f"(solver '{solver_id}') : plafond absolu de {MAX_RETRY_EXTENSIONS} "
+                f"rallonge(s) déjà atteint — refus sans même consulter le "
+                f"juge, ce plafond n'est pas négociable."
+            )
+            Logger.event(
+                "retry_extension_decision",
+                mission_id=mission_id, solver_id=solver_id,
+                approved=False, reason="Plafond absolu de rallonges atteint.",
+                extensions_granted_before=granted_so_far, hard_cap_hit=True,
+            )
+            return False
+
+        outcome: RetryExtensionOutcome = await review_retry_extension(
+            llm=self.llm,
+            prompt_loader=self._prompt_loader,
+            language=getattr(self.runtime_state, "language", "fr"),
+            progress_summary=progress_summary,
+        )
+
+        Logger.event(
+            "retry_extension_decision",
+            mission_id=mission_id, solver_id=solver_id,
+            approved=outcome.approved, reason=outcome.reason,
+            extensions_granted_before=granted_so_far, hard_cap_hit=False,
+        )
+
+        if outcome.approved:
+            self.runtime_state.retry_extensions_granted[mission_id] = granted_so_far + 1
+            Logger.info(
+                f"[Orchestrator] ✅ Rallonge d'exécution accordée pour la mission {mission_id} "
+                f"({granted_so_far + 1}/{MAX_RETRY_EXTENSIONS}) : {outcome.reason}"
+            )
+        else:
+            Logger.warning(
+                f"[Orchestrator] 🛑 Rallonge d'exécution refusée par le juge pour la mission "
                 f"{mission_id} : {outcome.reason}"
             )
 

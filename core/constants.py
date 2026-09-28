@@ -156,6 +156,7 @@ ASSET_INLINE_LIMIT = 3000            # Seuil de caractères au-delà duquel un r
 SOLVER_MAX_DEPTH = 12                # Profondeur maximale de décomposition récursive
 SOLVER_MAX_EXECUTION_TRIES = 3       # Nombre maximal de tentatives d'exécution d'un plan
 SOLVER_MAX_PREEXECUTION_FAILURES = 3 # Nombre maximal d'échecs de validation de plan consécutifs
+MAX_RETRY_EXTENSIONS = 2             # Rallonges d'exécution accordables par mission (juge, jamais sans progrès)
 MAX_DEPTH_EXTENSIONS = 5             # Plafond d'extensions de profondeur accordées par mission (arbitrées par le Superviseur)
 MAX_INSIGHTS_PER_TARGET = 5          # Nombre max d'insights mémorisés par cible
 

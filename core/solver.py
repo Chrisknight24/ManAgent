@@ -29,7 +29,7 @@ from core.constants import (
     MAX_INSIGHTS_PER_TARGET,
 )
 from .supervisor import Supervisor
-from .plan_models import FeasibilityDecision, Plan, SolverResult, ExecutionStatus, MissionSignature, CompactedAdvice
+from .plan_models import FeasibilityDecision, Plan, SolverResult, ExecutionStatus, MissionSignature, CompactedAdvice, normalize_failure_signature, is_sterile_streak
 from .planner import Planner
 from .executor import Executor
 from core.llm import Llm
@@ -385,14 +385,31 @@ class Solver(Supervisor, Entity):
                 final_result = None
                 final_verified_in_loop = False
                 execution_attempt = 0
+                max_allowed = MAX_EXECUTION_TRIES
                 attempt_counter = 0
+                # Signaux de progrès : [(signature_échec, actions_matérielles)].
+                # Stérile 2x de suite = résignation. Progrès + budget épuisé
+                # = rallonge jugée (root seul, plafond dur côté orchestrateur).
+                fail_history = []
                 # Anti faux-succès (Alerte 1) : cumul inter-tentatives.
                 seen_tool_steps_total = 0
                 material_success_total = 0
 
-                while execution_attempt < MAX_EXECUTION_TRIES:
+                while True:
                     if self.runtime_state.cancel_requested:
                         break
+
+                    if fail_history and is_sterile_streak(fail_history):
+                        _resign_why = _("Abandon : même échec répété sans aucun progrès matériel. Inutile de relancer à l'identique.")
+                        Logger.warning(f"[Solver:{self.id}] 🛑 {_resign_why}")
+                        self.context += _("\n[Abandon] {}.").format(_resign_why)
+                        break
+
+                    if execution_attempt >= max_allowed:
+                        if not await self._maybe_extend_budget(fail_history, max_allowed):
+                            break
+                        max_allowed += 1
+                        continue
 
                     # execution_attempt ne compte QUE les plans vraiment exécutés
                     # (un refus avant exécution ne mange plus le budget).
@@ -594,6 +611,7 @@ class Solver(Supervisor, Entity):
                                 self.current_attempt.failure_class = FailureClass.EXECUTION_FAILURE
                                 self.current_attempt.failure_reason = _why
                                 self.context += _("\n[Échec] {}.").format(_why)
+                                self._record_failure(fail_history, FailureClass.EXECUTION_FAILURE, _why, result)
                                 continue
                             if getattr(self, "depth", 0) == 0:
                                 _fok, _fwhy = await self._verify_mission_convergence(result)
@@ -603,6 +621,7 @@ class Solver(Supervisor, Entity):
                                     self.current_attempt.failure_class = FailureClass.CONVERGENCE_FAILURE
                                     self.current_attempt.failure_reason = _fwhy
                                     self.context += _("\n[Échec] {}.").format(_fwhy)
+                                    self._record_failure(fail_history, FailureClass.CONVERGENCE_FAILURE, _fwhy, result)
                                     continue
                                 final_verified_in_loop = True
                             self.current_attempt.outcome = "success"
@@ -642,6 +661,12 @@ class Solver(Supervisor, Entity):
                                 "parent_step_id": self.parent_step_id or "",
                                 "reason": _("Échec (Tentative {}/{}).").format(execution_attempt, MAX_EXECUTION_TRIES)
                             })
+                            self._record_failure(
+                                fail_history,
+                                self.current_attempt.failure_class,
+                                self.current_attempt.failure_reason,
+                                getattr(result, "material_success_count", 0),
+                            )
 
                 self.execution_tree.ended_at = time.time()
 
@@ -946,6 +971,57 @@ class Solver(Supervisor, Entity):
 
     async def process(self, *args, **kwargs) -> Any:
         return await self.run()
+
+    @staticmethod
+    def _record_failure(fail_history, failure_class, reason, result_or_material) -> None:
+        """Ajoute (signature, matériel) à l'historique d'échecs (pur)."""
+        try:
+            material = result_or_material
+            if not isinstance(material, int):
+                material = getattr(result_or_material, "material_success_count", 0) or 0
+            fail_history.append((normalize_failure_signature(failure_class, reason), int(material)))
+        except Exception:
+            fail_history.append((normalize_failure_signature(failure_class, reason), 0))
+
+    def _summarize_retry_progress(self, fail_history, max_allowed) -> str:
+        """Résumé pour le juge de rallonge (pur)."""
+        lines = [_("Budget standard épuisé : {} exécution(s).").format(max_allowed)]
+        try:
+            best = max(int(m) for _, m in fail_history)
+        except Exception:
+            best = 0
+        lines.append(_("Meilleur score matériel : {} action(s) réussie(s).").format(best))
+        for i, (sig, mat) in enumerate(list(fail_history)[-3:], 1):
+            lines.append(f"- Échec {i} : {mat} action(s) matérielle(s), {sig}")
+        lines.append(f"But : {self.goal}")
+        return "\n".join(lines)
+
+    async def _maybe_extend_budget(self, fail_history, max_allowed) -> bool:
+        """Demande UNE rallonge au juge si progrès réel (root seul).
+
+        Jamais sans travail matériel accompli. Échec du juge = refus.
+        """
+        if getattr(self, "depth", 0) != 0:
+            return False
+        if not fail_history:
+            return False
+        try:
+            last_mat = int(fail_history[-1][1])
+        except Exception:
+            last_mat = 0
+        if last_mat <= 0:
+            return False
+        fn = getattr(self.parent, "request_retry_extension", None)
+        if fn is None:
+            return False
+        try:
+            granted = await fn(self.id, self._summarize_retry_progress(fail_history, max_allowed))
+        except Exception as e:
+            Logger.warning(f"[Solver:{self.id}] Rallonge impossible ({e}) — abandon.")
+            return False
+        if granted:
+            Logger.info(f"[Solver:{self.id}] ➕ Rallonge accordée : tentative {max_allowed + 1}.")
+        return bool(granted)
 
     async def _verify_mission_convergence(self, final_result) -> tuple:
         """Vérification finale ROOT : le but est-il VRAIMENT atteint ?

@@ -811,3 +811,49 @@ async def review_depth_escalation(
             reason=_("Le juge a échoué : {error}. Extension refusée par prudence.").format(error=str(e)),
         )
     return DepthEscalationOutcome(approved=decision.is_legitimate_complexity, reason=decision.reason)
+
+
+class RetryExtensionOutcome:
+    """Résultat du jugement sur une demande de rallonge d'exécution."""
+
+    def __init__(self, approved: bool, reason: str):
+        self.approved = approved
+        self.reason = reason
+
+    def __bool__(self) -> bool:
+        return self.approved
+
+    def __repr__(self) -> str:
+        return f"RetryExtensionOutcome(approved={self.approved}, reason={self.reason!r})"
+
+
+async def review_retry_extension(
+    llm: Any,
+    prompt_loader: Any,
+    language: str,
+    progress_summary: str,
+) -> RetryExtensionOutcome:
+    """
+    Fonction autonome (miroir de review_depth_escalation) : le budget
+    standard est épuisé, le progrès accompli justifie-t-il UNE tentative
+    de plus ? Échec du juge = refus par prudence.
+    """
+    from core.plan_models import RetryExtensionDecision
+    prompt = prompt_loader.load(
+        "retry_extension_review.md",
+        lang=language,
+        progress_summary=progress_summary or _("(aucun progrès enregistré)"),
+    )
+    try:
+        decision: RetryExtensionDecision = await llm.generate_structured(
+            prompt=prompt,
+            schema=RetryExtensionDecision,
+            tag="RetryExtensionDecision",
+        )
+    except Exception as e:
+        Logger.error(f"[PlanValidator] Échec du jugement de rallonge d'exécution : {e}")
+        return RetryExtensionOutcome(
+            approved=False,
+            reason=_("Le juge a échoué : {error}. Rallonge refusée par prudence.").format(error=str(e)),
+        )
+    return RetryExtensionOutcome(approved=decision.is_worthwhile, reason=decision.reason)

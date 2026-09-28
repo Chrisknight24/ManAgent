@@ -25,8 +25,9 @@ def _runtime():
     )
 
 
-def _solver(plan_behavior, verify_answers=None):
+def _solver(plan_behavior, verify_answers=None, verify_reasons=None):
     verify_answers = verify_answers or [True]
+    verify_reasons = verify_reasons or ["but non atteint"]
     s = Solver.__new__(Solver)
     s.id = "root-test"
     s.goal = "but générique"
@@ -73,8 +74,10 @@ def _solver(plan_behavior, verify_answers=None):
 
     async def fake_verify(final_result):
         calls["verify"] += 1
-        ok = verify_answers[min(calls["verify"] - 1, len(verify_answers) - 1)]
-        return (ok, "" if ok else "but non atteint")
+        n = min(calls["verify"] - 1, len(verify_answers) - 1)
+        ok = verify_answers[n]
+        why = verify_reasons[min(calls["verify"] - 1, len(verify_reasons) - 1)]
+        return (ok, "" if ok else why)
 
     async def fake_validate(*a, **k):
         return True
@@ -107,7 +110,8 @@ def test_two_rejections_then_success_costs_one_execution():
 
 
 def test_three_real_executions_then_give_up():
-    s = _solver(["ok"], verify_answers=[False])
+    s = _solver(["ok", "ok", "ok"], verify_answers=[False],
+                verify_reasons=["ko A", "ko B", "ko C"])
     res = asyncio.run(s.run())
     assert res.status == ExecutionStatus.FAILED
     assert s.calls["executions"] == 3

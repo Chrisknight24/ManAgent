@@ -474,6 +474,45 @@ def drop_unknown_injected_assets(injected_assets, known_uris):
     return kept, dropped
 
 
+def normalize_failure_signature(failure_class: Any, reason: Any) -> str:
+    """Signature comparable d'un échec (pur, sans LLM).
+
+    Normalise pour que le même échec avec d'autres IDs reste identique :
+    minuscules, IDs d'étapes/UUID/nombres remplacés, espaces tassés.
+    """
+    import re
+    cls = getattr(failure_class, "value", failure_class)
+    text = f"{cls} :: {reason or ''}".lower()
+    text = re.sub(r'step[_\-][\w\-]+', 'step_#', text)
+    text = re.sub(r'\b[0-9a-f]{8}(?:-[0-9a-f]{4}){0,3}\b', '#id', text)
+    text = re.sub(r'\d+', '#', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text[:200]
+
+
+def is_sterile_streak(history) -> bool:
+    """Faut-il abandonner : même échec 2 fois sans progrès (pur) ?
+
+    history = liste de (signature, actions_matérielles_réussies).
+    Stérile = les 2 dernières signatures identiques ET aucun progrès
+    matériel au-delà du meilleur score précédent.
+    """
+    if not isinstance(history, list) or len(history) < 2:
+        return False
+    last_sig, last_mat = history[-1]
+    prev_sig, _ = history[-2]
+    if last_sig != prev_sig:
+        return False
+    try:
+        best_before = max(int(m) for _, m in history[:-1])
+    except Exception:
+        best_before = 0
+    try:
+        return int(last_mat) <= int(best_before)
+    except Exception:
+        return True
+
+
 class ConvergenceDecision(BaseDiscoverySchema):
     is_convergent: bool = Field(
         ..., 
@@ -551,6 +590,26 @@ class DepthEscalationDecision(BaseDiscoverySchema):
             "progresser la mission). False si c'est un motif récursif dégénéré : le même "
             "objectif reformulé, une boucle sans progression, ou une décomposition qui "
             "n'apporte rien de nouveau par rapport au niveau parent."
+        )
+    )
+    reason: str = Field(
+        ...,
+        description=_("Justification technique, assez précise pour comprendre le jugement même en cas de refus.")
+    )
+
+
+class RetryExtensionDecision(BaseDiscoverySchema):
+    """
+    Décision sur une demande de rallonge du budget d'exécution (miroir de
+    DepthEscalationDecision pour la profondeur). Le budget standard est
+    épuisé ; le progrès accompli justifie-t-il UNE tentative de plus ?
+    """
+    is_worthwhile: bool = Field(
+        ...,
+        description=_(
+            "True si une tentative de plus a une chance réelle : progrès matériel "
+            "accompli, erreur nouvelle ou transitoire, plan suivant différent. "
+            "False si stérile : même erreur, aucun progrès, anomalie insoluble."
         )
     )
     reason: str = Field(
