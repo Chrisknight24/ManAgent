@@ -52,6 +52,24 @@ def test_skill_synthesis_is_kept():
     assert len(ep.get("_skill_calls", [])) == 1
 
 
+def test_skill_without_ids_falls_back_to_session():
+    ep = _episode()
+    call = {"tag": "SkillRepair", "mission_id": None,
+            "solver_id": "ghost", "session_id": "s1"}
+    attach_llm_calls_by_mission([ep], [call], [])
+    assert len(ep.get("_skill_calls", [])) == 1
+
+
+def test_skill_without_anything_goes_to_orphans():
+    ep = _episode()
+    call = {"tag": "SkillSynthesis", "mission_id": None,
+            "solver_id": None, "session_id": "other"}
+    unattached = attach_llm_calls_by_mission([ep], [call], [])
+    assert len(ep.get("_skill_calls", [])) == 0
+    assert len(unattached) == 1
+    assert unattached[0]["tag"] == "SkillSynthesis"
+
+
 def test_llm_analyze_goes_to_node():
     ep = _episode()
     call = {"tag": "llm_analyze_data", "mission_id": "m1",

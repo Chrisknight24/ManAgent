@@ -535,11 +535,13 @@ def attach_llm_calls_by_mission(episodes, llm_calls, events):
                         node.setdefault("_tools_manager_events", []).append(ev)
                         break
 
+    # Appels sans mission ni session connue : bac orphelins (jamais jetés).
+    unattached = []
+
     for call in llm_calls:
         tag = call.get("tag")
         if tag in DISCOVERY_LLM_TAGS:
             continue
-
         solver_id = call.get("solver_id")
         attempt_num = call.get("attempt_number")
         mid = call.get("mission_id")
@@ -699,12 +701,22 @@ def attach_llm_calls_by_mission(episodes, llm_calls, events):
                 ep = ep_index.get(solver_to_mission[solver_id])
             if not ep and mid and mid in solver_to_mission:
                 ep = ep_index.get(solver_to_mission[mid])
+            if not ep:
+                sess = call.get("session_id")
+                if sess:
+                    for cand in episodes:
+                        if cand.get("session_id") == sess:
+                            ep = cand
+                            call = dict(call, _attached_via="session")
+                            break
             if ep:
                 ep.setdefault("_skill_calls", []).append(call)
                 if solver_id:
                     ep.setdefault("_solver_skills", {}).setdefault(solver_id, []).append(call)
                 else:
                     ep.setdefault("_solver_skills", {}).setdefault("root_solver", []).append(call)
+            else:
+                unattached.append(dict(call, _unattached_reason="ni mission ni session"))
             continue
 
         # 9.6 Analyse locale (perceive_understand + llm_analyze_data) :
@@ -803,6 +815,8 @@ def attach_llm_calls_by_mission(episodes, llm_calls, events):
         summary.sort(key=lambda g: (-g["events"], g["skill_id"]))
         ep["_skills_summary"] = summary
 
+    return unattached
+
 def attach_routing_calls_to_turns(session_turns, llm_calls):
     turns_by_session = {}
     for turn in session_turns:
@@ -876,7 +890,7 @@ def build_data(
         if session_mids:
             episodes = [ep for ep in episodes if ep.get("mission_id") in session_mids]
 
-    attach_llm_calls_by_mission(episodes, llm_calls, events)
+    unattached_llm_calls = attach_llm_calls_by_mission(episodes, llm_calls, events) or []
 
     # Retrieval indexation par mission et par solver
     ep_index = {ep["mission_id"]: ep for ep in episodes if ep.get("mission_id")}
@@ -1008,6 +1022,7 @@ def build_data(
         "target_mission_id": target_mission_id,
         "clock_offset_detected": 0,
         "unattached_skill_events": unattached_skill_events,
+        "unattached_llm_calls": unattached_llm_calls,
     }
 
 # =====================================================
@@ -2443,6 +2458,10 @@ function renderMissionDetail(missionId) {
   // Avant : même liste répétée sous chaque solver. Maintenant : 1 seul résumé central.
   html += renderCentralSkills(ep);
 
+  // Appels LLM orphelins (ni mission ni solver reconnus, même session).
+  // Avant : jetés silencieusement. Maintenant : visibles ici.
+  html += renderOrphanCalls(ep);
+
   // HTN Solver Execution Tree & Cognitive Phases
   html += `<div style="margin-top:18px;">
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
@@ -2538,6 +2557,37 @@ function renderCentralSkills(ep) {
     </div>
     <div id="central-skills-${esc(ep.mission_id)}"><div class="discovery-container-scroll">${rows}${extra > 0 ? `<div style="font-size:11px; color:var(--text-faint);">+ ${extra} autre(s) — voir onglet Skills</div>` : ''}</div></div>
   </div>`;
+}
+
+const ORPHAN_REGISTRY = {};
+function renderOrphanCalls(ep) {
+  const orphans = (DATA.unattached_llm_calls || []).filter(c =>
+    ep.session_id && c.session_id && String(c.session_id) === String(ep.session_id));
+  if (orphans.length === 0) return '';
+  const rows = orphans.map((c, idx) => {
+    const key = 'orphan_' + idx + '_' + String(c.tag || 'call');
+    ORPHAN_REGISTRY[key] = c;
+    return `<div class="discovery-chip-compact" style="cursor:pointer;" onclick="inspectOrphanCall('${esc(key)}')">
+      <span style="font-size:12px;">❓ <b>${esc(c.tag || 'LLM Call')}</b> <span style="color:var(--text-faint); font-family:var(--mono); font-size:11px;">solver ${esc(String(c.solver_id || '?')).slice(0, 8)} · ${esc(c._unattached_reason || 'non rattaché')}</span></span>
+      <span style="font-size:11px; color:var(--text-faint); font-family:var(--mono); white-space:nowrap;">${c.duration_ms != null ? formatDuration(c.duration_ms) : ''}</span>
+    </div>`;
+  }).join('');
+  return `<div style="margin-top:10px; margin-bottom:6px;">
+    <div class="discovery-accordion-header" onclick="toggleAccordion('central-orphans-${esc(ep.mission_id)}')">
+      <span>❓ Appels non rattachés (${orphans.length}) — à vérifier</span><span>▼</span>
+    </div>
+    <div id="central-orphans-${esc(ep.mission_id)}"><div class="discovery-container-scroll">${rows}</div></div>
+  </div>`;
+}
+function inspectOrphanCall(key) {
+  const call = ORPHAN_REGISTRY[key];
+  if (!call) return;
+  const overview = `<div style="display:flex; flex-direction:column; gap:10px;">
+    <div style="font-size:11px; font-weight:700; color:var(--text-faint); text-transform:uppercase;">Appel LLM non rattaché</div>
+    <div style="font-size:13px;">Tag : <code>${esc(call.tag || '?')}</code></div>
+    <div style="font-size:12px; font-family:var(--mono); color:var(--text-muted);">Solver : ${esc(String(call.solver_id || '?'))} · Étape : ${esc(String(call.step_id || '?'))} · Raison : ${esc(call._unattached_reason || '?')}</div>
+  </div>`;
+  updateInspector('Appel Orphelin', call.tag || 'LLM', overview, [call], call);
 }
 
 // ==========================================
@@ -2746,7 +2796,9 @@ function renderSolverNodeModern(ep, treeNode, depth) {
       const skippedCount = nodes.filter(n => n.status === 'skipped').length;
       const failedCount = nodes.filter(n => n.status === 'failed').length;
 
-      // Logique robuste de statut de tentative
+      // Logique robuste de statut de tentative.
+      // Règle : un échec reste un échec même sans nœud exécuté
+      // (plan refusé avant exécution). Jamais de bascule vers succès à vide.
       let attStatus = att.outcome || att.status || "in_progress";
       if (!attStatus || attStatus === 'pending') {
         if (failedCount > 0) {
@@ -2758,9 +2810,10 @@ function renderSolverNodeModern(ep, treeNode, depth) {
         } else {
           attStatus = 'success';
         }
-      } else if (attStatus === 'failed' && failedCount === 0 && (succCount + skippedCount === totalNodes)) {
+      } else if (attStatus === 'failed' && totalNodes > 0 && failedCount === 0 && (succCount + skippedCount === totalNodes)) {
         attStatus = 'success';
       }
+      const attRejectedNoRun = (attStatus === 'failed' && totalNodes === 0);
 
       const attemptId = `att-${esc(solverId)}-${attNum}`;
 
@@ -2768,8 +2821,8 @@ function renderSolverNodeModern(ep, treeNode, depth) {
         <div class="attempt-header" onclick="toggleAccordion('${attemptId}')">
           <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
             <span id="icon-${attemptId}">▼</span>
-            <span>Tentative #${attNum} (${succCount} réussie${succCount > 1 ? 's' : ''}${skippedCount > 0 ? `, ${skippedCount} ignorée${skippedCount > 1 ? 's' : ''}` : ''}${failedCount > 0 ? `, ${failedCount} échouée${failedCount > 1 ? 's' : ''}` : ''} / ${totalNodes} étapes)</span>
-            ${statusBadge(attStatus)}
+            <span>Tentative #${attNum} (${attRejectedNoRun ? 'plan refusé, 0 étape exécutée' : `${succCount} réussie${succCount > 1 ? 's' : ''}${skippedCount > 0 ? `, ${skippedCount} ignorée${skippedCount > 1 ? 's' : ''}` : ''}${failedCount > 0 ? `, ${failedCount} échouée${failedCount > 1 ? 's' : ''}` : ''} / ${totalNodes} étapes`})</span>
+            ${statusBadge(attRejectedNoRun ? 'rejected' : attStatus)}
           </div>
           <span style="font-size:11px; font-family:var(--mono); color:var(--text-faint);">Détails</span>
         </div>
@@ -2816,6 +2869,19 @@ function renderSolverNodeModern(ep, treeNode, depth) {
           html += `</div>`;
         }
         html += `</div>`;
+      }
+
+      // Plan proposé mais jamais exécuté (refusé avant exécution) : le montrer,
+      // sinon la comparaison "récursif" du validateur reste invisible.
+      const proposedSteps = (att.proposed_plan && att.proposed_plan.steps) || [];
+      if (nodes.length === 0 && proposedSteps.length > 0) {
+        html += `<div style="margin-left:8px; margin-bottom:12px; background:var(--surface-alt); padding:8px 12px; border-radius:8px; border:1px dashed var(--border-strong);">
+          <div style="font-size:11px; font-weight:800; color:var(--text-muted); text-transform:uppercase; margin-bottom:6px;">📋 Plan proposé — refusé, jamais exécuté (${proposedSteps.length} étapes)</div>
+          ${proposedSteps.map((s, sIdx) => `
+            <div style="display:flex; justify-content:space-between; gap:8px; font-size:12px; padding:3px 0; border-top:1px solid var(--border);">
+              <span><span style="font-family:var(--mono); font-weight:700; color:var(--text-faint);">#${sIdx + 1} · ${esc(s.id || '?')}</span> ${s.tool_name ? `<span class="badge badge--primary">🔧 ${esc(s.tool_name)}</span>` : `<span class="badge badge--pending">${esc(s.type || '?')}</span>`} <span style="color:var(--text);">${esc(s.description || '')}</span></span>
+            </div>`).join('')}
+        </div>`;
       }
 
       nodes.forEach((node, nodeIdx) => {
