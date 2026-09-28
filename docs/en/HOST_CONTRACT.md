@@ -82,6 +82,23 @@ The host picks the mode in `runtime.configure`:
 4. Cancel button → `embeddings.cancel` (auto-resume on next prepare). Disk space is
    checked before downloading, with a clear error if insufficient.
 
+## 3d. Rigid tool descriptions (mandatory, imposed by ManAgent)
+
+The brain only sees your descriptions. Vague = mechanical hallucination,
+not bad will. Absolute rules for every declared tool:
+
+1. **Ref provenance**: every reference-type param (IDs, windows, targets,
+   cells) must say where the value comes from (output of a previous tool,
+   verbatim, never invented) and name the refusal error otherwise.
+   Ex: `target_id` comes from a `perceive` output of this mission,
+   invented = `STALE_REF` failure.
+2. **Chaining**: if a tool needs another one before it
+   (perceive before waiting, capture before clicking), write it down.
+3. **Explicit danger**: every ban carries its sanction
+   (`Never guess: without a valid ID, TARGET_NOT_FOUND failure`).
+   A permission without a guard (`no need to have perceived it`) will be
+   read as an authorization to invent.
+
 ## 4. Supported actions
 
 `runtime.configure`, `host.manifest.register`, `chat.send`,

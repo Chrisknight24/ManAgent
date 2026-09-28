@@ -110,6 +110,23 @@ n'a pas d'inventaire : `"this_world"` par défaut. Pour un nom métier
 (ex : `"atelier"`, `"ligne-3"`), déclarez `"metadata": {"world_alias": "atelier"}`
 dans le manifeste. Pas de nouveau champ : `metadata` est libre.
 
+## 3e. Descriptions d'outils rigides (obligatoire, imposé par ManAgent)
+
+Le cerveau ne voit que vos descriptions. Flou = hallucination mécanique,
+pas mauvaise volonté. Règles absolues pour chaque outil déclaré :
+
+1. **Provenance des refs** : tout param de type référence (IDs, fenêtres,
+   cibles, cases) doit dire d'où vient la valeur (sortie d'un outil
+   précédent, verbatim, jamais inventée) et nommer l'erreur de refus sinon.
+   Ex : `target_id` vient d'une sortie `perceive` de cette mission, inventé
+   = échec `STALE_REF`.
+2. **Enchaînements** : si un outil en nécessite un autre avant lui
+   (percevoir avant d'attendre, capturer avant de cliquer), écrivez-le.
+3. **Danger explicite** : chaque interdit porte sa sanction
+   (`Ne devine jamais : sans ID valide, échec TARGET_NOT_FOUND`).
+   Une permission sans garde (`pas besoin de l'avoir perçu`) sera lue
+   comme une autorisation d'inventer.
+
 ## 4. Actions supportées (voir `core/constants.py:8`)
 
 | Action | Usage |
