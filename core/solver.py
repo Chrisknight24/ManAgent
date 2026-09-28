@@ -394,16 +394,8 @@ class Solver(Supervisor, Entity):
                     if self.runtime_state.cancel_requested:
                         break
 
-                    execution_attempt += 1
-                    self.runtime_state.update_marker("execution_attempt", execution_attempt)
-
-                    Logger.event(
-                        "mission_retry",
-                        solver_id=self.id,
-                        attempt_number=execution_attempt,
-                        max_attempts=MAX_EXECUTION_TRIES
-                    )
-
+                    # execution_attempt ne compte QUE les plans vraiment exécutés
+                    # (un refus avant exécution ne mange plus le budget).
                     attempt_counter += 1
                     self.current_attempt = PlanAttempt(
                         attempt_number=attempt_counter,
@@ -562,6 +554,16 @@ class Solver(Supervisor, Entity):
                             ]
                         }
                         await self.propagate_event(Events.PLAN_GENERATED, plan_payload)
+
+                        execution_attempt += 1
+                        self.runtime_state.update_marker("execution_attempt", execution_attempt)
+
+                        Logger.event(
+                            "mission_retry",
+                            solver_id=self.id,
+                            attempt_number=execution_attempt,
+                            max_attempts=MAX_EXECUTION_TRIES
+                        )
 
                         with self.runtime_state.execution_context.scope(entity_name="Executor", entity_role="Solver"):
                             result = await self.executor.execute_plan(
