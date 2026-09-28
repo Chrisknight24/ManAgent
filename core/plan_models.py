@@ -429,7 +429,7 @@ class OrchestratorDecision(BaseModel):
     )
     injected_assets: List[AssetInjection] = Field(
         default_factory=list,
-        description=_("Liste des assets à injecter dans la mémoire du Solver sous forme de variables (obligatoire s'il y a des fichiers/inputs nécessaires à la mission).")
+        description=_("Liste des assets à injecter dans la mémoire du Solver sous forme de variables (obligatoire s'il y a des fichiers/inputs nécessaires à la mission). N'y mettre QUE des URI vues verbatim dans le contexte, jamais inventées.")
     )
     discovery_request: Optional[DiscoveryRequest] = Field(
         ...,  # OBLIGATOIRE dans le JSON, mais peut être null
@@ -458,7 +458,21 @@ class OrchestratorDecision(BaseModel):
             if self.discovery_request is not None:
                 self.discovery_request = None
         return self
-    
+
+
+def drop_unknown_injected_assets(injected_assets, known_uris):
+    """Sépare les assets injectés connus des fantômes (pur, sans LLM).
+
+    Générique : compare des URI, jamais de nom d'outil ou d'hôte.
+    Retourne (gardés, jetés). Fantôme = URI sans objet enregistré.
+    """
+    known = set(known_uris or [])
+    kept, dropped = [], []
+    for asset in injected_assets or []:
+        uri = getattr(asset, "uri", None)
+        (kept if uri in known else dropped).append(asset)
+    return kept, dropped
+
 
 class ConvergenceDecision(BaseDiscoverySchema):
     is_convergent: bool = Field(

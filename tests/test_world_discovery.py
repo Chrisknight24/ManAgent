@@ -110,8 +110,9 @@ def _retry_planner(enable_world_pd):
     seen = {}
 
     async def fake_gen(prompt, schema, tag=None, with_discovery=False,
-                       mission_id=None, media_assets=None):
+                       mission_id=None, media_assets=None, max_output_tokens=None):
         seen["with_discovery"] = with_discovery
+        seen["cap"] = max_output_tokens
         s = PlanStep(id="s1", description="ok", type=StepType.DIRECT_ANSWER,
                      expected_result="any", response_text="fini.")
         return Plan(goal="g", steps=[s])
@@ -139,9 +140,11 @@ def _retry_planner(enable_world_pd):
 
 
 def test_planner_first_pass_no_world():
+    from core.constants import LLM_STRUCTURED_MAX_OUTPUT_TOKENS
     p, plan, seen = _retry_planner(False)
     assert "world" not in p.get_data_providers()
     assert seen["with_discovery"] is False
+    assert seen["cap"] == LLM_STRUCTURED_MAX_OUTPUT_TOKENS
     assert len(plan.steps) == 1
 
 

@@ -333,7 +333,8 @@ class BaseProvider(ABC):
         prompt: str,
         response_schema: Type[BaseModel],
         context: list = None,
-        media_assets: Optional[list] = None
+        media_assets: Optional[list] = None,
+        max_output_tokens: Optional[int] = None
     ) -> BaseModel:
         """Génère une réponse IA forcée dans un schéma strict Pydantic."""
         pass

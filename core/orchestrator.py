@@ -30,7 +30,7 @@ from utils.logger import Logger
 
 # Nouveaux imports pour l'architecture HTN (Hierarchical Task Network)
 from .supervisor import Supervisor
-from .plan_models import Plan, ExecutionStatus, OrchestratorDecision, PlanValidationDecision, DepthEscalationDecision, AssetInjection
+from .plan_models import Plan, ExecutionStatus, OrchestratorDecision, PlanValidationDecision, DepthEscalationDecision, AssetInjection, drop_unknown_injected_assets
 from .plan_validator import PlanValidator, PlanValidationOutcome, review_depth_escalation, DepthEscalationOutcome
 from core.execution_models import PlanAttempt
 from .solver import Solver
@@ -1306,6 +1306,34 @@ class Orchestrator(Supervisor, Entity):
             # Remplacer toute occurrence de l'URI brute dans refined_goal par le nom de variable
             if asset.uri in refined_goal:
                 refined_goal = refined_goal.replace(asset.uri, asset.variable_name)
+
+        # Garde-fou anti-hallucination : ne garder que les URI vraiment
+        # enregistrées (le LLM ne doit jamais inventer d'adresse d'asset).
+        # Fantôme = jeté avec alerte, la mission continue sans lui.
+        try:
+            _reg = self._get_or_create_asset_registry(session_id)
+            _known_uris = set()
+            if _reg:
+                for _a in _reg.list_assets():
+                    try:
+                        _known_uris.add(_a.get_uri())
+                    except Exception:
+                        continue
+            _kept, _dropped = drop_unknown_injected_assets(injected_assets, _known_uris)            for _ghost in _dropped:
+                Logger.warning(
+                    f"[Orchestrator] Asset fantôme jeté : '{_ghost.uri}' "
+                    f"(variable '{_ghost.variable_name}') sans objet enregistré."
+                )
+                refined_goal = refined_goal.replace(_ghost.variable_name, _ghost.uri)
+            if _dropped:
+                Logger.event(
+                    "injected_asset_rejected",
+                    count=len(_dropped),
+                    session_id=session_id,
+                )
+            injected_assets = _kept
+        except Exception as e:
+            Logger.warning(f"[Orchestrator] Vérification des assets injectés impossible ({e}) — conservés.")
 
         # Détection et auto-injection des assets de session mentionnés dans refined_goal
         registry = self._get_or_create_asset_registry(session_id)

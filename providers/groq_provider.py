@@ -213,7 +213,8 @@ class GroqProvider(BaseProvider):
         prompt: str,
         response_schema: Type[BaseModel],
         context: list = None,
-        media_assets: Optional[list] = None
+        media_assets: Optional[list] = None,
+        max_output_tokens: Optional[int] = None
     ) -> BaseModel:
         Logger.debug(f"[Groq] Structured Output request for schema: {response_schema.__name__}")
         schema_dict = response_schema.model_json_schema()
@@ -252,6 +253,8 @@ class GroqProvider(BaseProvider):
             "response_format": {"type": "json_object"},
             "stream": False
         }
+        if max_output_tokens:
+            payload["max_tokens"] = int(max_output_tokens)
 
         data = await self._execute_http_request(payload)
         raw_json_str = data["choices"][0]["message"]["content"]

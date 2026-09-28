@@ -176,7 +176,8 @@ class GeminiProvider(BaseProvider):
         prompt: str,
         response_schema: Type[BaseModel],
         context: list = None,
-        media_assets: Optional[list] = None
+        media_assets: Optional[list] = None,
+        max_output_tokens: Optional[int] = None
     ) -> BaseModel:
         
         async def _run():
@@ -227,6 +228,8 @@ class GeminiProvider(BaseProvider):
                 response_mime_type="application/json",
                 response_schema=schema_dict
             )
+            if max_output_tokens:
+                config.max_output_tokens = int(max_output_tokens)
             if self.system_prompt and self.system_prompt.strip():
                 config.system_instruction = self.system_prompt
 

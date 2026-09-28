@@ -15,7 +15,7 @@ from utils.logger import Logger
 import re
 from core.prompt_loader import get_prompt_loader
 from core.i18n import _
-from core.constants import Events, ModelCapabilities
+from core.constants import Events, ModelCapabilities, LLM_STRUCTURED_MAX_OUTPUT_TOKENS
 from typing import Tuple, List, Optional, Any, Dict, Union
 from core.entity import Entity
 
@@ -262,7 +262,8 @@ class Planner(Entity):
             prompt=prompt,
             schema=Plan,
             tag="Plan",
-            with_discovery=enable_world_pd
+            with_discovery=enable_world_pd,
+            max_output_tokens=LLM_STRUCTURED_MAX_OUTPUT_TOKENS
         )
 
         try:

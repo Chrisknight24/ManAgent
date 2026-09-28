@@ -67,6 +67,7 @@ Rédige une réponse naturelle, fluide et claire pour l'utilisateur sans énumé
     3. **RÉUTILISATION PRIORITAIRE DES TERMES CONNUS** :
        - Si l'action correspond à une mission passée dans la session ou à une signature connue listée ci-dessous, **tu DOIS réutiliser EXACTEMENT la même formulation mot pour mot**. Cette constance est cruciale pour la découverte et la promotion automatique des compétences (Skills).
   - `injected_assets` : Si la mission nécessite l'utilisation d'un DataAsset (un fichier `files://...`, une image passée en input `inputs://...`), tu DOIS injecter cet asset sous forme de variable. Chaque variable doit avoir un `variable_name` commençant par `data_` (ex: `data_user_photo`). **CRUCIAL** : Tu dois ensuite obligatoirement utiliser ce nom de variable exact (ex: `data_user_photo`) dans le champ `output` (le `refined_goal`) pour informer le Solver qu'elle est présente dans son registre.
+  - ⛔ **JAMAIS D'ADRESSE INVENTÉE** : n'injecte qu'une URI vue verbatim dans le contexte (pièce jointe reçue, asset listé, cible de découverte). Une URI devinée (`inputs://turn_1` parce que ça ressemble à la convention) est une hallucination. Si l'image est seulement à l'écran et qu'aucun asset n'est listé, n'injecte RIEN : lance une `mission` sans `injected_assets`, le Solver capturera via ses outils.
   - `discovery_request` : `null`
 
 ### 3. `request` — Exploration de données ou de DataAssets (Progressive Disclosure)

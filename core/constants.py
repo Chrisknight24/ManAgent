@@ -172,6 +172,7 @@ SKILL_CIRCUIT_BREAKER_MAX_FAILURES = 3 # Nombre d'échecs consécutifs en PRODUC
 # =====================================================
 LLM_STRUCTURED_MAX_ATTEMPTS = 2      # Nombre maximal de retries en cas d'erreur de schéma Pydantic
 LLM_DISCOVERY_MAX_ITERATIONS = 5     # Nombre maximal d'itérations pour la Progressive Disclosure LLM
+LLM_STRUCTURED_MAX_OUTPUT_TOKENS = 8192  # Plafond de sortie structurée (fail-fast : un plan tient en quelques Ko)
 CONTEXT_MAX_TOTAL_TOKENS = 12000     # Budget total maximal de tokens pour l'Orchestrateur
 CONTEXT_MAX_RECENT_TOKENS = 4000     # Budget de tokens pour les messages récents verbatim
 CONTEXT_MAX_ASSETS_TOKENS = 2000     # Budget de tokens pour le manifeste des DataAssets

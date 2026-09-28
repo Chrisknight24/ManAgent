@@ -21,7 +21,7 @@ def test_pd_empty_goes_legacy_without_llm_call(monkeypatch):
     llm = _llm()
     calls = {"legacy": 0, "direct": 0}
 
-    async def fake_legacy(self, prompt, schema, tag=None, mission_id=None, media_assets=None):
+    async def fake_legacy(self, prompt, schema, tag=None, mission_id=None, media_assets=None, max_output_tokens=None):
         calls["legacy"] += 1
         return "LEGACY-OK"
 

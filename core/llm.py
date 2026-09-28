@@ -492,7 +492,8 @@ class Llm:
         tag: Optional[str] = None,
         mission_id: Optional[str] = None,
         with_discovery: bool = True,
-        media_assets: Optional[List[Any]] = None
+        media_assets: Optional[List[Any]] = None,
+        max_output_tokens: Optional[int] = None
     ) -> BaseModel:
         """
         Génère une réponse structurée selon un schéma Pydantic.
@@ -525,7 +526,8 @@ class Llm:
                 f"[LLM] PD sans matière (tag={tag}) : chemin legacy direct, 0 appel gaspillé."
             )
             return await self._generate_structured_legacy(
-                prompt, schema, tag, mission_id, media_assets=media_assets
+                prompt, schema, tag, mission_id, media_assets=media_assets,
+                max_output_tokens=max_output_tokens
             )
 
         iteration = 0
@@ -546,7 +548,8 @@ class Llm:
                 schema=schema,
                 tag=tag,
                 mission_id=mission_id,
-                media_assets=media_assets
+                media_assets=media_assets,
+                max_output_tokens=max_output_tokens
             )
 
             if hasattr(result, 'discovery_request') and result.discovery_request is not None:
@@ -632,7 +635,8 @@ class Llm:
                 schema=schema,
                 tag=tag,
                 mission_id=mission_id,
-                media_assets=media_assets
+                media_assets=media_assets,
+                max_output_tokens=max_output_tokens
             )
             if hasattr(final_result, 'discovery_request'):
                 final_result.discovery_request = None
@@ -746,7 +750,8 @@ class Llm:
         schema: Type[BaseModel],
         tag: Optional[str] = None,
         mission_id: Optional[str] = None,
-        media_assets: Optional[List[Any]] = None
+        media_assets: Optional[List[Any]] = None,
+        max_output_tokens: Optional[int] = None
     ) -> BaseModel:
         provider = self.provider_manager.get_provider(self.provider_id)
         if not provider:
@@ -766,7 +771,8 @@ class Llm:
                 prompt=prompt,
                 response_schema=schema,
                 context=ephemeral_context,
-                media_assets=media_assets
+                media_assets=media_assets,
+                max_output_tokens=max_output_tokens
             )
             duration_ms = int((time.monotonic() - start_time) * 1000)
             self._emit_llm_event(
@@ -800,7 +806,8 @@ class Llm:
         schema: Type[BaseModel],
         tag: Optional[str] = None,
         mission_id: Optional[str] = None,
-        media_assets: Optional[List[Any]] = None
+        media_assets: Optional[List[Any]] = None,
+        max_output_tokens: Optional[int] = None
     ) -> BaseModel:
         from pydantic import ValidationError
         max_attempts = LLM_STRUCTURED_MAX_ATTEMPTS
@@ -829,7 +836,8 @@ class Llm:
                     prompt=prompt,
                     response_schema=schema,
                     context=ephemeral_context,
-                    media_assets=media_assets
+                    media_assets=media_assets,
+                    max_output_tokens=max_output_tokens
                 )
                 if self.runtime_state and (self.runtime_state.cancel_requested or getattr(self.runtime_state, "generation_epoch", 0) != call_epoch):
                     Logger.warning(f"[LLM] Résultat generate_structured ignoré car la session/génération a été annulée (epoch {call_epoch} vs actuel {getattr(self.runtime_state, 'generation_epoch', 0)}).")
