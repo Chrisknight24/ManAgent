@@ -126,6 +126,14 @@ pas mauvaise volonté. Règles absolues pour chaque outil déclaré :
    (`Ne devine jamais : sans ID valide, échec TARGET_NOT_FOUND`).
    Une permission sans garde (`pas besoin de l'avoir perçu`) sera lue
    comme une autorisation d'inventer.
+4. **Exemple d'usage si ambigu** : si un paramètre se comprend mal
+   (format d'ID, guillemets, casse), ajoutez un exemple d'appel complet
+   dans la description.
+5. **Garde-fous d'adaptation** : vos outils doivent tolérer les données
+   du cerveau (espaces, guillemets parasites, casse) et adapter en
+   silence quand c'est sans risque, ou refuser avec le motif exact sinon.
+   Le cerveau suit les descriptions au mieux ; si rien n'est clair, il
+   devine — c'est mécanique.
 
 ## 4. Actions supportées (voir `core/constants.py:8`)
 

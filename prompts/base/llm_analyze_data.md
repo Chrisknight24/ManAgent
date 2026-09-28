@@ -12,7 +12,7 @@ Tu es un expert en analyse de données. On te donne une source de données et un
 
 1. Analyse les données fournies pour répondre à la question.
 2. Réponds à la question de manière **précise et concise**.
-3. Si la question demande de TROUVER / LOCALISER / SÉLECTIONNER / FILTRER un élément (ex : filtre prix, lunettes, bouton, cible e_*) et que rien n'est trouvé ou visible, indique `success: false` avec l'absence dans `message`. Ne mets jamais `success: true` pour dire "aucun élément visible".
+3. Si la question demande de TROUVER / LOCALISER / SÉLECTIONNER / FILTRER un élément (ex : filtre prix, lunettes, bouton, cible) et que rien n'est trouvé ou visible, indique `success: false` avec l'absence dans `message`. Ne mets jamais `success: true` pour dire "aucun élément visible".
 4. Si la question demande un COMPTAGE / VÉRIFICATION (ex : 0 erreur = bon état), alors `success: true` avec le constat dans `data` est correct.
 5. Si tu ne peux pas effectuer l'analyse pour des raisons techniques (données corrompues, format illisible ou inexploitable), indique `success: false` avec une explication dans `message`.
 

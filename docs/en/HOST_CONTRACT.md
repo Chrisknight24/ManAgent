@@ -98,6 +98,13 @@ not bad will. Absolute rules for every declared tool:
    (`Never guess: without a valid ID, TARGET_NOT_FOUND failure`).
    A permission without a guard (`no need to have perceived it`) will be
    read as an authorization to invent.
+4. **Usage example if ambiguous**: if a param reads poorly
+   (ID format, quotes, case), add a full call example in the description.
+5. **Adaptation guardrails**: your tools must tolerate brain data
+   (spaces, stray quotes, case) and adapt silently when risk-free,
+   or refuse with the exact reason otherwise.
+   The brain follows descriptions as best it can; if nothing is clear,
+   it guesses — mechanically.
 
 ## 4. Supported actions
 
