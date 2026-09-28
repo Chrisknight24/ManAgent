@@ -1319,7 +1319,8 @@ class Orchestrator(Supervisor, Entity):
                         _known_uris.add(_a.get_uri())
                     except Exception:
                         continue
-            _kept, _dropped = drop_unknown_injected_assets(injected_assets, _known_uris)            for _ghost in _dropped:
+            _kept, _dropped = drop_unknown_injected_assets(injected_assets, _known_uris)
+            for _ghost in _dropped:
                 Logger.warning(
                     f"[Orchestrator] Asset fantôme jeté : '{_ghost.uri}' "
                     f"(variable '{_ghost.variable_name}') sans objet enregistré."
