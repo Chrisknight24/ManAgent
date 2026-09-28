@@ -2138,9 +2138,14 @@ function formatDuration(ms) {
   if (!ms || ms < 0) return '—';
   if (ms < 1000) return Math.round(ms) + 'ms';
   const sec = ms / 1000;
-  if (sec < 60) return sec.toFixed(1) + 's';
+  if (sec < 60) return sec.toFixed(1) + 's (' + Math.round(ms) + 'ms)';
   const min = Math.floor(sec / 60);
-  return min + 'm ' + Math.round(sec % 60) + 's';
+  return min + 'm ' + Math.round(sec % 60) + 's (' + Math.round(ms) + 'ms)';
+}
+function modelBadge(call) {
+  const p = esc(call?.provider_id || call?.provider || '?');
+  const m = esc(call?.model_id || call?.model || '?');
+  return `<span class="badge badge--primary" style="font-size:10.5px;" title="Provider: ${p} — Modèle: ${m}">${p}/${m}</span>`;
 }
 function statusBadge(status) {
   const cls = {success: 'success', failed: 'failed', skipped: 'skipped', pending: 'pending', cancelled: 'skipped', rejected: 'failed'}[status] || 'pending';
@@ -2339,7 +2344,7 @@ function renderSessionThread(sessionId) {
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px;">
           <div class="bot-header-tag">🧭 Orchestrateur · Réponse Directe</div>
           ${t._routing_call ? `
-            <button class="badge badge--primary" style="cursor:pointer;" onclick="inspectTurnRouting('${esc(sessionId)}', ${i})">🔍 Décision Routage LLM (${formatDuration(t._routing_call.duration_ms)})</button>
+            <button class="badge badge--primary" style="cursor:pointer;" onclick="inspectTurnRouting('${esc(sessionId)}', ${i})">🔍 Décision Routage LLM (${formatDuration(t._routing_call.duration_ms)}) ${modelBadge(t._routing_call)}</button>
           ` : ''}
         </div>
         <div style="font-size:14.5px; color:var(--text); line-height:1.5; white-space:pre-wrap; margin-top:4px;">${esc(t.response || '')}</div>`;
@@ -2364,7 +2369,7 @@ function renderSessionThread(sessionId) {
           <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
             <span>${t.signatures && t.signatures.length ? `🎯 ${t.signatures.map(s => s.action + ' ' + s.object).join(', ')}` : 'Pipeline Hiérarchique HTN'}</span>
             ${t._routing_call ? `
-              <button class="badge badge--purple" style="cursor:pointer;" onclick="event.stopPropagation(); inspectTurnRouting('${esc(sessionId)}', ${i})">🔍 Décision Routage LLM (${formatDuration(t._routing_call.duration_ms)})</button>
+              <button class="badge badge--purple" style="cursor:pointer;" onclick="event.stopPropagation(); inspectTurnRouting('${esc(sessionId)}', ${i})">🔍 Décision Routage LLM (${formatDuration(t._routing_call.duration_ms)}) ${modelBadge(t._routing_call)}</button>
             ` : ''}
           </div>
           <span style="font-weight:800;">Explorer le cycle complet ➔</span>
@@ -2409,7 +2414,7 @@ function renderMissionDetail(missionId) {
         <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
           <div>${statusBadge(ep.status)}</div>
           ${ep._routing_call ? `
-            <button class="badge badge--purple" style="cursor:pointer;" onclick="inspectMissionRouting('${esc(ep.mission_id)}')">🔍 Décision Routage Orchestrateur (${formatDuration(ep._routing_call.duration_ms)})</button>
+            <button class="badge badge--purple" style="cursor:pointer;" onclick="inspectMissionRouting('${esc(ep.mission_id)}')">🔍 Décision Routage Orchestrateur (${formatDuration(ep._routing_call.duration_ms)}) ${modelBadge(ep._routing_call)}</button>
           ` : ''}
         </div>
       </div>
@@ -2619,6 +2624,7 @@ function renderSolverNodeModern(ep, treeNode, depth) {
         <div style="font-weight:800; font-size:12.5px; color:var(--purple); display:flex; align-items:center; gap:6px;">
           <span>🎯 SignatureExtractor</span>
           <span class="badge badge--purple">${sigCalls.length} appel(s)</span>
+          ${sigCalls[0] ? modelBadge(sigCalls[0]) : ''}
         </div>
         ${sigCalls[0]?.duration_ms ? `<span style="font-size:11px; font-family:var(--mono); color:var(--text-faint);">${formatDuration(sigCalls[0].duration_ms)}</span>` : ''}
       </div>
@@ -2693,6 +2699,7 @@ function renderSolverNodeModern(ep, treeNode, depth) {
         <div style="font-weight:800; font-size:12.5px; color:var(--purple); display:flex; align-items:center; gap:6px;">
           <span>📦 MissionCompactor (Synthèse & Contexte)</span>
           <span class="badge badge--purple">${compactorCalls.length} appel(s)</span>
+          ${compactorCalls[0] ? modelBadge(compactorCalls[0]) : ''}
         </div>
         ${compactorCalls[0]?.duration_ms ? `<span style="font-size:11px; font-family:var(--mono); color:var(--text-faint);">${formatDuration(compactorCalls[0].duration_ms)}</span>` : ''}
       </div>
@@ -2709,6 +2716,7 @@ function renderSolverNodeModern(ep, treeNode, depth) {
         <div style="font-weight:800; font-size:12.5px; display:flex; align-items:center; gap:6px;">
           <span>⚖️ Feasibility Decision</span>
           <span class="badge ${isFeasible ? 'badge--success' : 'badge--failed'}">${isFeasible ? '✅ FAISABLE' : '❌ REJETÉ / INFAISABLE'}</span>
+          ${lastFeas ? modelBadge(lastFeas) : ''}
         </div>
         ${lastFeas?.duration_ms ? `<span style="font-size:11px; font-family:var(--mono); color:var(--text-faint);">${formatDuration(lastFeas.duration_ms)}</span>` : ''}
       </div>
@@ -2785,14 +2793,14 @@ function renderSolverNodeModern(ep, treeNode, depth) {
           }
           if (planCall) {
             html += `<button class="tree-node-card tree-node-card--plan" style="padding:5px 10px; font-size:11px; font-weight:700; cursor:pointer;" onclick="event.stopPropagation(); inspectAttemptPlanningCall('${esc(ep.mission_id)}', '${esc(solverId)}', ${attNum}, ${p})">
-              📐 Planner LLM (${formatDuration(planCall.duration_ms)})
+              📐 Planner LLM (${formatDuration(planCall.duration_ms)}) ${modelBadge(planCall)}
             </button>`;
           }
           if (valCall) {
             const resp = valCall.response || {};
             const isAppr = resp.is_conformant !== false && resp.approved !== false && resp.is_valid !== false;
             html += `<button class="tree-node-card ${isAppr ? 'tree-node-card--validation' : 'tree-node-card--rejected'}" style="padding:5px 10px; font-size:11px; font-weight:700; cursor:pointer;" onclick="event.stopPropagation(); inspectAttemptValidationCall('${esc(ep.mission_id)}', '${esc(solverId)}', ${attNum}, ${p})">
-              ${isAppr ? '⚖️ Supervisor: Plan Validé' : '❌ Supervisor: REJET'} (${formatDuration(valCall.duration_ms)})
+              ${isAppr ? '⚖️ Supervisor: Plan Validé' : '❌ Supervisor: REJET'} (${formatDuration(valCall.duration_ms)}) ${modelBadge(valCall)}
             </button>`;
           }
           html += `</div>`;
@@ -2860,9 +2868,9 @@ function renderSolverNodeModern(ep, treeNode, depth) {
                  const resp = c.response || {};
                  const isConv = resp.is_convergent;
                  return `
-                  <button class="tree-node-card ${isConv ? 'tree-node-card--validation' : 'tree-node-card--rejected'}" style="padding:4px 8px; font-size:11px; font-weight:700; cursor:pointer;" onclick="event.stopPropagation(); inspectStepConvergenceCall('${esc(ep.mission_id)}', '${esc(solverId)}', ${attNum}, '${esc(node.step_id)}', ${cIdx})">
-                    ${isConv ? '🎯 Convergence OK' : '🎯 Convergence ÉCHOUÉE'} (${formatDuration(c.duration_ms)})
-                  </button>
+                    <button class="tree-node-card ${isConv ? 'tree-node-card--validation' : 'tree-node-card--rejected'}" style="padding:4px 8px; font-size:11px; font-weight:700; cursor:pointer;" onclick="event.stopPropagation(); inspectStepConvergenceCall('${esc(ep.mission_id)}', '${esc(solverId)}', ${attNum}, '${esc(node.step_id)}', ${cIdx})">
+                      ${isConv ? '🎯 Convergence OK' : '🎯 Convergence ÉCHOUÉE'} (${formatDuration(c.duration_ms)}) ${modelBadge(c)}
+                    </button>
                  `;
               }).join('')}
             </div>
@@ -2910,7 +2918,7 @@ function renderSolverNodeModern(ep, treeNode, depth) {
              const isConv = resp.is_convergent;
              return `
               <button class="tree-node-card ${isConv ? 'tree-node-card--validation' : 'tree-node-card--rejected'}" style="padding:6px 12px; font-size:11px; font-weight:700; cursor:pointer;" onclick="event.stopPropagation(); inspectAttemptConvergenceCall('${esc(ep.mission_id)}', '${esc(solverId)}', ${attNum}, ${cIdx})">
-                ${isConv ? '🎯 Convergence OK' : '🎯 Convergence ÉCHOUÉE'} (${formatDuration(c.duration_ms)})
+                ${isConv ? '🎯 Convergence OK' : '🎯 Convergence ÉCHOUÉE'} (${formatDuration(c.duration_ms)}) ${modelBadge(c)}
               </button>
              `;
           }).join('')}
@@ -2926,7 +2934,7 @@ function renderSolverNodeModern(ep, treeNode, depth) {
     html += `<div style="margin-left:14px; margin-top:6px; display:flex; gap:8px; flex-wrap:wrap;">
       ${learnerCalls.map((c, lIdx) => `
         <button class="tree-node-card tree-node-card--post" style="padding:6px 12px; margin-bottom:4px; font-size:12px; font-weight:700; cursor:pointer;" onclick="inspectLearnerCall('${esc(ep.mission_id)}', '${esc(solverId)}', ${lIdx})">
-          🎓 Learner (${formatDuration(c.duration_ms)})
+          🎓 Learner (${formatDuration(c.duration_ms)}) ${modelBadge(c)}
         </button>
       `).join('')}
     </div>`;
@@ -2988,7 +2996,7 @@ function renderSkillLifecycleImpact(ep, solverId) {
     skillCalls.forEach((c, scIdx) => {
       const isRepair = c.tag === 'SkillRepair';
       html += `<button class="tree-node-card tree-node-card--plan" style="padding:4px 10px; font-size:11.5px; font-weight:700; cursor:pointer;" onclick="event.stopPropagation(); inspectSkillCall('${esc(ep.mission_id)}', '${esc(solverId)}', ${scIdx})">
-        ${isRepair ? '🔧 Réparation Skill (LLM)' : '⚡ Synthèse Méta-Plan (LLM)'} (${formatDuration(c.duration_ms)})
+        ${isRepair ? '🔧 Réparation Skill (LLM)' : '⚡ Synthèse Méta-Plan (LLM)'} (${formatDuration(c.duration_ms)}) ${modelBadge(c)}
       </button>`;
     });
     html += `</div>`;
@@ -3122,9 +3130,9 @@ function showInspectorTab(tabName) {
     } else {
       body.innerHTML = calls.map(c => `
         <div style="margin-bottom:18px; border:1px solid var(--border); border-radius:10px; overflow:hidden;">
-          <div style="background:var(--surface-alt); padding:9px 12px; font-size:12px; font-weight:800; font-family:var(--mono); display:flex; justify-content:space-between;">
+          <div style="background:var(--surface-alt); padding:9px 12px; font-size:12px; font-weight:800; font-family:var(--mono); display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
             <span>${esc(c.tag || c.schema || 'LLM Call')}</span>
-            <span style="color:var(--text-faint);">${formatDuration(c.duration_ms)}</span>
+            <span style="display:flex; gap:6px; align-items:center;">${modelBadge(c)}<span style="color:var(--text-faint);">${formatDuration(c.duration_ms)}</span></span>
           </div>
           <div style="padding:12px;">
             <div style="font-size:11px; font-weight:800; color:var(--text-faint); margin-bottom:4px; text-transform:uppercase;">Prompt Système & Utilisateur</div>
