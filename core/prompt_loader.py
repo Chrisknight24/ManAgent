@@ -6,6 +6,7 @@ Chargeur de prompts avec templating Jinja2 et support multilingue.
 
 import os
 import re
+import json
 from typing import Dict, Any, Optional
 
 try:
@@ -52,6 +53,14 @@ class PromptLoader:
                 autoescape=False,
                 trim_blocks=True,
                 lstrip_blocks=True
+            )
+            # tojson lisible : le filtre Jinja par défaut échappe les accents
+            # (détail → d\u00e9tail). JSON toujours valide et parsable,
+            # juste lisible pour l'humain (logs, vue HTML). Modèle indifférent.
+            self.env_cache[lang].filters["tojson"] = (
+                lambda value, *args, **kwargs: json.dumps(
+                    value, *args, **{**{"ensure_ascii": False}, **kwargs}
+                )
             )
         return self.env_cache[lang]
 
