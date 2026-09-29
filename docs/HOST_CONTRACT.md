@@ -243,6 +243,34 @@ Query hôte :
 ```
 Mission inconnue → `found:false` + zéros, pas d'erreur.
 
+## 7c. Automatismes (skills) : qui décide des chiffres
+
+Par défaut, ManAgent crée un automatisme après **2 succès de suite**, le teste 1 fois en fantôme, le met en quarantaine après **3 échecs**, le répare max **3 fois**. Ces chiffres sont des défauts affichés ici — c'est toi qui décides pour ton contexte.
+
+| Réglage | Défaut | Sens simple |
+|---|---|---|
+| `discovery_threshold` | 2 | succès de suite avant de créer l'automatisme |
+| `shadow_success_threshold` | 1 | essais fantôme réussis avant mise en prod |
+| `shadow_mismatch_threshold` | 3 | désaccords avant quarantaine |
+| `circuit_breaker_max_failures` | 3 | échecs de suite avant quarantaine |
+| `max_repairs` | 3 | réparations avant retraite (`null` = infini, assumé) |
+| `champion_margin` | 0.05 | avance exigée pour remplacer la version en prod |
+
+3 façons de régler, de la plus large à la plus précise (la plus précise gagne, et chaque décision dit sa source dans les events) :
+1. **Global** : `"skill_governance": {"circuit_breaker_max_failures": 1}` dans le manifeste.
+2. **Sensibilité des outils** : `"sensitivity": "high"` sur un outil (ex : virement bancaire) → l'automatisme devient strict tout seul (seuils divisés par 2). `"low"` → souple (×2). Sans rien = standard.
+3. **Par automatisme** : `"skill_governance": {"skills": {"skill.virement.envoyer": {"circuit_breaker_max_failures": 1}}}` (l'ID se lit dans `skill.list_request`).
+
+Banque (strict, 1 échec suffit) :
+```json
+{"host_name": "banque", "tools": [{"name": "virement.envoyer", "sensitivity": "high", "requires_env": ["session_auth"]}], "skill_governance": {"max_repairs": 1}}
+```
+Démo (souple, on expérimente) :
+```json
+{"host_name": "demo", "skill_governance": {"circuit_breaker_max_failures": 5, "max_repairs": null}}
+```
+Règle d'or : un automatisme importé d'ailleurs démarre en fantôme (jamais confiance immédiate). Une v2 ne remplace la v1 qu'avec plus de preuves (marge ci-dessus).
+
 ## 8. Compatibilité (versioning)
 
 ManAgent affiche sa version via `pyproject.toml` / `VERSION`. L'hôte envoie `host_version` dans le manifest. Règle : on n'ajoute que des champs optionnels, on ne renomme jamais une action existante sans montée de version majeure.

@@ -183,6 +183,28 @@ Query: `stats.get {"mission_id":"m123"}` → totals, or `{}` → total + by_miss
 Rules: file `rules.md` for dev (edit + restart). Prod (exe): `runtime.configure {"rules_text":"..."}` once,
 or `rules.set` live + `rules.get` to read back. Memory override wins over file.
 
+## 6b. Skills: who decides the numbers
+
+Defaults: automation after **2** consecutive successes, 1 shadow trial before prod, quarantine after **3** failures, max **3** repairs. These are displayed defaults — you decide for your context.
+
+| Setting | Default | Plain meaning |
+|---|---|---|
+| `discovery_threshold` | 2 | consecutive successes before creating the automation |
+| `shadow_success_threshold` | 1 | successful shadow trials before prod |
+| `shadow_mismatch_threshold` | 3 | mismatches before quarantine |
+| `circuit_breaker_max_failures` | 3 | consecutive failures before quarantine |
+| `max_repairs` | 3 | repairs before retirement (`null` = infinite, yours to assume) |
+| `champion_margin` | 0.05 | lead required to replace the prod version |
+
+3 ways, broadest to narrowest (narrowest wins, every decision logs its source in events):
+1. **Global**: `"skill_governance": {"circuit_breaker_max_failures": 1}` in the manifest.
+2. **Tool sensitivity**: `"sensitivity": "high"` on a tool (bank transfer) → the automation becomes strict by itself (thresholds halved). `"low"` → relaxed (×2). Default = standard.
+3. **Per skill**: `"skill_governance": {"skills": {"skill.transfer.send": {"circuit_breaker_max_failures": 1}}}` (IDs come from `skill.list_request`).
+
+Bank (strict): `{"tools": [{"name": "transfer.send", "sensitivity": "high", "requires_env": ["session_auth"]}], "skill_governance": {"max_repairs": 1}}`.
+Demo (relaxed): `{"skill_governance": {"circuit_breaker_max_failures": 5, "max_repairs": null}}`.
+Golden rule: an imported automation starts as shadow (never instant trust). A v2 replaces v1 only with more proof.
+
 ## 7. Secrets
 
 Never hardcode keys: `"api_key": "env:MY_KEY_VAR"` (lists supported for rotation).

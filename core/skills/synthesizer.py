@@ -402,11 +402,17 @@ class SkillSynthesizer:
         # Construction du SkillManifest avec ses contraintes d'environnement, préconditions et postconditions
         preconds = [{"description": p} if isinstance(p, str) else p for p in (synthesis.preconditions or [])]
         postconds = [{"description": p} if isinstance(p, str) else p for p in (synthesis.postconditions or [])]
-        
-        # Remplissage des contraintes d'environnement de manière 100% agnostique depuis l'hôte
+
+        # Remplissage des contraintes d'environnement de manière 100% agnostique depuis l'hôte.
+        # Sensibilité (P gouvernance) : l'hôte marque ses outils `sensitivity: high|low`
+        # et `requires_env: [...]` dans le manifeste. Le skill hérite du max :
+        # un outil sensible rend tout le skill strict. Niveau figé ici (risk_level).
+        from core.skills.governance import tier_for_tools, tool_sensitivity_map, tool_requires_env_map
         env_reqs: Dict[str, Any] = {}
         variant_tag = "DEFAULT"
         namespace = "general"
+        tier = "standard"
+        required_keys: List[str] = []
         if hasattr(self.llm, "runtime_state") and self.llm.runtime_state:
             host_m = getattr(self.llm.runtime_state, "host_manifest", None)
             if host_m:
@@ -418,12 +424,28 @@ class SkillSynthesizer:
                     if isinstance(h_dict.get("metadata"), dict):
                         env_reqs.update(h_dict["metadata"])
                     variant_tag = str(env_reqs.get("variant") or env_reqs.get("variant_tag") or h_dict.get("variant_tag") or "DEFAULT")
+                    raw_tools = h_dict.get("tools") or []
+                    sens_map = tool_sensitivity_map(raw_tools)
+                    req_map = tool_requires_env_map(raw_tools)
+                    used_tools = set()
+                    for node in synthesis.meta_plan or []:
+                        tn = getattr(node, "tool_name", None) or (node.get("tool_name") if isinstance(node, dict) else None)
+                        if tn:
+                            used_tools.add(str(tn))
+                    tier = tier_for_tools(sorted(used_tools), sens_map)
+                    seen_keys: List[str] = []
+                    for tn in sorted(used_tools):
+                        for k in req_map.get(tn, []):
+                            if k not in seen_keys:
+                                seen_keys.append(k)
+                    required_keys = seen_keys
 
         exec_env = ExecutionEnvironment(
             requirements=env_reqs,
             variant_tag=variant_tag,
             preconditions=preconds,
-            postconditions=postconds
+            postconditions=postconds,
+            required_env_keys=required_keys,
         )
 
         manifest = SkillManifest(
@@ -436,7 +458,8 @@ class SkillSynthesizer:
             environment=exec_env,
             target_applications=[primary_object] if primary_object else [],
             preconditions=preconds,
-            postconditions=postconds
+            postconditions=postconds,
+            risk_level=tier,
         )
 
         # Flow Payload contient l'action de base + le méta-plan

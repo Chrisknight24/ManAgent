@@ -170,6 +170,20 @@ SKILL_DISCOVERY_THRESHOLD = 2        # Nombre de succès consécutifs requis pou
 SKILL_SHADOW_SUCCESS_THRESHOLD = 1   # Nombre de validations passives en SHADOW requises pour la promotion en PRODUCTION (Total = 3 répétitions réussies)
 SKILL_SHADOW_MISMATCH_THRESHOLD = 3  # Nombre de divergences consécutives d'un Skill en SHADOW sur missions réussies avant obsolescence / QUARANTINE
 SKILL_CIRCUIT_BREAKER_MAX_FAILURES = 3 # Nombre d'échecs consécutifs en PRODUCTION avant QUARANTINE
+SKILL_MAX_REPAIRS = 3                # Nombre max de réparations auto par skill avant RETIRED (None = infini, choix hôte)
+SKILL_CHAMPION_MARGIN = 0.05         # Avance de confiance exigée pour qu'une vN+1 remplace la version en PRODUCTION
+
+# Défauts affichés au contrat hôte (docs/HOST_CONTRACT.md §7c). L'hôte peut
+# tout resserrer/desserrer via `skill_governance` (manifeste) : ces valeurs
+# ne sont que le point de départ, jamais une décision à sa place.
+SKILL_GOVERNANCE_DEFAULTS = {
+    "discovery_threshold": SKILL_DISCOVERY_THRESHOLD,
+    "shadow_success_threshold": SKILL_SHADOW_SUCCESS_THRESHOLD,
+    "shadow_mismatch_threshold": SKILL_SHADOW_MISMATCH_THRESHOLD,
+    "circuit_breaker_max_failures": SKILL_CIRCUIT_BREAKER_MAX_FAILURES,
+    "max_repairs": SKILL_MAX_REPAIRS,
+    "champion_margin": SKILL_CHAMPION_MARGIN,
+}
 
 # =====================================================
 # LLM & CONTEXT BUDGETS

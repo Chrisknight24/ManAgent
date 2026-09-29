@@ -534,6 +534,28 @@ async def execute_skill_tool(args: Dict[str, Any], runtime_state) -> Dict[str, A
         else:
             resolved_parameters[k] = v
 
+    # P6 — garde environnement : clés exigées absentes = refus net, jamais d'exécution.
+    try:
+        _hm = getattr(runtime_state, "host_manifest", None)
+        _henv = None
+        if isinstance(_hm, dict):
+            _henv = _hm.get("environment") or {}
+        elif _hm is not None:
+            _henv = getattr(_hm, "environment", None) or {}
+        if isinstance(_henv, dict) and _henv:
+            _env_obj = manifest.environment if hasattr(manifest, "environment") else None
+            if _env_obj is not None and hasattr(_env_obj, "is_compatible"):
+                if not _env_obj.is_compatible(_henv):
+                    _, _, _mis = _env_obj.calculate_compatibility(_henv)
+                    return {
+                        "result": False,
+                        "data": None,
+                        "error_reason": f"Skill '{skill_id}' incompatible avec cet hôte : {'; '.join(_mis[:3])}",
+                        "message": f"Skill '{skill_id}' incompatible avec cet hôte.",
+                    }
+    except Exception:
+        pass
+
     from core.skills.engine import SkillExecutionEngine
     event_emitter = getattr(runtime_state, "propagate_event", None)
     engine = SkillExecutionEngine(registry=skill_registry, event_emitter=event_emitter)
@@ -556,7 +578,15 @@ async def execute_skill_tool(args: Dict[str, Any], runtime_state) -> Dict[str, A
                     version=getattr(version, "version", None),
                     mission_id=mission_id
                 )
-            return {"success": True, "output": {"status": "executed", "payload_ref": payload_ref, "params": params}}
+            # P4 — pas de moteur de flux : REFUS NET, jamais de faux succès.
+            # Un "ok" inventé empoisonnerait l'apprentissage (trust + leçons).
+            from core.skills.models import FailureClass
+            return {
+                "success": False,
+                "breakout": True,
+                "failure_class": FailureClass.HOST_CAPABILITY_ERROR.value,
+                "error_message": f"Hôte sans moteur de flux : skill '{skill_id}' inexécutable ici.",
+            }
         host_executor = default_host_executor
 
     exec_result = await engine.execute_skill(

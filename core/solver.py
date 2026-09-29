@@ -1071,6 +1071,25 @@ class Solver(Supervisor, Entity):
                 SKILL_SHADOW_MISMATCH_THRESHOLD,
                 SKILL_CIRCUIT_BREAKER_MAX_FAILURES
             )
+            from core.skills.governance import (
+                resolve_skill_governance,
+                canonical_skill_id,
+                legacy_skill_id,
+            )
+
+            def _host_governance() -> dict:
+                """Bloc `skill_governance` du manifeste hôte (vide = défauts)."""
+                try:
+                    hm = getattr(self.runtime_state, "host_manifest", None)
+                    if hm is None:
+                        return {}
+                    if isinstance(hm, dict):
+                        return dict(hm.get("skill_governance") or {})
+                    return dict(getattr(hm, "skill_governance", None) or {})
+                except Exception:
+                    return {}
+
+            host_gov = _host_governance()
 
             profile_store = MissionProfileStore()
             registry = SkillRegistry()
@@ -1112,10 +1131,26 @@ class Solver(Supervisor, Entity):
             )
             self.canonical_profile_id = canonical_profile_id
             mission_id = getattr(self.execution_tree, "mission_id", None) if hasattr(self, "execution_tree") else None
-            skill_id = f"desktop.{primary_action}.{primary_obj}".replace(" ", "_") if primary_action and primary_obj else None
-            
+            # P3 — IDs neutres `skill.` ; repli lecture seule `desktop.` (migration).
+            skill_id = canonical_skill_id(primary_action, primary_obj)
+            legacy_id = legacy_skill_id(primary_action, primary_obj)
+
             if canonical_profile_id != -1 and hasattr(self, "mission_store") and self.mission_store and mission_id:
                 self.mission_store.link_episode_to_profile(mission_id, canonical_profile_id)
+
+            # Gouvernance : résolue une fois ici (découverte), re-résolue plus bas
+            # avec le niveau du skill dès qu'il existe. Source loggée à chaque fois.
+            gov, gov_sources = resolve_skill_governance(
+                skill_id, tier="standard", host_governance=host_gov
+            )
+            Logger.event(
+                "skill_governance",
+                skill_id=skill_id,
+                solver_id=self.id,
+                mission_id=mission_id,
+                values=gov,
+                sources=gov_sources,
+            )
 
             # Émission immédiate et inconditionnelle de l'événement de cycle de vie (Events & HTML)
             lifecycle_payload = {
@@ -1123,7 +1158,8 @@ class Solver(Supervisor, Entity):
                 "mission_id": mission_id,
                 "canonical_profile_id": canonical_profile_id,
                 "consecutive_count": consecutive_count,
-                "threshold": SKILL_DISCOVERY_THRESHOLD,
+                "threshold": gov["discovery_threshold"],
+                "governance_source": gov_sources.get("discovery_threshold", "defaut"),
                 "skill_id": skill_id,
                 "is_success": is_success,
                 "signature": combined_signature_text,
@@ -1135,11 +1171,23 @@ class Solver(Supervisor, Entity):
             if is_success and canonical_profile_id != -1:
                 Logger.info(f"[Solver:{self.id}] 🎯 Succès enregistré pour profil {canonical_profile_id} (succès consécutifs: {consecutive_count}).")
 
-                existing = registry.get_skill(skill_id)
+                existing = registry.get_skill(skill_id) if skill_id else None
+                if not existing and legacy_id:
+                    legacy_manifest = registry.get_skill(legacy_id)
+                    if legacy_manifest:
+                        skill_id = legacy_id
+                        existing = legacy_manifest
+                # Niveau du skill existant (sensibilité figée à la synthèse).
+                if existing:
+                    gov, gov_sources = resolve_skill_governance(
+                        skill_id,
+                        tier=getattr(existing, "risk_level", "standard"),
+                        host_governance=host_gov,
+                    )
                 if not existing:
                     # CAS A: Seuil de découverte atteint -> Synthèse & Création Candidate Skill (DRAFT -> SHADOW)
-                    if consecutive_count >= SKILL_DISCOVERY_THRESHOLD:
-                        Logger.info(f"[Solver:{self.id}] 🚀 SEUIL DE DÉCOUVERTE ATTEINT ({consecutive_count} >= {SKILL_DISCOVERY_THRESHOLD} succès) ! Synthèse du Méta-Plan pour '{skill_id}'.")
+                    if consecutive_count >= gov["discovery_threshold"]:
+                        Logger.info(f"[Solver:{self.id}] 🚀 SEUIL DE DÉCOUVERTE ATTEINT ({consecutive_count} >= {gov['discovery_threshold']} succès, source {gov_sources.get('discovery_threshold')}) ! Synthèse du Méta-Plan pour '{skill_id}'.")
                         
                         recent_trees = self.mission_store.get_recent_trees_by_profile_id(canonical_profile_id, limit=SKILL_DISCOVERY_THRESHOLD) if hasattr(self, "mission_store") and self.mission_store else []
                         if not recent_trees and hasattr(self, "execution_tree") and self.execution_tree:
@@ -1218,57 +1266,89 @@ class Solver(Supervisor, Entity):
                             if align_res.is_aligned:
                                 updated_trust = registry.record_run_metric(skill_id, ver, success=True, is_shadow=True)
                                 shadow_successes = updated_trust.shadow_validation_count
+                                shadow_need = gov["shadow_success_threshold"]
                                 Logger.info(
                                     f"[Solver:{self.id}] 🛡️ Concordance Shadow VALIDÉE pour '{skill_id}' v{ver} "
-                                    f"({align_res.reason}) - Validation {shadow_successes}/{SKILL_SHADOW_SUCCESS_THRESHOLD}."
+                                    f"({align_res.reason}) - Validation {shadow_successes}/{shadow_need} (source {gov_sources.get('shadow_success_threshold')})."
                                 )
                                 Logger.event(
                                     "skill_shadow_validated",
                                     skill_id=skill_id,
                                     version=ver,
                                     shadow_successes=shadow_successes,
-                                    threshold=SKILL_SHADOW_SUCCESS_THRESHOLD,
+                                    threshold=shadow_need,
+                                    governance_source=gov_sources.get("shadow_success_threshold", "defaut"),
                                     concordance_reason=align_res.reason,
                                     solver_id=self.id,
                                     mission_id=mission_id
                                 )
-                                if shadow_successes >= SKILL_SHADOW_SUCCESS_THRESHOLD:
-                                    Logger.info(f"[Solver:{self.id}] 🎉 PROMOTION EN PRODUCTION: Skill '{skill_id}' v{ver} qualifié !")
-                                    registry.transition_state(
-                                        skill_id=skill_id,
-                                        version=ver,
-                                        target_state=SkillState.PRODUCTION,
-                                        reason=f"Validation shadow réussie avec concordance LCS ({align_res.reason})."
-                                    )
-                                    Logger.event(
-                                        "skill_transition",
-                                        skill_id=skill_id,
-                                        version=ver,
-                                        target_state=SkillState.PRODUCTION.value,
-                                        reason=f"Validation shadow réussie avec concordance LCS ({align_res.reason}).",
-                                        solver_id=self.id,
-                                        mission_id=mission_id
-                                    )
+                                if shadow_successes >= shadow_need:
+                                    # P1 champion vs challenger : la vN+1 ne prend le pointeur
+                                    # que si elle prouve plus que la prod actuelle (+ marge).
+                                    champion_trust = None
+                                    try:
+                                        _cman, _champ = registry.get_active_skill(skill_id)
+                                        if _champ is not None and _champ.version != ver:
+                                            champion_trust = _champ.trust_profile.trust_score
+                                    except Exception:
+                                        champion_trust = None
+                                    challenger = min(0.95, 0.5 + 0.15 * shadow_successes)
+                                    margin = gov["champion_margin"]
+                                    if champion_trust is not None and challenger < champion_trust + margin:
+                                        Logger.warning(
+                                            f"[Solver:{self.id}] 🛡️ Champion gardé : '{skill_id}' v{_champ.version} "
+                                            f"(confiance {champion_trust:.2f}) bat v{ver} ({challenger:.2f} + marge {margin})."
+                                        )
+                                        Logger.event(
+                                            "skill_champion_blocked",
+                                            skill_id=skill_id,
+                                            version=ver,
+                                            champion_version=_champ.version,
+                                            champion_trust=champion_trust,
+                                            challenger_score=challenger,
+                                            margin=margin,
+                                            solver_id=self.id,
+                                            mission_id=mission_id,
+                                        )
+                                    else:
+                                        Logger.info(f"[Solver:{self.id}] 🎉 PROMOTION EN PRODUCTION: Skill '{skill_id}' v{ver} qualifié !")
+                                        registry.transition_state(
+                                            skill_id=skill_id,
+                                            version=ver,
+                                            target_state=SkillState.PRODUCTION,
+                                            reason=f"Validation shadow réussie avec concordance LCS ({align_res.reason})."
+                                        )
+                                        Logger.event(
+                                            "skill_transition",
+                                            skill_id=skill_id,
+                                            version=ver,
+                                            target_state=SkillState.PRODUCTION.value,
+                                            reason=f"Validation shadow réussie avec concordance LCS ({align_res.reason}).",
+                                            solver_id=self.id,
+                                            mission_id=mission_id
+                                        )
                             else:
                                 updated_trust = registry.record_run_metric(skill_id, ver, success=True, is_shadow=True, shadow_mismatch=True)
                                 mismatches = updated_trust.shadow_mismatch_count
+                                mismatch_need = gov["shadow_mismatch_threshold"]
                                 Logger.warning(
                                     f"[Solver:{self.id}] ⚠️ Mission réussie mais trace NON CONCORDANTE avec le Méta-Plan Shadow '{skill_id}' v{ver}. "
-                                    f"{align_res.reason} -> Mismatches consécutifs: {mismatches}/{SKILL_SHADOW_MISMATCH_THRESHOLD}."
+                                    f"{align_res.reason} -> Mismatches consécutifs: {mismatches}/{mismatch_need} (source {gov_sources.get('shadow_mismatch_threshold')})."
                                 )
                                 Logger.event(
                                     "skill_shadow_mismatch",
                                     skill_id=skill_id,
                                     version=ver,
                                     shadow_mismatch_count=mismatches,
-                                    threshold=SKILL_SHADOW_MISMATCH_THRESHOLD,
+                                    threshold=mismatch_need,
+                                    governance_source=gov_sources.get("shadow_mismatch_threshold", "defaut"),
                                     concordance_reason=align_res.reason,
                                     is_simplification=align_res.is_simplification,
                                     solver_id=self.id,
                                     mission_id=mission_id
                                 )
 
-                                if mismatches >= SKILL_SHADOW_MISMATCH_THRESHOLD:
+                                if mismatches >= mismatch_need:
                                     Logger.warning(
                                         f"[Solver:{self.id}] 🛑 Seuil d'obsolescence Shadow atteint ({mismatches} >= {SKILL_SHADOW_MISMATCH_THRESHOLD}). "
                                         f"Skill '{skill_id}' v{ver} placé en QUARANTINE."
@@ -1290,7 +1370,7 @@ class Solver(Supervisor, Entity):
                                     )
 
                                     # Déclenchement automatique immédiat d'une re-synthèse vN+1 sur la base des traces optimales
-                                    if consecutive_count >= SKILL_DISCOVERY_THRESHOLD and hasattr(self, "llm") and self.llm:
+                                    if consecutive_count >= gov["discovery_threshold"] and hasattr(self, "llm") and self.llm:
                                         Logger.info(f"[Solver:{self.id}] ♻️ Re-synthèse immédiate déclenchée pour '{skill_id}' avec les traces simplifiées.")
                                         recent_trees = self.mission_store.get_recent_trees_by_profile_id(canonical_profile_id, limit=SKILL_DISCOVERY_THRESHOLD) if hasattr(self, "mission_store") and self.mission_store else []
                                         if not recent_trees and hasattr(self, "execution_tree") and self.execution_tree:
@@ -1316,7 +1396,7 @@ class Solver(Supervisor, Entity):
                             Logger.info(f"[Solver:{self.id}] 📊 Skill en Production '{skill_id}' v{ver} actif pour cette mission.")
                     else:
                         # CAS C: Le skill existe mais aucune version active (ex: QUARANTINE ou RETIRED)
-                        if consecutive_count >= SKILL_DISCOVERY_THRESHOLD and hasattr(self, "llm") and self.llm:
+                        if consecutive_count >= gov["discovery_threshold"] and hasattr(self, "llm") and self.llm:
                             Logger.info(f"[Solver:{self.id}] 🚀 Re-synthèse d'une nouvelle version pour le skill sans version active '{skill_id}'.")
                             recent_trees = self.mission_store.get_recent_trees_by_profile_id(canonical_profile_id, limit=SKILL_DISCOVERY_THRESHOLD) if hasattr(self, "mission_store") and self.mission_store else []
                             if not recent_trees and hasattr(self, "execution_tree") and self.execution_tree:
@@ -1338,42 +1418,81 @@ class Solver(Supervisor, Entity):
             elif not is_success and canonical_profile_id != -1:
                 # ÉCHEC: reset consecutive_successes
                 Logger.warning(f"[Solver:{self.id}] ⚠️ Échec enregistré pour profil {canonical_profile_id}. Succès consécutifs réinitialisés à 0.")
-                skill_id = f"desktop.{primary_action}.{primary_obj}".replace(" ", "_") if primary_action and primary_obj else None
+                skill_id = canonical_skill_id(primary_action, primary_obj)
                 active_info = registry.get_active_version(skill_id)
+                if active_info is None and legacy_skill_id(primary_action, primary_obj):
+                    active_info = registry.get_active_version(legacy_skill_id(primary_action, primary_obj))
+                    if active_info:
+                        skill_id = legacy_skill_id(primary_action, primary_obj)
+                _tier = "standard"
+                try:
+                    _man = registry.get_skill(skill_id) if skill_id else None
+                    if _man is not None:
+                        _tier = getattr(_man, "risk_level", "standard")
+                except Exception:
+                    pass
+                _gov_fb, _gov_fb_src = resolve_skill_governance(skill_id, tier=_tier, host_governance=host_gov)
                 if active_info:
                     ver, state, trust = active_info
                     if state == SkillState.PRODUCTION:
-                        updated_trust = registry.record_run_metric(skill_id, ver, success=False)
-                        if updated_trust.consecutive_failures >= SKILL_CIRCUIT_BREAKER_MAX_FAILURES:
-                            Logger.error(f"[Solver:{self.id}] 🚨 CIRCUIT BREAKER: Passage de '{skill_id}' v{ver} en QUARANTINE.")
+                        updated_trust = registry.record_run_metric(
+                            skill_id, ver, success=False, breaker_max=_gov_fb["circuit_breaker_max_failures"]
+                        )
+                        breaker_need = _gov_fb["circuit_breaker_max_failures"]
+                        if updated_trust.consecutive_failures >= breaker_need:
+                            Logger.error(f"[Solver:{self.id}] 🚨 CIRCUIT BREAKER: Passage de '{skill_id}' v{ver} en QUARANTINE ({updated_trust.consecutive_failures} échecs, seuil {breaker_need} source {_gov_fb_src.get('circuit_breaker_max_failures')}).")
                             registry.transition_state(
                                 skill_id=skill_id,
                                 version=ver,
                                 target_state=SkillState.QUARANTINE,
-                                reason=f"{SKILL_CIRCUIT_BREAKER_MAX_FAILURES} échecs consécutifs en production."
+                                reason=f"{updated_trust.consecutive_failures} échecs consécutifs en production (seuil {breaker_need})."
                             )
                             Logger.event(
                                 "skill_transition",
                                 skill_id=skill_id,
                                 version=ver,
                                 target_state=SkillState.QUARANTINE.value,
-                                reason=f"{SKILL_CIRCUIT_BREAKER_MAX_FAILURES} échecs consécutifs en production.",
+                                reason=f"{updated_trust.consecutive_failures} échecs consécutifs en production (seuil {breaker_need}).",
                                 solver_id=self.id,
                                 mission_id=mission_id
                             )
-                            # --- LANCEMENT DE L'AUTO-REPARATION ---
-                            from core.skills.repair_engine import SkillRepairEngine
-                            if hasattr(self, "llm") and self.llm:
-                                # Cloner le LLM du Solver pour créer un LLM dédié, vierge et isolé pour la réparation
-                                dedicated_repair_llm = self.llm.clone(role_name="skill_repair")
-                                repair_engine = SkillRepairEngine(llm=dedicated_repair_llm)
-                                await repair_engine.repair_skill(
+                            # --- PLAFOND RÉPARATIONS (dynamique, jamais en dur) ---
+                            repairs_done = registry.count_repairs(skill_id)
+                            max_rep = _gov_fb["max_repairs"]
+                            if max_rep is not None and repairs_done >= max_rep:
+                                Logger.warning(
+                                    f"[Solver:{self.id}] 🛑 Plafond réparations atteint pour '{skill_id}' "
+                                    f"({repairs_done}/{max_rep}, source {_gov_fb_src.get('max_repairs')}) : RETIRED, rapport humain requis."
+                                )
+                                registry.transition_state(
                                     skill_id=skill_id,
-                                    failed_version=ver,
-                                    failure_bundle=getattr(self, "last_failure_bundle", None),
-                                    breakout_report=getattr(self, "last_breakout_report", None),
+                                    version=ver,
+                                    target_state=SkillState.RETIRED,
+                                    reason=f"Plafond de réparations atteint ({repairs_done}/{max_rep}).",
+                                )
+                                Logger.event(
+                                    "skill_retired",
+                                    skill_id=skill_id,
+                                    version=ver,
+                                    repairs_done=repairs_done,
+                                    max_repairs=max_rep,
+                                    solver_id=self.id,
                                     mission_id=mission_id,
                                 )
+                            else:
+                                # --- LANCEMENT DE L'AUTO-REPARATION ---
+                                from core.skills.repair_engine import SkillRepairEngine
+                                if hasattr(self, "llm") and self.llm:
+                                    # Cloner le LLM du Solver pour créer un LLM dédié, vierge et isolé pour la réparation
+                                    dedicated_repair_llm = self.llm.clone(role_name="skill_repair")
+                                    repair_engine = SkillRepairEngine(llm=dedicated_repair_llm)
+                                    await repair_engine.repair_skill(
+                                        skill_id=skill_id,
+                                        failed_version=ver,
+                                        failure_bundle=getattr(self, "last_failure_bundle", None),
+                                        breakout_report=getattr(self, "last_breakout_report", None),
+                                        mission_id=mission_id,
+                                    )
 
         except Exception as e:
             Logger.error(f"[Solver:{self.id}] Erreur post-exécution dans _handle_skill_lifecycle_post_execution: {e}")

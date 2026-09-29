@@ -551,15 +551,18 @@ class SkillRegistry:
             cursor.execute(query, signature_hashes)
             rows = cursor.fetchall()
 
-            # Fallback direct par ID/nom si aucun résultat via l'index inversé de hash
+            # Fallback direct par ID/nom si aucun résultat via l'index inversé de hash.
+            # Préfixe neutre `skill.` (P3) + repli legacy `desktop.` pour les skills
+            # créés avant le renommage (lecture seule, les écritures usent `skill.`).
             if not rows:
                 fallback_ids = []
                 for h in signature_hashes:
-                    # Ex: sig:press:run dialog box -> desktop.press.run_dialog_box
+                    # Ex: sig:press:run dialog box -> skill.press.run_dialog_box
                     parts = h.replace("sig:", "").split(":")
                     if len(parts) >= 2:
                         act = parts[0].strip().replace(" ", "_")
                         obj = parts[1].strip().replace(" ", "_")
+                        fallback_ids.append(f"skill.{act}.{obj}")
                         fallback_ids.append(f"desktop.{act}.{obj}")
                 
                 if fallback_ids:
@@ -742,9 +745,15 @@ class SkillRegistry:
         success: bool,
         is_breakout: bool = False,
         is_shadow: bool = False,
-        shadow_mismatch: bool = False
+        shadow_mismatch: bool = False,
+        breaker_max: Optional[int] = None,
     ) -> TrustProfile:
-        """Met à jour le profil de confiance d'une version suite à une exécution ou observation."""
+        """Met à jour le profil de confiance d'une version suite à une exécution ou observation.
+
+        breaker_max : seuil disjoncteur (gouvernance hôte, défaut constante).
+        """
+        from core.constants import SKILL_CIRCUIT_BREAKER_MAX_FAILURES
+        limit = int(breaker_max) if breaker_max else SKILL_CIRCUIT_BREAKER_MAX_FAILURES
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT trust_profile_json, state FROM skill_versions WHERE skill_id = ? AND version = ?", (skill_id, version))
@@ -763,13 +772,13 @@ class SkillRegistry:
             )
 
             # Circuit Breaker automatique : si trop d'échecs consécutifs en PRODUCTION -> QUARANTINE
-            if current_state == SkillState.PRODUCTION and trust_profile.consecutive_failures >= 3:
+            if current_state == SkillState.PRODUCTION and trust_profile.consecutive_failures >= limit:
                 cursor.execute("""
                     UPDATE skill_versions SET state = 'QUARANTINE', trust_profile_json = ?, updated_at = ?
                     WHERE skill_id = ? AND version = ?
                 """, (json.dumps(trust_profile.to_dict()), time.time(), skill_id, version))
                 cursor.execute("UPDATE skills SET current_production_version = NULL WHERE skill_id = ?", (skill_id,))
-                Logger.warning(f"[SkillRegistry] 🚨 Circuit Breaker: Skill '{skill_id}' v{version} placé en QUARANTINE suite à 3 échecs consécutifs.")
+                Logger.warning(f"[SkillRegistry] 🚨 Circuit Breaker: Skill '{skill_id}' v{version} placé en QUARANTINE suite à {trust_profile.consecutive_failures} échecs consécutifs (seuil {limit}).")
             else:
                 cursor.execute("""
                     UPDATE skill_versions SET trust_profile_json = ?, updated_at = ?
@@ -778,6 +787,20 @@ class SkillRegistry:
 
             conn.commit()
         return trust_profile
+
+    def count_repairs(self, skill_id: str) -> int:
+        """Nombre de versions issues d'une réparation (provenance REPAIRED). Pur, sans LLM."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT COUNT(*) FROM skill_versions WHERE skill_id = ? AND provenance = 'REPAIRED'",
+                    (skill_id,),
+                )
+                row = cursor.fetchone()
+                return int(row[0]) if row else 0
+        except Exception:
+            return 0
 
     # =========================================================================
     # 4. EXPORTATION & IMPORTATION DE PACKAGES (.skillpkg)
@@ -877,7 +900,8 @@ class SkillRegistry:
                 cursor.execute("DELETE FROM skill_versions WHERE skill_id = ?", (package.manifest.skill_id,))
                 cursor.execute("DELETE FROM skills WHERE skill_id = ?", (package.manifest.skill_id,))
 
-            # 1. Insertion du Manifest
+            # 1. Insertion du Manifest (le pointeur prod est neutralisé :
+            # code étranger = jamais confiance immédiate, repasse par SHADOW).
             cursor.execute("""
                 INSERT INTO skills (
                     skill_id, namespace, name, description, parameters_schema,
@@ -893,16 +917,17 @@ class SkillRegistry:
                 json.dumps(package.manifest.environment.to_dict()),
                 json.dumps([cp.to_dict() for cp in package.manifest.checkpoints]),
                 package.manifest.risk_level,
-                package.manifest.current_production_version,
+                None,
                 package.manifest.created_at or now,
                 now
             ))
 
-            # 2. Insertion des Versions
+            # 2. Insertion des Versions (PRODUCTION importée → SHADOW d'office).
             for ver in package.versions:
                 payload_content = package.embedded_payloads.get(ver.flow_payload_ref)
                 if isinstance(payload_content, (dict, list)):
                     payload_content = json.dumps(payload_content)
+                import_state = SkillState.SHADOW.value if ver.state == SkillState.PRODUCTION else ver.state.value
                 cursor.execute("""
                     INSERT INTO skill_versions (
                         skill_id, version, parent_version, state, creator_model,
@@ -913,7 +938,7 @@ class SkillRegistry:
                     ver.skill_id,
                     ver.version,
                     ver.parent_version,
-                    ver.state.value,
+                    import_state,
                     ver.creator_model,
                     ver.min_capability_tier,
                     ProvenanceType.IMPORTED.value,

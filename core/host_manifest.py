@@ -27,6 +27,7 @@ class HostManifest:
     tools: List[Dict[str, Any]] = field(default_factory=list)  # Schémas des outils déclarés par l'hôte
     environment: Dict[str, Any] = field(default_factory=dict)  # Empreinte d'environnement brute
     metadata: Dict[str, Any] = field(default_factory=dict)     # Données libres supplémentaires
+    skill_governance: Dict[str, Any] = field(default_factory=dict)  # Réglages skills (seuils), voir contrat §7c
 
     def __init__(
         self,
@@ -36,6 +37,7 @@ class HostManifest:
         tools: Optional[List[Dict[str, Any]]] = None,
         environment: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        skill_governance: Optional[Dict[str, Any]] = None,
         **kwargs
     ):
         self.host_name = host_name
@@ -44,6 +46,7 @@ class HostManifest:
         self.tools = list(tools or [])
         self.environment = dict(environment or {})
         self.metadata = dict(metadata or {})
+        self.skill_governance = dict(skill_governance or {})
 
         # Tout argument additionnel est intégré dynamiquement dans l'environnement de l'hôte
         for k, v in kwargs.items():
@@ -65,6 +68,7 @@ class HostManifest:
             "tools": self.tools,
             "environment": self.environment,
             "metadata": self.metadata,
+            "skill_governance": self.skill_governance,
         }
         for k, v in self.environment.items():
             if k not in d:
@@ -80,8 +84,9 @@ class HostManifest:
         meta = dict(data.get("metadata") or {})
         
         # Ingestion transparente de tout champ contextuel passé par l'hôte
+        # (sauf skill_governance : réglage explicite, pas une donnée d'env).
         for k, v in data.items():
-            if k not in ("host_name", "host_version", "capabilities", "tools", "environment", "metadata") and v is not None:
+            if k not in ("host_name", "host_version", "capabilities", "tools", "environment", "metadata", "skill_governance") and v is not None:
                 env[k] = v
 
         return cls(
@@ -90,5 +95,6 @@ class HostManifest:
             capabilities=data.get("capabilities", []),
             tools=data.get("tools", []),
             environment=env,
-            metadata=meta
+            metadata=meta,
+            skill_governance=data.get("skill_governance", {}),
         )

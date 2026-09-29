@@ -86,6 +86,9 @@ class ExecutionEnvironment:
     preconditions: List[Dict[str, Any]] = field(default_factory=list)
     postconditions: List[Dict[str, Any]] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # Clés d'environnement EXIGÉES (P6) : l'hôte doit les fournir (non vides),
+    # sinon refus net avant exécution. Vient de `requires_env` des outils.
+    required_env_keys: List[str] = field(default_factory=list)
 
     def __init__(
         self,
@@ -94,6 +97,7 @@ class ExecutionEnvironment:
         preconditions: Optional[List[Dict[str, Any]]] = None,
         postconditions: Optional[List[Dict[str, Any]]] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        required_env_keys: Optional[List[str]] = None,
         **kwargs
     ):
         self.requirements = dict(requirements or {})
@@ -101,6 +105,7 @@ class ExecutionEnvironment:
         self.preconditions = list(preconditions or [])
         self.postconditions = list(postconditions or [])
         self.metadata = dict(metadata or {})
+        self.required_env_keys = [str(k) for k in (required_env_keys or []) if str(k).strip()]
 
         # Intégrer tous les paramètres supplémentaires (ex: os, os_family, display_scale_dpi, locale, etc.)
         # dans le dictionnaire de contraintes agnostique
@@ -138,6 +143,12 @@ class ExecutionEnvironment:
 
         mismatches: List[str] = []
         specificity: float = 0.0
+
+        # P6 — clés exigées : présentes et non vides chez l'hôte, sinon refus.
+        for req_key in self.required_env_keys or []:
+            hv = merged_host.get(req_key)
+            if hv is None or (isinstance(hv, str) and not hv.strip()):
+                mismatches.append(f"Clé d'environnement requise absente : '{req_key}'.")
 
         for req_key, req_val in self.requirements.items():
             if req_val is None or req_val == "" or req_val == "any":
@@ -236,6 +247,7 @@ class ExecutionEnvironment:
             "preconditions": self.preconditions,
             "postconditions": self.postconditions,
             "metadata": self.metadata,
+            "required_env_keys": list(self.required_env_keys or []),
         }
         for k, v in self.requirements.items():
             if k not in d:
@@ -246,7 +258,7 @@ class ExecutionEnvironment:
     def from_dict(cls, data: Dict[str, Any]) -> "ExecutionEnvironment":
         if not isinstance(data, dict):
             return cls()
-        known = {"requirements", "variant_tag", "preconditions", "postconditions", "metadata"}
+        known = {"requirements", "variant_tag", "preconditions", "postconditions", "metadata", "required_env_keys"}
         reqs = dict(data.get("requirements") or {})
         for k, v in data.items():
             if k not in known and v is not None:
@@ -256,7 +268,8 @@ class ExecutionEnvironment:
             variant_tag=data.get("variant_tag", "DEFAULT"),
             preconditions=data.get("preconditions", []),
             postconditions=data.get("postconditions", []),
-            metadata=data.get("metadata", {})
+            metadata=data.get("metadata", {}),
+            required_env_keys=data.get("required_env_keys", []),
         )
 
 

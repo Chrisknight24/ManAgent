@@ -153,6 +153,13 @@ class SkillExecutionEngine:
                 else:
                     err_msg = "Échec d'exécution du flux par l'hôte"
                     f_class = FailureClass.EXECUTION_ERROR
+                    if isinstance(execution_response, dict):
+                        # L'hôte peut qualifier lui-même l'échec (ex: capacité absente).
+                        err_msg = str(execution_response.get("error_message") or err_msg)
+                        try:
+                            f_class = FailureClass(str(execution_response.get("failure_class") or f_class.value))
+                        except Exception:
+                            f_class = FailureClass.EXECUTION_ERROR
                     breakout_report = BreakoutReport(
                         skill_id=skill_id,
                         version=ver_num,
