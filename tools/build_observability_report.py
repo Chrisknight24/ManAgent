@@ -817,6 +817,62 @@ def attach_llm_calls_by_mission(episodes, llm_calls, events):
 
     return unattached
 
+
+CODE_VALIDATION_EVENTS = ("plan_validation_decision", "plan_rejected_validation", "plan_rejected_supervisor")
+
+
+def attach_code_validation_events(episodes, events):
+    """Rattache les rejets CODE (gates déterministes, sans LLM) aux tentatives.
+
+    Sans ça, seul le juge LLM (tag PlanValidationDecision) est visible en HTML
+    et tout rejet code semble un trou. Chaque event garde son badge d'origine :
+    CODE (gate / pydantic / superviseur sans LLM) vs LLM (juge).
+    Fonction pure côté rattachement, testée vite.
+    """
+    ep_index = {ep["mission_id"]: ep for ep in episodes if ep.get("mission_id")}
+    solver_to_mission = build_solver_to_mission_map(episodes)
+    attempt_index = {}
+    all_attempts: list = []
+    for ep in episodes:
+        _collect_attempts(ep.get("execution_tree") or {}, attempt_index, all_attempts)
+    unattached = []
+    for ev in events or []:
+        if ev.get("event") not in CODE_VALIDATION_EVENTS:
+            continue
+        solver_id = ev.get("solver_id")
+        attempt_num = ev.get("attempt_number")
+        if attempt_num is None:
+            attempt_num = ev.get("attempt")
+        if attempt_num is None:
+            attempt_num = ev.get("attempt_num")
+        mid = ev.get("mission_id")
+        target_mid = mid
+        if not target_mid or target_mid not in ep_index:
+            if solver_id and solver_id in solver_to_mission:
+                target_mid = solver_to_mission[solver_id]
+            elif solver_id and solver_id.replace("solver_", "") in solver_to_mission:
+                target_mid = solver_to_mission[solver_id.replace("solver_", "")]
+            elif mid and mid in solver_to_mission:
+                target_mid = solver_to_mission[mid]
+        ep = ep_index.get(target_mid) if target_mid else None
+        if ep is None:
+            unattached.append(ev)
+            continue
+        ep.setdefault("_code_validations", []).append(ev)
+        attached = False
+        if solver_id is not None and attempt_num is not None:
+            attempt = attempt_index.get((solver_id, attempt_num))
+            if attempt is None:
+                attempt = attempt_index.get((str(solver_id).replace("solver_", ""), attempt_num))
+            if attempt is not None:
+                attempt.setdefault("_code_validations", []).append(ev)
+                attached = True
+        if not attached:
+            # Filet : visible au niveau épisode même sans tentative exacte.
+            pass
+    return unattached
+
+
 def attach_routing_calls_to_turns(session_turns, llm_calls):
     turns_by_session = {}
     for turn in session_turns:
@@ -891,6 +947,7 @@ def build_data(
             episodes = [ep for ep in episodes if ep.get("mission_id") in session_mids]
 
     unattached_llm_calls = attach_llm_calls_by_mission(episodes, llm_calls, events) or []
+    unattached_code = attach_code_validation_events(episodes, events) or []
 
     # Retrieval indexation par mission et par solver
     ep_index = {ep["mission_id"]: ep for ep in episodes if ep.get("mission_id")}
@@ -1023,6 +1080,7 @@ def build_data(
         "clock_offset_detected": 0,
         "unattached_skill_events": unattached_skill_events,
         "unattached_llm_calls": unattached_llm_calls,
+        "unattached_code_validations": unattached_code,
     }
 
 # =====================================================
@@ -2868,6 +2926,23 @@ function renderSolverNodeModern(ep, treeNode, depth) {
           }
           html += `</div>`;
         }
+        html += `</div>`;
+      }
+
+      // Rejets CODE (gates déterministes, sans LLM) : toujours visibles.
+      // Avant : seul le juge LLM s'affichait, le rejet code semblait un trou.
+      const attCode = att._code_validations || [];
+      if (attCode.length > 0) {
+        html += `<div style="margin-left:8px; margin-bottom:12px; display:flex; flex-direction:column; gap:6px;">`;
+        attCode.forEach((cev) => {
+          const evName = esc(cev.event || 'code');
+          const isOk = cev.is_valid !== false;
+          const why = esc(cev.reason || cev.failure_class || '');
+          html += `<div style="background:var(--surface); padding:8px 12px; border-radius:6px; border-left:3px solid ${isOk ? 'var(--success)' : 'var(--failure)'}; border:1px solid var(--border); font-size:12px;">`
+            + `<span class="badge badge--${isOk ? 'success' : 'failed'}" style="font-size:10.5px; font-weight:800;">⛔ CODE · ${evName}</span>`
+            + (why ? ` <span style="color:var(--text);"><b>Raison :</b> ${why}</span>` : '')
+            + `</div>`;
+        });
         html += `</div>`;
       }
 

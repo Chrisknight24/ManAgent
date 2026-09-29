@@ -317,7 +317,11 @@ class Planner(Entity):
                     used.update(matches)
             return used
 
-        def _check_var(raw_var: str, known: set, step, step_idx: int) -> None:
+        def _check_var(raw_var: str, known: set, step, step_idx: int, is_prose: bool = False) -> None:
+            # Doctrine : exécutable (execute_if, args) = rigide (erreur, ça planterait).
+            # Prose (description, response_text, step_context) = souple (avertissement
+            # seul, jamais un rejet — un rejet coûte une tentative pour un doute de style).
+            dest = warnings if is_prose else errors
             clean_root = re.sub(r'^(bool_|data_)+', '', raw_var)
             is_bool_ref = raw_var.startswith("bool_")
             is_data_ref = raw_var.startswith("data_")
@@ -352,39 +356,40 @@ class Planner(Entity):
                 if matched_step_id:
                     target_step = all_steps_by_id[matched_step_id]
                     if target_step.type == StepType.DIRECT_ANSWER:
-                        errors.append(
+                        dest.append(
                             _("L'étape '{}' tente d'utiliser la variable '{}' associée à l'étape '{}' de type 'direct_answer' (les réponses directes ne produisent pas de données pour d'autres étapes).")
                             .format(step.id, var, matched_step_id)
                         )
                     elif matched_step_id not in steps_seen_so_far:
-                        errors.append(
+                        dest.append(
                             _("L'étape '{}' tente d'utiliser la variable '{}' provenant de l'étape future '{}' (erreur de causalité : l'étape n'a pas encore été exécutée).")
                             .format(step.id, var, matched_step_id)
                         )
                     else:
-                        errors.append(
+                        dest.append(
                             _("L'étape '{}' tente d'utiliser la variable '{}' issue de l'étape '{}' qui n'a pas produit de données valides.")
                             .format(step.id, var, matched_step_id)
                         )
                 elif future_step:
-                    errors.append(
+                    dest.append(
                         _("L'étape '{}' tente d'utiliser la variable '{}' issue de l'étape future '{}' (erreur de causalité temporelle).")
                         .format(step.id, var, future_step.id)
                     )
                 else:
-                    errors.append(
+                    dest.append(
                         _("L'étape '{}' tente d'utiliser la variable inconnue '{}' qui n'a été produite par aucune étape antérieure ni par le contexte.")
                         .format(step.id, var)
                     )
 
         for step_idx, step in enumerate(plan.steps):
-            # 1. Champs exécutables : antériorités seules (strict).
+            # 1. Champs exécutables : antériorités seules (strict, erreur = rejet).
             for raw_var in _collect_used(step.execute_if, step.tool_args_json):
-                _check_var(raw_var, known_vars, step, step_idx)
-            # 1b. Prose : sa propre sortie = déclaration, pas usage.
+                _check_var(raw_var, known_vars, step, step_idx, is_prose=False)
+            # 1b. Prose : sa propre sortie = déclaration, pas usage. Souple :
+            # variable inconnue dans le texte = avertissement seul, jamais un rejet.
             prose_known = set(known_vars) | _produced_names(step)
             for raw_var in _collect_used(step.response_text, step.step_context, step.description):
-                _check_var(raw_var, prose_known, step, step_idx)
+                _check_var(raw_var, prose_known, step, step_idx, is_prose=True)
 
             # 3. Enregistrer les variables produites par cette étape
             steps_seen_so_far.add(step.id)

@@ -572,8 +572,17 @@ class PlanValidator:
         all_warnings.extend(recursion_warnings)
         pattern_warning = "\n\n".join(all_warnings) if all_warnings else None
 
-        # Gate déterministe (fail-fast) : outil/skill inexistant ou args
-        # illisibles = refus net, SANS appel LLM (économise tentatives + coût).
+        # Gate déterministe (fail-fast) : UNIQUEMENT les cas sûrs à 100%,
+        # zéro faux positif, pas chers. Doctrine : un rejet coûte une tentative
+        # + tokens, donc le doute stylistique reste un conseil dans le prompt,
+        # jamais un refus code.
+        # Gardées : outil/skill inexistant, args JSON illisibles, outil réservé,
+        # perception directe (réparée auto, pas rejetée en boucle).
+        # VOLONTAIREMENT ABSENTE : aucune gate sur `direct_answer` sans variable.
+        # Un refus honnête (pas d'outil, modalité non supportée, incohérence) ou
+        # une réponse avec `execute_if` n'a besoin d'aucune variable et reste
+        # valide. Le filet final `is_mission_success` (1 action matérielle
+        # réussie exigée) suffit contre les faux succès.
         unknown = find_unknown_plan_tools(
             plan, self._available_tools, self._production_skills
         )
