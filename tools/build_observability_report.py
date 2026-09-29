@@ -4070,6 +4070,7 @@ function renderLessonsView(filter) {
         </div>
       </div>
       <div style="font-size:14px; font-weight:700; color:var(--text); line-height:1.4;">${esc(l.recommendation)}</div>
+      <div style="margin-top:8px; font-size:11.5px; color:var(--text-muted); font-family:var(--mono);">preuves: ${l.evidence_count ?? 1} · contredits: ${l.contradiction_count ?? 0} · maj: ${formatTimestamp(l.last_verified_at || l.created_at)}</div>
       <div style="margin-top:12px; display:flex; gap:6px; flex-wrap:wrap;">
         ${(l.keywords || []).map(k => `<span style="font-size:11px; background:var(--surface-alt); padding:2px 6px; border-radius:4px; font-family:var(--mono);">${esc(k)}</span>`).join('')}
       </div>

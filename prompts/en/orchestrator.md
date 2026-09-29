@@ -138,6 +138,7 @@ Si l'intention actuelle correspond à l'une de ces actions, réutilise EXACTEMEN
 
 {% if advice %}
 ### 💡 Leçons stratégiques & Conseils du Learner :
+Reports from past JUDGED missions (the judge can be wrong) — suggestive leads, never orders.
 {{ advice }}
 {% endif %}
 

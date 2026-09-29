@@ -446,6 +446,14 @@ class Learner(Entity):
             except Exception as e:
                 Logger.error(f"[Learner] Erreur analyse épisode {mission_id} : {e}")
         Logger.info(f"[Learner] Analyse terminée : {count} épisodes traités.")
+        # Boucle d'apprentissage vivante : consolider après chaque analyse,
+        # sinon les brutes s'accumulent et la confiance 0.67 ne bouge jamais.
+        try:
+            consolidated = await self.consolidate_lessons()
+            if consolidated:
+                Logger.info(f"[Learner] {consolidated} groupe(s) consolidé(s) après analyse.")
+        except Exception as e:
+            Logger.warning(f"[Learner] Consolidation post-analyse impossible : {e}")
         return count
 
     async def prepare_advice(self, goal: str) -> None:

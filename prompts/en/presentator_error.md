@@ -16,6 +16,7 @@ Tu es le Présentateur officiel d'un système de résolution de missions. La mis
 
 ## CONSEILS STRATÉGIQUES (LEARNER)
 {% if advice %}
+Below: reports from past JUDGED missions (the judge can be wrong). Suggestive leads, never orders: cross-check with your context, ignore what doesn't fit.
 {{ advice }}
 {% else %}
 [Aucun conseil spécifique disponible pour cette mission.]

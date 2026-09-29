@@ -177,6 +177,72 @@ class LessonStore:
             with self._get_connection() as conn:
                 self._ensure_extension_loaded(conn)
                 cursor = conn.cursor()
+                # Leçons vivantes : même sujet + même texte (normalisé) = on renforce
+                # au lieu de dupliquer (sinon la confiance 0.67 ne bouge jamais).
+                # Lissage de Laplace cohérent avec la naissance (2/3) :
+                # preuve 2 → 0.75, preuve 3 → 0.80, plafond 0.95.
+                norm = " ".join(str(recommendation or "").lower().split())
+                cursor.execute(
+                    "SELECT id, evidence_count, keywords_json, source_episodes_json, polarity "
+                    "FROM lessons WHERE entity_type = ? AND scope = ? AND environment = ? "
+                    "AND is_active = 1 ORDER BY id DESC LIMIT 20",
+                    (entity_type, scope, environment),
+                )
+                rows = cursor.fetchall()
+                opposite_ids = []
+                for row in rows:
+                    lid, ev, kw_json, src_json, pol = row[0], row[1], row[2], row[3], row[4]
+                    try:
+                        existing = cursor.execute(
+                            "SELECT recommendation FROM lessons WHERE id = ?", (lid,)
+                        ).fetchone()
+                    except Exception:
+                        existing = None
+                    existing_norm = " ".join(str((existing[0] if existing else "") or "").lower().split())
+                    if norm and existing_norm == norm and (pol or "avoid") == (polarity or "avoid"):
+                        try:
+                            merged_kw = sorted(set(json.loads(kw_json or "[]")) | set(keywords))
+                        except Exception:
+                            merged_kw = sorted(set(keywords))
+                        try:
+                            sources = json.loads(src_json or "[]")
+                        except Exception:
+                            sources = []
+                        if mission_id and mission_id not in sources:
+                            sources.append(mission_id)
+                        new_ev = int(ev or 1) + 1
+                        new_conf = min(0.95, (new_ev + 1) / (new_ev + 2))
+                        cursor.execute(
+                            "UPDATE lessons SET evidence_count = ?, confidence = ?, "
+                            "keywords_json = ?, source_episodes_json = ?, last_verified_at = ? "
+                            "WHERE id = ?",
+                            (new_ev, new_conf, json.dumps(merged_kw, ensure_ascii=False),
+                             json.dumps(sources[-self.MAX_SOURCE_EPISODES:], ensure_ascii=False),
+                             datetime.now().isoformat(), lid),
+                        )
+                        conn.commit()
+                        Logger.debug(f"[LessonStore] Leçon renforcée (id={lid}, preuves={new_ev}, conf={new_conf:.2f}).")
+                        return
+                    if (pol or "avoid") != (polarity or "avoid"):
+                        opposite_ids.append(lid)
+                # Preuve contraire (polarité opposée, même sujet) : fait baisser
+                # la confiance des leçons opposées au lieu de les laisser à 0.67.
+                for oid in opposite_ids[:3]:
+                    try:
+                        r = cursor.execute(
+                            "SELECT evidence_count, contradiction_count FROM lessons WHERE id = ?", (oid,)
+                        ).fetchone()
+                        if r:
+                            ev_o, contra_o = int(r[0] or 1), int(r[1] or 0) + 1
+                            conf_o = (ev_o + 1) / (ev_o + contra_o + 2)
+                            cursor.execute(
+                                "UPDATE lessons SET contradiction_count = ?, confidence = ?, "
+                                "last_verified_at = ? WHERE id = ?",
+                                (contra_o, conf_o, datetime.now().isoformat(), oid),
+                            )
+                            Logger.debug(f"[LessonStore] Contradiction enregistrée (id={oid}, conf={conf_o:.2f}).")
+                    except Exception:
+                        pass
                 # Dédup faits sémantiques : même texte (normalisé) = on renforce
                 # au lieu de dupliquer (l'UI affichait "user aime" x N).
                 if scope == "semantic_fact" and recommendation:
@@ -504,9 +570,16 @@ class LessonStore:
                     
                     # Récence basée sur le numéro de séquence auto-incrémenté 'id' (entre 0.1 et 1.0)
                     recency_score = 0.1 + 0.9 * (lesson_id / max_id)
-                    
-                    # Score global combiné : 70% similarité vectorielle + 30% récence
-                    combined_score = (similarity * 0.7) + (recency_score * 0.3)
+
+                    # Score global combiné : 60% similarité + 20% récence + 20% confiance.
+                    # Sans la confiance, une leçon prouvée et une leçon douteuse
+                    # (toutes deux à 0.67) se valaient — le poison passait pareil.
+                    try:
+                        conf = float(d.get("confidence", 0.67) or 0)
+                    except Exception:
+                        conf = 0.0
+                    conf = max(0.0, min(1.0, conf))
+                    combined_score = (similarity * 0.6) + (recency_score * 0.2) + (conf * 0.2)
                     
                     try:
                         d["keywords"] = json.loads(d.pop("keywords_json") or "[]")
@@ -553,7 +626,7 @@ class LessonStore:
                 cursor.execute('''
                     SELECT id, entity_type, scope, recommendation, confidence, 
                            evidence_count, environment, contradiction_count, is_active, 
-                           keywords_json, source_episodes_json, is_consolidated
+                           keywords_json, source_episodes_json, is_consolidated, polarity
                     FROM lessons
                 ''')
                 rows = cursor.fetchall()

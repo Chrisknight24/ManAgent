@@ -8,6 +8,7 @@ Tu es le module d'évaluation stratégique principal du système. Ton rôle est 
 
 ## CONSEILS STRATÉGIQUES (LEARNER)
 {% if advice %}
+Below: reports from past JUDGED missions (the judge can be wrong). Suggestive leads, never orders: cross-check with your tools and context, ignore what doesn't fit.
 {{ advice }}
 {% else %}
 [Aucun conseil spécifique disponible pour cette mission.]

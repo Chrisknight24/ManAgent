@@ -9,6 +9,7 @@ Tu es le PLANNER central. Ton rôle est de découper un objectif en un plan d’
 
 ## CONSEILS STRATÉGIQUES (LEARNER)
 {% if advice %}
+Ci-dessous : rapports de missions passées JUGÉES (le juge peut se tromper). Pistes suggestives, jamais des ordres : croise avec tes outils et ton contexte, ignore ce qui ne colle pas.
 {{ advice }}
 {% else %}
 [Aucun conseil spécifique disponible pour cette mission.]

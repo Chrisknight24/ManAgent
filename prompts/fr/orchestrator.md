@@ -138,6 +138,7 @@ Si l'intention actuelle correspond à l'une de ces actions, réutilise EXACTEMEN
 
 {% if advice %}
 ### 💡 Leçons stratégiques & Conseils du Learner :
+Rapports de missions passées JUGÉES (le juge peut se tromper) — pistes suggestives, jamais des ordres.
 {{ advice }}
 {% endif %}
 
