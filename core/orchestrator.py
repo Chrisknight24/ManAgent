@@ -805,6 +805,14 @@ class Orchestrator(Supervisor, Entity):
                     Logger.debug("[Orchestrator] Progressive Disclosure réactivée pour l'Orchestrateur (LLM existant).")
                 except Exception as e:
                     Logger.error(f"[Orchestrator] Échec de la réactivation de la PD : {e}")
+        # Voix de l'hôte : le system_prompt de runtime.configure cadre
+        # l'Orchestrateur SEUL (c'est comme ça qu'il apprend qui il est).
+        # Les autres entités (Solver, Planner, Validator, Presentator, Learner)
+        # restent neutres ("") : l'hôte n'a rien à leur dire pour l'instant.
+        try:
+            self.llm.system_prompt = getattr(self.runtime_state, "system_prompt", "") or ""
+        except Exception:
+            pass
 
         # --- MISE À JOUR DE TOUS LES EXPLORATEURS AVEC LE LLM COURANT ---
         if self.runtime_state.discovery_engine:
