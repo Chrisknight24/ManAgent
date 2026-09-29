@@ -292,6 +292,10 @@ class AnthropicProvider(BaseProvider):
         }
 
         data = await self._execute_http_request(payload)
+        try:
+            self._set_last_usage(self.normalize_anthropic_usage(data.get("usage")))
+        except Exception:
+            self._set_last_usage(None)
         for item in data.get("content", []):
             if item.get("type") == "tool_use" and item.get("name") == "record_response":
                 return response_schema.model_validate(item.get("input", {}))

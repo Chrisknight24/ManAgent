@@ -149,6 +149,8 @@ pas mauvaise volonté. Règles absolues pour chaque outil déclaré :
 | `skill.export_package` / `skill.import_package` | partage de skills |
 | `learner.analyze` | analyse post-mission |
 | `system.warmup` / `system.reset_data` / `data.*` | maintenance |
+| `stats.get` | compteurs tokens : `{"mission_id":"..."}` → usage, ou sans filtre → total + par mission |
+| `rules.get` / `rules.set` | lire / changer les règles à chaud : `{"rules_text":"..."}` |
 
 ## 5. Boucle outils (l'hôte exécute, ManAgent décide)
 
@@ -225,6 +227,21 @@ retry, convergence) peuvent demander `world` (`inspect_state`,
 ## 7. Plan-first + rules
 
 ManAgent répond toujours par un plan validé. L'utilisateur peut contraindre avec `rules.md` (confirmation humaine, rejets, niveaux de risque). L'hôte n'a pas besoin de relire les prompts.
+
+Dev (fichier) : éditez `rules.md` + relancez. Prod (exe, sans fichier) : envoyez `runtime.configure {"rules_text":"..."}` une fois, ou `rules.set` à chaud + `rules.get` pour relire. L'override en mémoire est prioritaire sur le fichier. Vide = refusé avec erreur claire.
+
+## 7b. Compteurs tokens (usage)
+
+Chaque `llm_call` porte `usage = {prompt_tokens, completion_tokens, total_tokens, source}` où `source` vaut `real` (chiffre fournisseur), `estimated` (calcul local ~4 caractères = 1 token) ou absent. Jamais inventé : si le fournisseur ne dit rien, on estime et on l'écrit.
+
+Query hôte :
+```json
+{"type":"request","action":"stats.get","payload":{"mission_id":"m123"}}
+→ {"mission_id":"m123","found":true,"prompt_tokens":1200,"completion_tokens":800,"total_tokens":2000,"calls":5,"real_calls":4,"estimated_calls":1}
+{"type":"request","action":"stats.get","payload":{}}
+→ {"total":{...},"by_mission":{...}}
+```
+Mission inconnue → `found:false` + zéros, pas d'erreur.
 
 ## 8. Compatibilité (versioning)
 

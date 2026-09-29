@@ -111,7 +111,8 @@ not bad will. Absolute rules for every declared tool:
 `runtime.configure`, `host.manifest.register`, `chat.send`,
 `chat.stop` / `chat.reset`, `tool.result`, `skill.*` (list, payload, set_state,
 repair, export/import), `learner.analyze`, `system.warmup` / `system.reset_data` /
-`data.*`, `embeddings.*` (catalog, prepare, set_default, cancel).
+`data.*`, `embeddings.*` (catalog, prepare, set_default, cancel),
+`stats.get`, `rules.get` / `rules.set`.
 
 ## 5. Tool loop (the host works, ManAgent decides)
 
@@ -174,6 +175,13 @@ Handled types, end to end (declaration → model):
 
 Stable events to log host-side: `plan.generated`, `tools_manager.decision/execution/result`,
 `checkpoint.reached`, `breakout.occurred`, `execution.completed`, `learner.analyze_finished`.
+
+Token usage: every `llm_call` carries `usage = {prompt_tokens, completion_tokens, total_tokens, source}`
+with `source` = `real` (provider figure) or `estimated` (local ~4 chars = 1 token). Never invented.
+Query: `stats.get {"mission_id":"m123"}` → totals, or `{}` → total + by_mission. Unknown mission → `found:false` + zeros.
+
+Rules: file `rules.md` for dev (edit + restart). Prod (exe): `runtime.configure {"rules_text":"..."}` once,
+or `rules.set` live + `rules.get` to read back. Memory override wins over file.
 
 ## 7. Secrets
 

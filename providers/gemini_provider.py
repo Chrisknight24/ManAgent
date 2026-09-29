@@ -238,6 +238,10 @@ class GeminiProvider(BaseProvider):
                 contents=contents,
                 config=config
             )
+            try:
+                self._set_last_usage(self.normalize_gemini_usage(getattr(response, "usage_metadata", None)))
+            except Exception:
+                self._set_last_usage(None)
 
             return response_schema.model_validate_json(response.text)
 

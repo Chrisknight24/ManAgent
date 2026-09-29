@@ -55,6 +55,9 @@ class BaseProvider(ABC):
         self.model_name: Optional[str] = None
         self.runtime_state: Any = None
         self.call_epoch: Optional[int] = None
+        # Dernier usage tokens du dernier appel (normalisé, jamais inventé).
+        # {prompt_tokens, completion_tokens, total_tokens, source: real|estimated|none}
+        self._last_usage: Optional[Dict[str, Any]] = None
 
         # Pool de clés ordonnées
         self.api_keys_pool: List[Dict[str, Any]] = []
@@ -342,3 +345,77 @@ class BaseProvider(ABC):
     def has_capability(self, capability: str) -> bool:
         """Vérifie si le provider supporte une capacité spécifique."""
         return False
+
+    # --- Usage tokens (normalisé, source étiquetée, jamais inventé) ---
+    def get_last_usage(self) -> Optional[Dict[str, Any]]:
+        return dict(self._last_usage) if isinstance(self._last_usage, dict) else None
+
+    def _set_last_usage(self, usage: Optional[Dict[str, Any]]) -> None:
+        self._last_usage = dict(usage) if isinstance(usage, dict) else None
+
+    @staticmethod
+    def normalize_openai_usage(raw: Any) -> Optional[Dict[str, Any]]:
+        """usage OpenAI-compatible {prompt_tokens, completion_tokens, total_tokens}."""
+        try:
+            if not isinstance(raw, dict):
+                return None
+            p = raw.get("prompt_tokens")
+            c = raw.get("completion_tokens")
+            t = raw.get("total_tokens")
+            if p is None and c is None and t is None:
+                return None
+            p = int(p or 0)
+            c = int(c or 0)
+            t = int(t if t is not None else (p + c))
+            return {"prompt_tokens": p, "completion_tokens": c, "total_tokens": t, "source": "real"}
+        except Exception:
+            return None
+
+    @staticmethod
+    def normalize_anthropic_usage(raw: Any) -> Optional[Dict[str, Any]]:
+        """usage Anthropic {input_tokens, output_tokens}."""
+        try:
+            if not isinstance(raw, dict):
+                return None
+            p = raw.get("input_tokens")
+            c = raw.get("output_tokens")
+            if p is None and c is None:
+                return None
+            p = int(p or 0)
+            c = int(c or 0)
+            return {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c, "source": "real"}
+        except Exception:
+            return None
+
+    @staticmethod
+    def normalize_gemini_usage(raw: Any) -> Optional[Dict[str, Any]]:
+        """usage Gemini SDK {prompt_token_count, candidates_token_count, total_token_count}."""
+        try:
+            if raw is None:
+                return None
+            if isinstance(raw, dict):
+                p = raw.get("prompt_token_count", raw.get("prompt_tokens", 0)) or 0
+                c = raw.get("candidates_token_count", raw.get("completion_tokens", 0)) or 0
+                t = raw.get("total_token_count", raw.get("total_tokens", p + c)) or (p + c)
+            else:
+                p = int(getattr(raw, "prompt_token_count", 0) or 0)
+                c = int(getattr(raw, "candidates_token_count", 0) or 0)
+                t = int(getattr(raw, "total_token_count", 0) or (p + c))
+            if not p and not c and not t:
+                return None
+            return {"prompt_tokens": int(p), "completion_tokens": int(c), "total_tokens": int(t), "source": "real"}
+        except Exception:
+            return None
+
+    @staticmethod
+    def estimate_usage(prompt_text: str = "", response_text: str = "") -> Dict[str, Any]:
+        """Estimation locale quand le fournisseur ne dit rien (~4 caractères = 1 token)."""
+        try:
+            p = max(1, len(str(prompt_text or "")) // 4)
+        except Exception:
+            p = 0
+        try:
+            c = max(1, len(str(response_text or "")) // 4)
+        except Exception:
+            c = 0
+        return {"prompt_tokens": int(p), "completion_tokens": int(c), "total_tokens": int(p + c), "source": "estimated"}

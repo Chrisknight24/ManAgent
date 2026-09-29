@@ -31,6 +31,9 @@ class Actions:
     EMBEDDINGS_PREPARE = "embeddings.prepare"
     EMBEDDINGS_SET_DEFAULT = "embeddings.set_default"
     EMBEDDINGS_CANCEL = "embeddings.cancel"
+    STATS_GET = "stats.get"
+    RULES_GET = "rules.get"
+    RULES_SET = "rules.set"
 
 class Events:
     RUNTIME_READY = "runtime.ready"

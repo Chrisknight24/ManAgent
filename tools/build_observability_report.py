@@ -873,6 +873,54 @@ def attach_code_validation_events(episodes, events):
     return unattached
 
 
+def attach_usage_summaries(episodes, llm_calls):
+    """Cumule l'usage tokens par mission depuis les events llm_call.
+
+    Chaque call porte usage {prompt_tokens, completion_tokens, total_tokens,
+    source: real|estimated}. Total mission + compteurs par source, jamais inventé.
+    """
+    ep_index = {ep["mission_id"]: ep for ep in episodes if ep.get("mission_id")}
+    solver_to_mission = build_solver_to_mission_map(episodes)
+    for call in llm_calls or []:
+        usage = call.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        try:
+            p = int(usage.get("prompt_tokens") or 0)
+        except Exception:
+            p = 0
+        try:
+            c = int(usage.get("completion_tokens") or 0)
+        except Exception:
+            c = 0
+        try:
+            t = int(usage.get("total_tokens") or (p + c))
+        except Exception:
+            t = p + c
+        src = usage.get("source") or "unknown"
+        mid = call.get("mission_id")
+        solver_id = call.get("solver_id")
+        target_mid = mid
+        if not target_mid or target_mid not in ep_index:
+            if solver_id and solver_id in solver_to_mission:
+                target_mid = solver_to_mission[solver_id]
+            elif mid and mid in solver_to_mission:
+                target_mid = solver_to_mission[mid]
+        ep = ep_index.get(target_mid) if target_mid else None
+        if ep is None:
+            continue
+        summ = ep.setdefault("_usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0, "real_calls": 0, "estimated_calls": 0})
+        summ["prompt_tokens"] += p
+        summ["completion_tokens"] += c
+        summ["total_tokens"] += t
+        summ["calls"] += 1
+        if src == "real":
+            summ["real_calls"] += 1
+        elif src == "estimated":
+            summ["estimated_calls"] += 1
+    return None
+
+
 def attach_routing_calls_to_turns(session_turns, llm_calls):
     turns_by_session = {}
     for turn in session_turns:
@@ -1002,6 +1050,8 @@ def build_data(
 
     for ep in episodes:
         ep["_registries"] = solver_registries
+
+    attach_usage_summaries(episodes, llm_calls)
 
     discovery_data = build_discovery_data(events, llm_calls)
     attach_discovery_to_episodes(episodes, discovery_data)
@@ -2495,6 +2545,7 @@ function renderMissionDetail(missionId) {
         <span>🕒 Début: ${formatTimestamp(ep.created_at)}</span>
         <span>🏁 Fin: ${formatTimestamp(ep.finished_at)}</span>
         <span>🌍 Env: <b>${esc(ep.environment || 'simulated')}</b></span>
+        ${ep._usage ? `<span>🔢 Tokens: <b>${ep._usage.total_tokens}</b> (in ${ep._usage.prompt_tokens} / out ${ep._usage.completion_tokens}, ${ep._usage.calls} appels${ep._usage.real_calls ? `, ${ep._usage.real_calls} real` : ''}${ep._usage.estimated_calls ? `, ${ep._usage.estimated_calls} estimés` : ''})</span>` : ''}
       </div>
     </div>`;
 

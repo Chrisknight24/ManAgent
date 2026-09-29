@@ -212,6 +212,43 @@ class Orchestrator(Supervisor, Entity):
                 return await self._handle_embeddings_set_default(packet)
             elif packet.action == Actions.EMBEDDINGS_CANCEL:
                 return await self._handle_embeddings_cancel(packet)
+            elif packet.action == Actions.STATS_GET:
+                payload = packet.payload or {}
+                mission_id = payload.get("mission_id")
+                store = getattr(self.runtime_state, "llm_usage", None) or {"by_mission": {}, "total": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}}
+                by_mission = store.get("by_mission", {}) or {}
+                if mission_id:
+                    entry = by_mission.get(mission_id)
+                    if entry is None:
+                        return ResponsePacket(type="response", status="success", payload={
+                            "mission_id": mission_id, "found": False,
+                            "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0,
+                        })
+                    return ResponsePacket(type="response", status="success", payload={
+                        "mission_id": mission_id, "found": True, **entry,
+                    })
+                return ResponsePacket(type="response", status="success", payload={
+                    "found": True, "total": store.get("total", {}), "by_mission": by_mission,
+                })
+            elif packet.action == Actions.RULES_GET:
+                return ResponsePacket(type="response", status="success", payload={
+                    "rules_text": self._load_rules_md(),
+                })
+            elif packet.action == Actions.RULES_SET:
+                payload = packet.payload or {}
+                text = payload.get("rules_text", "")
+                if not isinstance(text, str) or not text.strip():
+                    from transport.packet_models import ErrorPacket as _Err
+                    return _Err(type="error", message="rules_text vide — rien à appliquer.")
+                self._rules_cache = text
+                try:
+                    self.runtime_state.rules_override = text
+                except Exception:
+                    pass
+                return ResponsePacket(type="response", status="success", payload={
+                    "message": "Règles mises à jour (session en cours, sans redémarrage).",
+                    "chars": len(text),
+                })
             elif packet.action == Actions.LEARNER_ANALYZE:
                 if not self.runtime_state.learner:
                     return ErrorPacket(type="error", message="Learner non initialisé. Envoyez un message d'abord.")
@@ -1985,11 +2022,18 @@ class Orchestrator(Supervisor, Entity):
         """
         Charge (et cache en mémoire) le contenu de rules.md — les critères de
         conformité en langage naturel utilisés par le LLM Judge. Fichier
-        volontairement optionnel : son absence ne bloque pas les missions,
-        elle dégrade juste la validation à "pas de critère explicite fourni"
-        (le LLM garde son jugement général, mais n'a plus de politique
-        spécifique à faire respecter).
+        volontairement optionnel : son absence ne bloque pas les missions.
+        Priorité : override via runtime.configure/rules.set (prod, sans fichier),
+        sinon fichier rules.md (dev).
         """
+        # Override à chaud (prod) prioritaire sur le fichier.
+        try:
+            override = getattr(self.runtime_state, "rules_override", None)
+            if isinstance(override, str) and override.strip():
+                self._rules_cache = override
+                return self._rules_cache
+        except Exception:
+            pass
         if self._rules_cache is not None:
             return self._rules_cache
         try:
@@ -2499,6 +2543,17 @@ class Orchestrator(Supervisor, Entity):
         Logger.info(f"[Orchestrator] Environnement = {self.runtime_state.environment}, HITL policy = {self.runtime_state.hitl_policy}")
         self.runtime_state.presentator_detail_level = payload.get("presentator_detail_level",
                                                                   "brief")
+        # Règles métier : override optionnel (prod, sans fichier).
+        # Priorité : runtime_configuration.rules_text > rules_text racine > fichier.
+        try:
+            _rt_cfg = payload.get("runtime_configuration", {}) or {}
+            _rules_override = _rt_cfg.get("rules_text", payload.get("rules_text", ""))
+            if isinstance(_rules_override, str) and _rules_override.strip():
+                self.runtime_state.rules_override = _rules_override
+                self._rules_cache = _rules_override
+                Logger.info(f"[Orchestrator] Règles override via configure ({len(_rules_override)} car.).")
+        except Exception:
+            pass
 
         from core.i18n import setup_i18n
         setup_i18n(self.runtime_state.language)

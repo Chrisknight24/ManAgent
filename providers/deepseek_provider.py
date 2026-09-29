@@ -249,6 +249,10 @@ class DeepSeekProvider(BaseProvider):
             payload["max_tokens"] = int(max_output_tokens)
 
         data = await self._execute_http_request(payload)
+        try:
+            self._set_last_usage(self.normalize_openai_usage(data.get("usage")))
+        except Exception:
+            self._set_last_usage(None)
         raw_json_str = data["choices"][0]["message"]["content"]
 
         def clean_none(obj):

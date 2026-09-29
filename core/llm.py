@@ -680,10 +680,57 @@ class Llm:
         full_context.extend(self.context)
         return full_context
 
+    def _record_usage(self, usage: Optional[Dict[str, Any]], mission_id: Optional[str] = None) -> None:
+        """Cumule l'usage tokens par mission + global (source étiquetée, jamais inventée)."""
+        try:
+            if not isinstance(usage, dict):
+                return
+            rs = self.runtime_state
+            if rs is None:
+                return
+            store = getattr(rs, "llm_usage", None)
+            if not isinstance(store, dict):
+                store = {"by_mission": {}, "total": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}}
+                setattr(rs, "llm_usage", store)
+            by_mission = store.setdefault("by_mission", {})
+            total = store.setdefault("total", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0})
+            mid = mission_id or "global"
+            entry = by_mission.setdefault(mid, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0, "real_calls": 0, "estimated_calls": 0})
+            p = int(usage.get("prompt_tokens") or 0)
+            c = int(usage.get("completion_tokens") or 0)
+            t = int(usage.get("total_tokens") or (p + c))
+            entry["prompt_tokens"] += p
+            entry["completion_tokens"] += c
+            entry["total_tokens"] += t
+            entry["calls"] += 1
+            if usage.get("source") == "real":
+                entry["real_calls"] += 1
+            else:
+                entry["estimated_calls"] += 1
+            total["prompt_tokens"] += p
+            total["completion_tokens"] += c
+            total["total_tokens"] += t
+            total["calls"] += 1
+        except Exception:
+            pass
+
+    @staticmethod
+    def _estimate_usage(prompt_text: str = "", response_text: str = "") -> Dict[str, Any]:
+        try:
+            p = max(1, len(str(prompt_text or "")) // 4)
+        except Exception:
+            p = 0
+        try:
+            c = max(1, len(str(response_text or "")) // 4)
+        except Exception:
+            c = 0
+        return {"prompt_tokens": int(p), "completion_tokens": int(c), "total_tokens": int(p + c), "source": "estimated"}
+
     def _emit_llm_event(self, tag: str, prompt: str, response: Optional[BaseModel] = None,
                     error: Optional[Exception] = None, duration_ms: Optional[int] = None,
                     mission_id: Optional[str] = None, schema_name: Optional[str] = None,
-                    context: Optional[List[Dict]] = None, kind: str = "structured"):
+                    context: Optional[List[Dict]] = None, kind: str = "structured",
+                    usage: Optional[Dict[str, Any]] = None):
         event_fields = {
             "tag": tag or "llm_call",
             "kind": kind,
@@ -715,6 +762,9 @@ class Llm:
                 mission_id = getattr(self.runtime_state, 'mission_id', None)
         if mission_id is not None:
             event_fields["mission_id"] = mission_id
+        if usage is not None and isinstance(usage, dict):
+            event_fields["usage"] = usage
+            self._record_usage(usage, mission_id)
 
         if context is not None:
             event_fields["context"] = context
@@ -775,6 +825,15 @@ class Llm:
                 max_output_tokens=max_output_tokens
             )
             duration_ms = int((time.monotonic() - start_time) * 1000)
+            try:
+                raw_usage = provider.get_last_usage() if hasattr(provider, "get_last_usage") else None
+            except Exception:
+                raw_usage = None
+            if not isinstance(raw_usage, dict):
+                try:
+                    raw_usage = self._estimate_usage(prompt, result.model_dump_json() if hasattr(result, "model_dump_json") else str(result))
+                except Exception:
+                    raw_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "source": "none"}
             self._emit_llm_event(
                 tag=tag or schema.__name__,
                 prompt=prompt,
@@ -783,7 +842,8 @@ class Llm:
                 mission_id=mission_id,
                 schema_name=schema.__name__,
                 context=ephemeral_context,
-                kind="structured"
+                kind="structured",
+                usage=raw_usage
             )
             return result
         except Exception as e:
@@ -843,6 +903,15 @@ class Llm:
                     Logger.warning(f"[LLM] Résultat generate_structured ignoré car la session/génération a été annulée (epoch {call_epoch} vs actuel {getattr(self.runtime_state, 'generation_epoch', 0)}).")
                     raise asyncio.CancelledError("L'appel LLM structuré a été annulé.")
                 duration_ms = int((time.monotonic() - start_time) * 1000)
+                try:
+                    raw_usage = provider.get_last_usage() if hasattr(provider, "get_last_usage") else None
+                except Exception:
+                    raw_usage = None
+                if not isinstance(raw_usage, dict):
+                    try:
+                        raw_usage = self._estimate_usage(prompt, result.model_dump_json() if hasattr(result, "model_dump_json") else str(result))
+                    except Exception:
+                        raw_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "source": "none"}
                 self._emit_llm_event(
                     tag=tag or schema.__name__,
                     prompt=prompt,
@@ -851,7 +920,8 @@ class Llm:
                     mission_id=mission_id,
                     schema_name=schema.__name__,
                     context=ephemeral_context,
-                    kind="structured"
+                    kind="structured",
+                    usage=raw_usage
                 )
                 return result
 
