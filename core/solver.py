@@ -441,22 +441,9 @@ class Solver(Supervisor, Entity):
                                 self.runtime_state.update_marker("has_abstract_task", True)
 
                         except ValidationError as pydantic_error:
-                            self.runtime_state.update_marker("plan_rejected", True)
                             error_msg = f"Erreur de validation Pydantic : {pydantic_error}"
                             Logger.warning(f"[Solver:{self.id}] ⚠️ Plan invalide (Pydantic) : {error_msg}")
-                            Logger.event(
-                                "plan_rejected_validation",
-                                solver_id=self.id,
-                                attempt=attempt_counter,
-                                reason=error_msg,
-                                failure_class="PLAN_REJECTED_VALIDATION"
-                            )
-                            self.current_attempt.ended_at = time.time()
-                            self.current_attempt.outcome = "failed"
-                            self.current_attempt.failure_class = FailureClass.PLAN_REJECTED_VALIDATION
-                            self.current_attempt.failure_reason = error_msg
-                            self.current_attempt.planner_feedback = error_msg
-                            self.current_attempt.target_entity = "Planner"
+                            self._record_plan_rejection(error_msg, attempt_counter, store_plan=False)
 
                             await self.propagate_event(Events.PLANNER_RETRY, {
                                 "reason": error_msg,
@@ -482,17 +469,9 @@ class Solver(Supervisor, Entity):
                                 break
                             continue
                         except ValueError as plan_error:
-                            self.runtime_state.update_marker("plan_rejected", True)
                             error_msg = str(plan_error)
                             Logger.warning(f"[Solver:{self.id}] ⚠️ Plan invalide (Validation personnalisée) : {plan_error}")
-                            if hasattr(self, 'planner') and hasattr(self.planner, '_last_proposed_plan'):
-                                Logger.debug(f"[Solver:{self.id}] Plan rejeté : {self.planner._last_proposed_plan}")
-                            self.current_attempt.ended_at = time.time()
-                            self.current_attempt.outcome = "failed"
-                            self.current_attempt.failure_class = FailureClass.PLAN_REJECTED_VALIDATION
-                            self.current_attempt.failure_reason = str(plan_error)
-                            self.current_attempt.planner_feedback = str(plan_error)
-                            self.current_attempt.target_entity = "Planner"
+                            self._record_plan_rejection(error_msg, attempt_counter)
 
                             await self.propagate_event(Events.PLANNER_RETRY, {
                                 "reason": str(plan_error),
@@ -759,6 +738,37 @@ class Solver(Supervisor, Entity):
                 if self.id in self.runtime_state.solver_registry:
                     del self.runtime_state.solver_registry[self.id]
                     Logger.debug(f"[Solver:{self.id}] Entrée supprimée du registre.")
+
+    def _record_plan_rejection(self, error_msg: str, attempt_counter: int, store_plan: bool = True) -> None:
+        """Trace un rejet avant-exécution : marqueur + event + tentative + plan.
+
+        Les 2 chemins (Pydantic, validation perso) passent ici : sans event ni
+        plan stocké, le rejet est invisible dans la vue HTML. store_plan=False
+        quand le plan incriminé n'existe pas (Pydantic levée pendant la
+        génération : on ne stockerait qu'un vieux plan périmé).
+        """
+        self.runtime_state.update_marker("plan_rejected", True)
+        Logger.event(
+            "plan_rejected_validation",
+            solver_id=self.id,
+            attempt=attempt_counter,
+            reason=error_msg,
+            failure_class="PLAN_REJECTED_VALIDATION"
+        )
+        self.current_attempt.ended_at = time.time()
+        self.current_attempt.outcome = "failed"
+        self.current_attempt.failure_class = FailureClass.PLAN_REJECTED_VALIDATION
+        self.current_attempt.failure_reason = error_msg
+        self.current_attempt.planner_feedback = error_msg
+        self.current_attempt.target_entity = "Planner"
+        if not store_plan:
+            return
+        try:
+            _rejected = getattr(getattr(self, 'planner', None), '_last_proposed_plan', None)
+            if _rejected is not None:
+                self.current_attempt.proposed_plan = _rejected.model_dump(mode='json')
+        except Exception:
+            pass
 
     def _summarize_plan(self, plan: Plan) -> str:
         """Génère un résumé concis d'un plan pour le feedback."""
