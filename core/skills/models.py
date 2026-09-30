@@ -237,7 +237,7 @@ class ExecutionEnvironment:
 
     def is_compatible(self, host_env: Dict[str, Any]) -> bool:
         """Vérifie de manière déterministe si l'environnement de l'hôte satisfait les exigences."""
-        is_match, _, _ = self.calculate_compatibility(host_env)
+        is_match, _spec, _mis = self.calculate_compatibility(host_env)
         return is_match
 
     def to_dict(self) -> Dict[str, Any]:

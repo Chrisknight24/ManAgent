@@ -70,7 +70,7 @@ class DiscoverySession:
         if max_iterations is None:
             try:
                 from core.constants import discovery_limits_from_runtime
-                _, max_iterations, _, _ = discovery_limits_from_runtime(runtime_state)
+                _disc_loop, max_iterations, _disc_loop_src, _disc_sess_src = discovery_limits_from_runtime(runtime_state)
             except Exception:
                 max_iterations = DISCOVERY_MAX_ITERATIONS
         self.max_iterations = max_iterations

@@ -546,7 +546,7 @@ async def execute_skill_tool(args: Dict[str, Any], runtime_state) -> Dict[str, A
             _env_obj = manifest.environment if hasattr(manifest, "environment") else None
             if _env_obj is not None and hasattr(_env_obj, "is_compatible"):
                 if not _env_obj.is_compatible(_henv):
-                    _, _, _mis = _env_obj.calculate_compatibility(_henv)
+                    _ok, _spec, _mis = _env_obj.calculate_compatibility(_henv)
                     return {
                         "result": False,
                         "data": None,

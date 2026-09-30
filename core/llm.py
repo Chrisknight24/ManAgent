@@ -533,7 +533,7 @@ class Llm:
         iteration = 0
         try:
             from core.constants import discovery_limits_from_runtime
-            _loop_max, _, _loop_src, _ = discovery_limits_from_runtime(self.runtime_state)
+            _loop_max, _sess_max, _loop_src, _sess_src = discovery_limits_from_runtime(self.runtime_state)
         except Exception:
             _loop_max, _loop_src = self._max_iterations, "defaut"
         while iteration < _loop_max:
