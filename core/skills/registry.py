@@ -747,6 +747,7 @@ class SkillRegistry:
         is_shadow: bool = False,
         shadow_mismatch: bool = False,
         breaker_max: Optional[int] = None,
+        duration_ms: Optional[float] = None,
     ) -> TrustProfile:
         """Met à jour le profil de confiance d'une version suite à une exécution ou observation.
 
@@ -768,7 +769,8 @@ class SkillRegistry:
                 success=success,
                 is_breakout=is_breakout,
                 is_shadow=is_shadow,
-                shadow_mismatch=shadow_mismatch
+                shadow_mismatch=shadow_mismatch,
+                duration_ms=duration_ms,
             )
 
             # Circuit Breaker automatique : si trop d'échecs consécutifs en PRODUCTION -> QUARANTINE
@@ -1016,7 +1018,9 @@ class SkillRegistry:
                     "state": r[8] or "DRAFT",
                     "success": tp_obj.success_count,
                     "trust": tp_obj.trust_score,
-                    "trust_profile": trust_data
+                    "trust_profile": trust_data,
+                    "avg_duration_ms": tp_obj.avg_duration_ms,
+                    "timed_runs": tp_obj.timed_runs,
                 })
             return results
 

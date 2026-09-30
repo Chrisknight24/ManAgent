@@ -818,7 +818,7 @@ def attach_llm_calls_by_mission(episodes, llm_calls, events):
     return unattached
 
 
-CODE_VALIDATION_EVENTS = ("plan_validation_decision", "plan_rejected_validation", "plan_rejected_supervisor")
+CODE_VALIDATION_EVENTS = ("plan_validation_decision", "plan_rejected_validation", "plan_rejected_supervisor", "skill_params_warning", "skill_params_refused")
 
 
 def attach_code_validation_events(episodes, events):
@@ -2987,10 +2987,13 @@ function renderSolverNodeModern(ep, treeNode, depth) {
         html += `<div style="margin-left:8px; margin-bottom:12px; display:flex; flex-direction:column; gap:6px;">`;
         attCode.forEach((cev) => {
           const evName = esc(cev.event || 'code');
-          const isOk = cev.is_valid !== false;
+          const isWarn = evName === 'skill_params_warning';
+          const isOk = !isWarn && cev.is_valid !== false;
+          const barColor = isWarn ? 'var(--warning)' : (isOk ? 'var(--success)' : 'var(--failure)');
+          const badgeCls = isWarn ? 'badge--pending' : (isOk ? 'badge--success' : 'badge--failed');
           const why = esc(cev.reason || cev.failure_class || '');
-          html += `<div style="background:var(--surface); padding:8px 12px; border-radius:6px; border-left:3px solid ${isOk ? 'var(--success)' : 'var(--failure)'}; border:1px solid var(--border); font-size:12px;">`
-            + `<span class="badge badge--${isOk ? 'success' : 'failed'}" style="font-size:10.5px; font-weight:800;">⛔ CODE · ${evName}</span>`
+          html += `<div style="background:var(--surface); padding:8px 12px; border-radius:6px; border-left:3px solid ${barColor}; border:1px solid var(--border); font-size:12px;">`
+            + `<span class="badge ${badgeCls}" style="font-size:10.5px; font-weight:800;">${isWarn ? '⚠️ AVERTISSEMENT' : '⛔ CODE'} · ${evName}</span>`
             + (why ? ` <span style="color:var(--text);"><b>Raison :</b> ${why}</span>` : '')
             + `</div>`;
         });
@@ -4112,6 +4115,8 @@ function renderSkillsView(filter) {
     const totalExec = tp.total_executions || (successCount + failureCount);
     const successRate = totalExec > 0 ? ((successCount / totalExec) * 100).toFixed(0) : 0;
     const shadowCount = tp.shadow_validation_count || 0;
+    const timedRuns = tp.timed_runs || 0;
+    const avgMs = timedRuns > 0 ? (tp.total_duration_ms / timedRuns) : null;
     
     let stateBadgeColor = 'badge--primary';
     if (s.state === 'PRODUCTION') stateBadgeColor = 'badge--success';
@@ -4159,6 +4164,8 @@ function renderSkillsView(filter) {
         <div>📊 Total Exéc: <strong style="font-family:var(--mono);">${totalExec}</strong></div>
         <div>✅ Succès: <strong style="font-family:var(--mono);">${successCount}</strong></div>
         <div>❌ Échecs: <strong style="color:var(--failure); font-family:var(--mono);">${tp.consecutive_failures || 0} consécutifs</strong></div>
+        <div>⏱️ Durée moy: <strong style="font-family:var(--mono);">${avgMs != null ? formatDuration(avgMs) + ` (${timedRuns} mes.)` : '—'}</strong></div>
+        <div>🧾 Efficacité: <strong style="font-family:var(--mono);">${totalExec > 0 ? 'mesurée' : 'en attente de runs'}</strong></div>
       </div>`}
       
       <!-- Provenance and reason -->

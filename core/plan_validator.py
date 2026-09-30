@@ -121,6 +121,48 @@ def find_reserved_plan_tools(plan: Any) -> List[str]:
     return bad
 
 
+def find_skill_missing_params(plan: Any, skill_required_params: Optional[Dict[str, List[str]]] = None) -> Dict[str, List[str]]:
+    """Étapes execute_skill dont des paramètres requis manquent (avertissement, jamais rejet).
+
+    skill_required_params : {skill_id: [noms requis]}. Retourne {step_id: [noms manquants]}.
+    Manquant = absent, vide, ou placeholder non résolu (@$_param_... / $@_...).
+    Sans référentiel (None) : rien à dire (rétro-compat). Fonction pure, testée vite.
+    """
+    if not skill_required_params:
+        return {}
+    missing: Dict[str, List[str]] = {}
+    for step in getattr(plan, "steps", []) or []:
+        stype = getattr(getattr(step, "type", None), "value", getattr(step, "type", None))
+        if stype != "tool_call":
+            continue
+        if (getattr(step, "tool_name", None) or "").strip() != "execute_skill":
+            continue
+        try:
+            import json as _json
+            args = _json.loads(getattr(step, "tool_args_json", "{}") or "{}")
+        except Exception:
+            continue
+        if not isinstance(args, dict):
+            continue
+        sid = str((args.get("skill_id", "") or "")).strip()
+        required = skill_required_params.get(sid) or []
+        if not required:
+            continue
+        params = args.get("parameters") or {}
+        if not isinstance(params, dict):
+            params = {}
+        lacking = []
+        for name in required:
+            val = params.get(name)
+            if val is None or (isinstance(val, str) and not val.strip()):
+                lacking.append(name)
+            elif isinstance(val, str) and ("@$_param_" in val or "$@_" in val):
+                lacking.append(name)
+        if lacking:
+            missing[str(getattr(step, "id", "?"))] = lacking
+    return missing
+
+
 def _tool_declares_media(tool_name: str, tool_returns: Any) -> bool:
     """L'outil déclare-t-il des charges médias (le validateur le sait) ?"""
     if not tool_returns or not isinstance(tool_returns, dict):

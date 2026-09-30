@@ -190,7 +190,8 @@ class SkillExecutionEngine:
                     version=ver_num,
                     success=False,
                     is_breakout=True,
-                    is_shadow=is_shadow
+                    is_shadow=is_shadow,
+                    duration_ms=(time.time() - start_time) * 1000.0,
                 )
 
                 # Construction du FailureBundle pour l'auto-réparation
@@ -232,7 +233,8 @@ class SkillExecutionEngine:
                 version=ver_num,
                 success=True,
                 is_breakout=False,
-                is_shadow=is_shadow
+                is_shadow=is_shadow,
+                duration_ms=duration_ms,
             )
 
             completed_event = ExecutionCompletedEvent(
@@ -263,7 +265,8 @@ class SkillExecutionEngine:
                 version=ver_num,
                 success=False,
                 is_breakout=True,
-                is_shadow=is_shadow
+                is_shadow=is_shadow,
+                duration_ms=duration_ms,
             )
             return {
                 "success": False,

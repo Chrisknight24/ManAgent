@@ -556,6 +556,41 @@ async def execute_skill_tool(args: Dict[str, Any], runtime_state) -> Dict[str, A
     except Exception:
         pass
 
+    # Garde paramètres requis : manquant/vide/placeholder = refus net AVANT
+    # tout appel hôte (jamais de @$_param_... envoyé à l'hôte). Averti en amont
+    # (prompt + event skill_params_warning), tranché ici. Échec honnête compté.
+    try:
+        _schema = manifest.parameters_schema or {} if hasattr(manifest, "parameters_schema") else {}
+        _required = list((_schema.get("required") or [])) if isinstance(_schema, dict) else []
+        _lacking = []
+        for _name in _required:
+            _val = resolved_parameters.get(_name)
+            if _val is None or (isinstance(_val, str) and not _val.strip()):
+                _lacking.append(str(_name))
+            elif isinstance(_val, str) and ("@$_param_" in _val or "$@_" in _val):
+                _lacking.append(str(_name))
+        if _lacking:
+            from utils.logger import Logger as _Logger
+            _Logger.warning(f"[execute_skill] Paramètres requis manquants pour '{skill_id}': {', '.join(_lacking)}.")
+            try:
+                _Logger.event(
+                    "skill_params_refused",
+                    skill_id=skill_id,
+                    version=getattr(version, "version", None),
+                    missing=_lacking,
+                    reason=f"Paramètres requis non remplis : {', '.join(_lacking)}.",
+                )
+            except Exception:
+                pass
+            return {
+                "result": False,
+                "data": None,
+                "error_reason": f"Skill '{skill_id}' : paramètres requis manquants ({', '.join(_lacking)}). Remplissez-les.",
+                "message": f"Skill '{skill_id}' : paramètres requis manquants.",
+            }
+    except Exception:
+        pass
+
     from core.skills.engine import SkillExecutionEngine
     event_emitter = getattr(runtime_state, "propagate_event", None)
     engine = SkillExecutionEngine(registry=skill_registry, event_emitter=event_emitter)

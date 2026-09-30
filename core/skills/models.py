@@ -286,8 +286,11 @@ class TrustProfile:
     last_success_timestamp: Optional[float] = None
     last_failure_timestamp: Optional[float] = None
     recent_execution_window: List[bool] = field(default_factory=list)
+    # Mesure d'efficacité (honnête : durées constatées, pas de comparatif A/B).
+    total_duration_ms: float = 0.0
+    timed_runs: int = 0
 
-    def record_run(self, success: bool, is_breakout: bool = False, is_shadow: bool = False, context_id: Optional[str] = None, shadow_mismatch: bool = False):
+    def record_run(self, success: bool, is_breakout: bool = False, is_shadow: bool = False, context_id: Optional[str] = None, shadow_mismatch: bool = False, duration_ms: Optional[float] = None):
         """Enregistre le résultat d'une exécution et met à jour les indicateurs."""
         now = time.time()
         if is_shadow:
@@ -314,6 +317,13 @@ class TrustProfile:
         if len(self.recent_execution_window) > 20:
             self.recent_execution_window.pop(0)
 
+        try:
+            if duration_ms is not None and float(duration_ms) >= 0:
+                self.total_duration_ms += float(duration_ms)
+                self.timed_runs += 1
+        except Exception:
+            pass
+
     @property
     def trust_score(self) -> float:
         """Calcule un score explicable de 0.0 à 1.0."""
@@ -330,8 +340,18 @@ class TrustProfile:
         if self.recent_execution_window:
             recent_rate = sum(1 for r in self.recent_execution_window if r) / len(self.recent_execution_window)
             return max(0.0, min(1.0, (base_rate * 0.4) + (recent_rate * 0.6) - penalty))
-        
+
         return max(0.0, min(1.0, base_rate - penalty))
+
+    @property
+    def avg_duration_ms(self) -> Optional[float]:
+        """Durée moyenne constatée par run (None si jamais mesurée)."""
+        try:
+            if self.timed_runs > 0:
+                return float(self.total_duration_ms) / int(self.timed_runs)
+        except Exception:
+            pass
+        return None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

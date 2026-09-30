@@ -125,3 +125,4 @@ CHECKLIST AVANT DE RÉPONDRE :
 - [ ] Les champs textuels (`description`, `result_context`, `response_text`) sont purs et ne contiennent aucun fragment de consigne de prompt ?
 - [ ] Les arguments d'outils sont-ils des valeurs scalaires/structurées sans pseudo-code résiduel ?
 - [ ] Si le `direct_answer` affirme un succès après des outils, reprend-il de préférence une donnée `$@_data_xxx` (conseil, pas bloquant) ?
+- [ ] Si une étape appelle `execute_skill`, tous les paramètres requis du skill sont-ils remplis (jamais de `@$_param_...` vide ou absent) ?

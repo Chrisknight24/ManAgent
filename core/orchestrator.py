@@ -2008,6 +2008,50 @@ class Orchestrator(Supervisor, Entity):
                         mission_history_tree=mission_history_tree,
                     )
 
+        # Garde paramètres skills (avertissement, jamais rejet) : un execute_skill
+        # sans ses paramètres requis recevra un refus net à l'exécution, autant
+        # prévenir ici (event visible en HTML). Le plan reste valide.
+        if outcome.is_valid:
+            try:
+                from core.plan_validator import find_skill_missing_params
+                _schemas = {}
+                _reg = getattr(self.runtime_state, "skill_registry", None)
+                if _reg is None:
+                    from core.skills.registry import SkillRegistry
+                    _reg = SkillRegistry()
+                for _st in plan.steps or []:
+                    _stype = getattr(getattr(_st, "type", None), "value", getattr(_st, "type", None))
+                    if _stype != "tool_call":
+                        continue
+                    if (getattr(_st, "tool_name", None) or "").strip() != "execute_skill":
+                        continue
+                    try:
+                        import json as _json2
+                        _a = _json2.loads(getattr(_st, "tool_args_json", "{}") or "{}")
+                    except Exception:
+                        continue
+                    _sid = str((_a.get("skill_id", "") or "")).strip() if isinstance(_a, dict) else ""
+                    if _sid and _sid not in _schemas:
+                        try:
+                            _man = _reg.get_skill(_sid)
+                            _req = ((_man.parameters_schema or {}).get("required", []) if _man else []) or []
+                            _schemas[_sid] = [str(r) for r in _req]
+                        except Exception:
+                            _schemas[_sid] = []
+                _missing = find_skill_missing_params(plan, _schemas)
+                if _missing:
+                    _details = "; ".join(f"{sid}: {', '.join(names)}" for sid, names in _missing.items())
+                    Logger.warning(f"[Orchestrator] ⚠️ Paramètres skills manquants (avertissement) : {_details}")
+                    Logger.event(
+                        "skill_params_warning",
+                        solver_id=child_solver_id,
+                        steps=sorted(_missing.keys()),
+                        missing=_missing,
+                        reason=f"Paramètres requis non remplis : {_details}. Remplissez-les ou l'exécution refusera net.",
+                    )
+            except Exception:
+                pass
+
         Logger.event(
             "plan_validation_decision",
             solver_id=child_solver_id,
