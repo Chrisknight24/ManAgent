@@ -135,7 +135,7 @@ class Planner(Entity):
         enable_world_pd: bool = False,
     ) -> Plan:
         if hasattr(self.runtime_state, 'orchestrator') and self.runtime_state.orchestrator:
-            await self.runtime_state.orchestrator.propagate_event(Events.STATUS_UPDATE, {"message": _("Le Planner génère un plan d'action structuré...")})
+            await self.runtime_state.orchestrator.propagate_event(Events.STATUS_UPDATE, {"message": "planning"})
         Logger.info("[Planner] 🧠 Traduction de la stratégie en plan d'action structuré...")
 
         fallback_msg = "Aucun conseil historique ou sémantique pertinent disponible pour cette tâche."

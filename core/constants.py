@@ -190,6 +190,7 @@ SKILL_GOVERNANCE_DEFAULTS = {
 # =====================================================
 LLM_STRUCTURED_MAX_ATTEMPTS = 2      # Nombre maximal de retries en cas d'erreur de schéma Pydantic
 LLM_DISCOVERY_MAX_ITERATIONS = 5     # Nombre maximal d'itérations pour la Progressive Disclosure LLM
+DISCOVERY_LOOP_HARD_MAX = 20         # Plafond absolu : l'hôte peut monter jusqu'ici, jamais au-delà
 LLM_STRUCTURED_MAX_OUTPUT_TOKENS = 8192  # Plafond de sortie structurée (fail-fast : un plan tient en quelques Ko)
 CONTEXT_MAX_TOTAL_TOKENS = 12000     # Budget total maximal de tokens pour l'Orchestrateur
 CONTEXT_MAX_RECENT_TOKENS = 4000     # Budget de tokens pour les messages récents verbatim
@@ -227,4 +228,35 @@ def check_protocol_version(provided) -> tuple:
         f"protocol version mismatch (host:{provided} brain:{PROTOCOL_VERSION}) — "
         "mettez à jour le côté le plus ancien, session refusée."
     )
+
+
+def clamp_discovery_limit(value, default: int) -> tuple:
+    """Borne un plafond PD demandé par l'hôte : 1..DISCOVERY_LOOP_HARD_MAX.
+
+    Retour : (limite: int, source: str). Source = 'defaut' si absent/invalide,
+    'hôte' si repris. Fonction pure, testée vite.
+    """
+    try:
+        v = int(value)
+    except Exception:
+        return int(default), "defaut"
+    if v < 1:
+        return 1, "hôte"
+    if v > DISCOVERY_LOOP_HARD_MAX:
+        return DISCOVERY_LOOP_HARD_MAX, "hôte"
+    return v, "hôte"
+
+
+def discovery_limits_from_runtime(runtime_state) -> tuple:
+    """Plafonds PD effectifs (boucle LLM, étapes session) + sources.
+
+    Lis depuis runtime_state.discovery_max_iterations /
+    discovery_max_session_steps (posés par runtime.configure).
+    Retour : (loop_max, session_max, loop_source, session_source).
+    """
+    loop_raw = getattr(runtime_state, "discovery_max_iterations", None) if runtime_state else None
+    sess_raw = getattr(runtime_state, "discovery_max_session_steps", None) if runtime_state else None
+    loop_max, loop_src = clamp_discovery_limit(loop_raw, LLM_DISCOVERY_MAX_ITERATIONS)
+    session_max, sess_src = clamp_discovery_limit(sess_raw, DISCOVERY_MAX_ITERATIONS)
+    return loop_max, session_max, loop_src, sess_src
 

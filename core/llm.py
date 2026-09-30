@@ -531,7 +531,12 @@ class Llm:
             )
 
         iteration = 0
-        while iteration < self._max_iterations:
+        try:
+            from core.constants import discovery_limits_from_runtime
+            _loop_max, _, _loop_src, _ = discovery_limits_from_runtime(self.runtime_state)
+        except Exception:
+            _loop_max, _loop_src = self._max_iterations, "defaut"
+        while iteration < _loop_max:
             iteration += 1
 
             if discovery_blocked:
@@ -621,9 +626,20 @@ class Llm:
 
         # --- SECOURS DE SÉCURITÉ GARANTI : Jamais de return None ---
         Logger.warning(
-            f"[LLM] Sortie de boucle de découverte (max_iterations={self._max_iterations}, discovery_blocked={discovery_blocked}). "
+            f"[LLM] Sortie de boucle de découverte (max_iterations={_loop_max} source {_loop_src}, discovery_blocked={discovery_blocked}). "
             "Exécution de la tentative finale sans Progressive Disclosure."
         )
+        try:
+            Logger.event(
+                "discovery.ceiling_hit",
+                kind="loop",
+                limit=_loop_max,
+                source=_loop_src,
+                tag=tag,
+                mission_id=mission_id,
+            )
+        except Exception:
+            pass
         final_prompt = prompt_modified + (
             "\n\n⚠️ La phase d'investigation est terminée. "
             "Vous devez fournir votre décision finale immédiatement. "
@@ -646,7 +662,7 @@ class Llm:
             raise RuntimeError(
                 _("Nombre maximum d'itérations ({max_iterations}) atteint sans réponse finale, "
                 "et la dernière tentative a échoué.")
-                .format(max_iterations=self._max_iterations)
+                .format(max_iterations=_loop_max)
             ) from e
             
     def clear_discovery_history(self):

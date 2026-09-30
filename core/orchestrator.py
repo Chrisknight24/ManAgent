@@ -843,7 +843,7 @@ class Orchestrator(Supervisor, Entity):
         turn_epoch = self.runtime_state.generation_epoch
         with self.runtime_state.execution_context.scope(turn_id=turn_id, session_id=session_id, epoch=turn_epoch):
             await self.propagate_event(Events.THINKING_STARTED, {})
-            await self.propagate_event(Events.STATUS_UPDATE, {"message": _("L'Orchestrateur analyse votre demande...")})
+            await self.propagate_event(Events.STATUS_UPDATE, {"message": "analyzing"})
 
             try:
                 # 5. Récupérer et assembler l'historique de conversation et manifestes sous budget strict
@@ -990,7 +990,7 @@ class Orchestrator(Supervisor, Entity):
 
                 # 10. Traiter selon le mode
                 if decision.type == OrchestratorMode.MISSION or (decision.type == OrchestratorMode.REQUEST and signatures):
-                    await self.propagate_event(Events.STATUS_UPDATE, {"message": _("L'Orchestrateur délègue la résolution au Solver principal...")})
+                    await self.propagate_event(Events.STATUS_UPDATE, {"message": "delegating"})
                     return await self._handle_mission_decision(
                         decision, session_id, user_message, forced_provider, forced_model, session_memory
                     )
@@ -1710,7 +1710,7 @@ class Orchestrator(Supervisor, Entity):
 
         # 8. PRESENTATOR (rapport + résumé structuré) – UTILISE LE RUM
         try:
-            await self.propagate_event(Events.STATUS_UPDATE, {"message": _("Le Presentator rédige le rapport et la synthèse de la mission...")})
+            await self.propagate_event(Events.STATUS_UPDATE, {"message": "reporting"})
 
             presentator = Presentator(
                 provider_manager=self.provider_manager,
@@ -1943,7 +1943,7 @@ class Orchestrator(Supervisor, Entity):
             target_goal = plan.goal or self.current_execution_context.get("refined_goal") or ""
             
         Logger.info(f"[Orchestrator] ⚖️ Validation du plan du Solver '{child_solver_id}' (is_root={is_root}, objectif cible : '{target_goal}')")
-        await self.propagate_event(Events.STATUS_UPDATE, {"message": _("L'Orchestrateur vérifie la conformité et la sécurité du plan généré...")})
+        await self.propagate_event(Events.STATUS_UPDATE, {"message": "validating"})
 
         # Référentiels déterministes pour le gate fail-fast (aucune hallucination
         # d'outil/skill ne passe le juge sans appel LLM).
@@ -2560,6 +2560,21 @@ class Orchestrator(Supervisor, Entity):
                 self.runtime_state.rules_override = _rules_override
                 self._rules_cache = _rules_override
                 Logger.info(f"[Orchestrator] Règles override via configure ({len(_rules_override)} car.).")
+        except Exception:
+            pass
+
+        # Progressive Disclosure : plafonds réglables par l'hôte (défauts sinon).
+        # `discovery: {"max_iterations": 7, "max_session_steps": 12}`, bornés 1..20.
+        try:
+            from core.constants import discovery_limits_from_runtime
+            _disc = payload.get("discovery", {}) or {}
+            if isinstance(_disc, dict) and (_disc.get("max_iterations") is not None or _disc.get("max_session_steps") is not None):
+                _loop = _disc.get("max_iterations", getattr(self.runtime_state, "discovery_max_iterations", None))
+                _sess = _disc.get("max_session_steps", getattr(self.runtime_state, "discovery_max_session_steps", None))
+                self.runtime_state.discovery_max_iterations = _loop
+                self.runtime_state.discovery_max_session_steps = _sess
+            _l, _s, _ls, _ss = discovery_limits_from_runtime(self.runtime_state)
+            Logger.info(f"[Orchestrator] Plafonds PD : boucle={_l} ({_ls}), session={_s} ({_ss}).")
         except Exception:
             pass
 

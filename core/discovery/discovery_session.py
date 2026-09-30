@@ -37,11 +37,13 @@ class DiscoverySession:
         explorer: BaseExplorer,
         runtime_state: RuntimeState,
         llm: Optional[Llm] = None,
-        max_iterations: int = DISCOVERY_MAX_ITERATIONS,
+        max_iterations: Optional[int] = None,
         run_id: Optional[str] = None,
         entity_name: Optional[str] = None,
         entity_role: Optional[str] = None,
     ):
+        # Plafond réglable par l'hôte (runtime.configure discovery.max_session_steps),
+        # défaut 10. Explicite > défaut, borné 1..20 (voir constants).
         # `session_id` reste la SIGNATURE de cache (déterministe : mêmes
         # data_type/targets/goals -> même valeur). Elle sert à retrouver un
         # RefinedContext en cache, PAS à identifier une exécution précise.
@@ -65,6 +67,12 @@ class DiscoverySession:
         self.plan = plan
         self.explorer = explorer
         self.runtime_state = runtime_state
+        if max_iterations is None:
+            try:
+                from core.constants import discovery_limits_from_runtime
+                _, max_iterations, _, _ = discovery_limits_from_runtime(runtime_state)
+            except Exception:
+                max_iterations = DISCOVERY_MAX_ITERATIONS
         self.max_iterations = max_iterations
 
         self._llm = llm or getattr(runtime_state, "discovery_llm", None)
@@ -122,6 +130,15 @@ class DiscoverySession:
                 if idx >= self.max_iterations:
                     self.workspace.set_exit_policy(ExitPolicy.MAX_ITERATIONS)
                     Logger.warning(f"[DiscoverySession:{self.session_id}] Max itérations atteint ({self.max_iterations}).")
+                    try:
+                        Logger.event(
+                            "discovery.ceiling_hit",
+                            kind="session",
+                            limit=self.max_iterations,
+                            session_id=self.session_id,
+                        )
+                    except Exception:
+                        pass
                     break
 
                 await self._execute_step(step, idx)
@@ -172,7 +189,7 @@ class DiscoverySession:
 
     async def _execute_step(self, step: DiscoveryStep, index: int) -> None:
         Logger.debug(f"[DiscoverySession:{self.session_id}] Exécution étape {index+1}: {step.description}")
-        msg = f"Exploration ({self.plan.data_type}) [{index+1}/{len(self.plan.steps)}] : {step.description}"
+        msg = "exploring"
         try:
             if hasattr(self.runtime_state, "orchestrator") and self.runtime_state.orchestrator:
                 await self.runtime_state.orchestrator.propagate_event(Events.STATUS_UPDATE, {"message": msg})

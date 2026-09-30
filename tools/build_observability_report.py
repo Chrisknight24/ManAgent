@@ -1543,7 +1543,7 @@ body {
   border: 1.5px solid var(--border);
   border-radius: 14px;
   padding: 16px 20px;
-  max-width: 92%;
+  max-width: 100%;
   box-shadow: var(--shadow-sm);
   cursor: pointer;
   transition: all 0.15s ease;

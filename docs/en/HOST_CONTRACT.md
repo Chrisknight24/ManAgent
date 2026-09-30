@@ -205,6 +205,14 @@ Bank (strict): `{"tools": [{"name": "transfer.send", "sensitivity": "high", "req
 Demo (relaxed): `{"skill_governance": {"circuit_breaker_max_failures": 5, "max_repairs": null}}`.
 Golden rule: an imported automation starts as shadow (never instant trust). A v2 replaces v1 only with more proof.
 
+## 6c. Exploration (tunable limits)
+
+When the brain lacks info, it explores (defaults: 5 back-and-forths, 10 steps). Hitting the ceiling emits `discovery.ceiling_hit`. To explore more:
+```json
+{"type":"request","action":"runtime.configure","payload":{"discovery":{"max_iterations":8,"max_session_steps":12}}}
+```
+Clamped 1..20, defaults otherwise. Hard ceiling: 20 (no infinite loops).
+
 ## 7. Secrets
 
 Never hardcode keys: `"api_key": "env:MY_KEY_VAR"` (lists supported for rotation).

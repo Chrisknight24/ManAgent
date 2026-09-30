@@ -271,6 +271,14 @@ Démo (souple, on expérimente) :
 ```
 Règle d'or : un automatisme importé d'ailleurs démarre en fantôme (jamais confiance immédiate). Une v2 ne remplace la v1 qu'avec plus de preuves (marge ci-dessus).
 
+## 7d. Exploration (limites réglables)
+
+Quand le cerveau manque d'info, il explore (max 5 allers-retours et 10 étapes par défaut). Si le plafond est touché, l'event `discovery.ceiling_hit` le dit. Pour explorer plus :
+```json
+{"type":"request","action":"runtime.configure","payload":{"discovery":{"max_iterations":8,"max_session_steps":12}}}
+```
+Borné 1..20, défauts sinon. Plafond absolu : 20 (anti-boucle infinie).
+
 ## 8. Compatibilité (versioning)
 
 ManAgent affiche sa version via `pyproject.toml` / `VERSION`. L'hôte envoie `host_version` dans le manifest. Règle : on n'ajoute que des champs optionnels, on ne renomme jamais une action existante sans montée de version majeure.

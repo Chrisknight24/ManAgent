@@ -290,7 +290,7 @@ class Solver(Supervisor, Entity):
                     else:
                         similar = None
                         try:
-                            await self.propagate_event(Events.STATUS_UPDATE, {"message": _("Le Solver recherche des expériences similaires dans la mémoire...")})
+                            await self.propagate_event(Events.STATUS_UPDATE, {"message": "retrieving"})
                             retriever = Retriever(
                                 runtime_state=self.runtime_state,
                                 top_k=RETRIEVAL_TOP_K,
@@ -804,7 +804,7 @@ class Solver(Supervisor, Entity):
         return "\n".join(lines)
 
     async def _check_feasibility(self, similar_missions_context: Optional[List[Dict]] = None) -> FeasibilityDecision:
-        await self.propagate_event(Events.STATUS_UPDATE, {"message": _("Le Solver évalue la faisabilité technique de la mission...")})
+        await self.propagate_event(Events.STATUS_UPDATE, {"message": "solving"})
         Logger.info(f"[Solver:{self.id}] 🤔 Évaluation de la faisabilité...")
 
         tools_view = await self.runtime_state.tools_manager.get_tools_view(goal_query=self.goal)
