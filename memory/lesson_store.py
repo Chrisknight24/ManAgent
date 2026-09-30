@@ -557,14 +557,21 @@ class LessonStore:
                 max_id = max(row["id"] for row in rows) if rows else 1
                 
                 scored_results = []
+                dim_skipped = 0
+                query_dim = len(query_embedding) if query_embedding else 0
                 for row in rows:
                     d = dict(row)
                     emb_blob = d.pop("embedding", None)
                     similarity = 0.0
                     lesson_id = d.get("id", 1)
-                    
+
                     if emb_blob:
                         emb_vec = self._deserialize_embedding(emb_blob)
+                        # Garde dimension : une leçon écrite par un autre modèle
+                        # (ex : avant l'unification) ne doit pas polluer le score.
+                        if emb_vec and query_dim and len(emb_vec) != query_dim:
+                            dim_skipped += 1
+                            continue
                         if emb_vec:
                             similarity = self._cosine_similarity(query_embedding, emb_vec)
                     
@@ -593,6 +600,8 @@ class LessonStore:
                 
                 # Trier par score combiné décroissant
                 scored_results.sort(key=lambda x: (x["combined_score"], x.get("is_consolidated", 0)), reverse=True)
+                if dim_skipped:
+                    Logger.debug(f"[LessonStore] {dim_skipped} leçon(s) ignorée(s) : dimension incompatible avec la requête ({query_dim}).")
                 
                 # Conserver les résultats pertinents
                 filtered = [r for r in scored_results if r["similarity"] > LESSON_SIMILARITY_THRESHOLD or r.get("scope") == "semantic_fact"]

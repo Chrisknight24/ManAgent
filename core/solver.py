@@ -1074,7 +1074,6 @@ class Solver(Supervisor, Entity):
             from memory.mission_profile_store import MissionProfileStore
             from core.skills.registry import SkillRegistry
             from core.skills.models import SkillManifest, SkillState, ExecutionEnvironment
-            from core.embedding_service import EmbeddingService
             from core.constants import (
                 SKILL_DISCOVERY_THRESHOLD,
                 SKILL_SHADOW_SUCCESS_THRESHOLD,
@@ -1123,10 +1122,10 @@ class Solver(Supervisor, Entity):
                 
             combined_signature_text = ", ".join(signature_parts)
             
-            # Embed the combined signature text
-            embedding_service = EmbeddingService()
+            # Embed avec le modèle actif de l'hôte (même espace que la requête)
+            from core.embedding_service import embed_managed
             try:
-                embedding = await embedding_service.embed(combined_signature_text)
+                embedding = await embed_managed(self.runtime_state, combined_signature_text)
             except Exception as e:
                 Logger.warning(f"[Solver:{self.id}] Échec de l'embedding, fallback sur mock. {e}")
                 embedding = [0.0] * 384

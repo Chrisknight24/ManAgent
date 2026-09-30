@@ -18,7 +18,7 @@ from core.i18n import _
 import asyncio
 from core.cache import CacheManager
 from core.entity_learner import EntityLearner
-from core.embedding_service import embed_text
+from core.embedding_service import embed_text, embed_managed
 
 # =====================================================
 # MODÈLES PYDANTIC POUR L'EXTRACTION DE LEÇON
@@ -124,7 +124,7 @@ class Analyzer:
             keywords = []
 
         emb_text = f"{scope} {recommendation} {' '.join(keywords)}"
-        embedding = await embed_text(emb_text)
+        embedding = await embed_managed(self.runtime_state, emb_text)
 
         self.lesson_store.upsert_lesson(
             entity_type="Presentator", scope=scope, recommendation=recommendation,
@@ -209,7 +209,7 @@ class Analyzer:
             return
 
         emb_text = f"{scope} {recommendation} {' '.join(keywords)}"
-        embedding = await embed_text(emb_text)
+        embedding = await embed_managed(self.runtime_state, emb_text)
 
         self.lesson_store.upsert_lesson(
             entity_type=entity_type, scope=scope, recommendation=recommendation,
@@ -267,7 +267,7 @@ class Analyzer:
             return
 
         emb_text = f"{scope} {recommendation} {' '.join(keywords)}"
-        embedding = await embed_text(emb_text)
+        embedding = await embed_managed(self.runtime_state, emb_text)
 
         self.lesson_store.upsert_lesson(
             entity_type=entity_type, scope=scope, recommendation=recommendation,
@@ -406,7 +406,7 @@ class Learner(Entity):
         self.lesson_store = lesson_store or LessonStore()
         self.analyzer = Analyzer(self.lesson_store, self.llm, self.runtime_state)
         self.advisor = Advisor(self.lesson_store, runtime_state, self.llm, cache_manager=self.runtime_state.cache_manager)
-        self.entity_learner = EntityLearner(lesson_store=self.lesson_store, cache_manager=self.runtime_state.cache_manager)
+        self.entity_learner = EntityLearner(lesson_store=self.lesson_store, cache_manager=self.runtime_state.cache_manager, runtime_state=self.runtime_state)
         self.advice_cache: Dict[str, str] = {}
 
     async def process(self, command: str = "analyze", **kwargs) -> Any:

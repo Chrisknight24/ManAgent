@@ -213,6 +213,12 @@ When the brain lacks info, it explores (defaults: 5 back-and-forths, 10 steps). 
 ```
 Clamped 1..20, defaults otherwise. Hard ceiling: 20 (no infinite loops).
 
+## 6d. Embeddings: who uses your model, how much RAM
+
+Your chosen model serves EVERYTHING: mission memory, lessons (write AND read), skill profiles. One space at a time, never mixed. Lessons from another model are skipped with a log (dimension guard).
+
+Approximate RAM: `lite` (default) 0 MB offline · MiniLM/e5 ~500 MB · BGE-M3 ~2.3 GB · `remote` 0 MB local, billed per use. 1 GB+ in dev with BGE-M3 is normal (torch + weights). To slim down: `lite` or `remote`.
+
 ## 7. Secrets
 
 Never hardcode keys: `"api_key": "env:MY_KEY_VAR"` (lists supported for rotation).

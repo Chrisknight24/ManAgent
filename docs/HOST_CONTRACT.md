@@ -279,6 +279,20 @@ Quand le cerveau manque d'info, il explore (max 5 allers-retours et 10 étapes p
 ```
 Borné 1..20, défauts sinon. Plafond absolu : 20 (anti-boucle infinie).
 
+## 7e. Embeddings : qui utilise ton modèle, combien ça pèse
+
+Ton modèle choisi (`embeddings.mode` + catalogue) sert PARTOUT : mémoire des missions, leçons (écriture ET lecture), profils skills. Un seul espace à la fois, jamais de mélange. Leçons d'un autre modèle = ignorées avec log (garde dimension).
+
+Poids mémoire vive (RAM) approximatifs :
+| Modèle | RAM |
+|---|---|
+| `lite` (défaut) | 0 Mo, offline |
+| MiniLM L6 / multilingue / e5-small | ~500 Mo |
+| BGE-M3 | ~2,3 Go |
+| `remote` (API) | 0 Mo local, facturé à l'usage |
+
+1 Go+ en dev avec BGE-M3 = normal (torch + poids). Pour alléger : `lite` ou `remote`.
+
 ## 8. Compatibilité (versioning)
 
 ManAgent affiche sa version via `pyproject.toml` / `VERSION`. L'hôte envoie `host_version` dans le manifest. Règle : on n'ajoute que des champs optionnels, on ne renomme jamais une action existante sans montée de version majeure.

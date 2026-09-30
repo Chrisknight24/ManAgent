@@ -8,12 +8,13 @@ from typing import Optional, List, Dict, Any
 from utils.logger import Logger
 from memory.lesson_store import LessonStore
 from core.constants import ENTITY_LEARNER_MIN_EVIDENCE
-from core.embedding_service import embed_text
+from core.embedding_service import embed_managed
 
 class EntityLearner:
-    def __init__(self, lesson_store: LessonStore, cache_manager=None):
+    def __init__(self, lesson_store: LessonStore, cache_manager=None, runtime_state=None):
         self.lesson_store = lesson_store
         self.cache_manager = cache_manager
+        self.runtime_state = runtime_state
 
     async def consolidate_if_needed(self) -> int:
         """
@@ -96,9 +97,9 @@ class EntityLearner:
         total_evidence = sum(b.get("evidence_count", 0) for b in brutes)
         total_contradiction = sum(b.get("contradiction_count", 0) for b in brutes)
 
-        # Générer le vecteur de la leçon consolidée
+        # Générer le vecteur de la leçon consolidée (modèle actif de l'hôte)
         emb_text = f"{scope} {winner['recommendation']} {' '.join(list(all_keywords))}"
-        embedding = await embed_text(emb_text)
+        embedding = await embed_managed(self.runtime_state, emb_text)
 
         # Créer la leçon consolidée
         new_id = self.lesson_store.create_consolidated_lesson(

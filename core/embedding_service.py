@@ -144,3 +144,19 @@ def get_embedding_service() -> EmbeddingService:
 
 async def embed_text(text: str) -> List[float]:
     return await get_embedding_service().embed(text)
+
+
+async def embed_managed(runtime_state, text: str) -> List[float]:
+    """Source unique de vérité : le provider actif choisi par l'hôte.
+
+    Stockage ET requête passent ici, donc même modèle des deux côtés —
+    fini les leçons écrites en mini et relues en BGE (cosinus poubelle).
+    Sans provider actif : repli singleton historique (MiniLM/hash).
+    """
+    try:
+        mgr = getattr(runtime_state, "embedding_manager", None)
+        if mgr is not None and getattr(mgr, "active_provider", None) is not None:
+            return await mgr.embed(text)
+    except Exception as e:
+        Logger.warning(f"[embed_managed] Provider actif indisponible, repli singleton : {e}")
+    return await embed_text(text)

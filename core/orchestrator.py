@@ -1247,12 +1247,12 @@ class Orchestrator(Supervisor, Entity):
             # --- NOUVEAU: Mémorisation sémantique à la volée ---
             if hasattr(decision, "learned_facts") and decision.learned_facts:
                 if hasattr(self.runtime_state, "learner") and self.runtime_state.learner:
-                    from core.embedding_service import embed_text
-                    
+                    from core.embedding_service import embed_managed
+
                     for fact in decision.learned_facts:
                         try:
-                            # 1. On vectorise le fait sémantique
-                            fact_emb = await embed_text(fact)
+                            # 1. On vectorise le fait sémantique (modèle actif de l'hôte)
+                            fact_emb = await embed_managed(self.runtime_state, fact)
                             
                             # 2. On l'enregistre en tant que "lesson" durable
                             self.runtime_state.learner.lesson_store.upsert_lesson(
