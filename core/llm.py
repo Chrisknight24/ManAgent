@@ -991,7 +991,7 @@ class Llm:
                     await asyncio.sleep(0.6 * (attempt + 1))
                     continue
 
-                Logger.error(f"[LLM] Erreur lors de l'appel LLM avec schéma {schema.__name__} : {e}")
+                Logger.error(f"[LLM] Erreur lors de l'appel LLM avec schéma {schema.__name__} : {e}", exc_info=True)
                 raise
             
     async def _execute_discovery(self, discovery_req: 'DiscoveryRequest') -> 'RefinedContext':

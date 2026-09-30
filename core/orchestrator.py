@@ -1010,7 +1010,7 @@ class Orchestrator(Supervisor, Entity):
                     Logger.warning(f"[Orchestrator] Exception suppressed due to cancellation: {str(e)}")
                     return ResponsePacket(type="response", status="success",
                                          payload={"message": _("Action annulée")})
-                Logger.error(f"[Orchestrator] Critical failure during agent loop: {str(e)}")
+                Logger.error(f"[Orchestrator] Critical failure during agent loop: {str(e)}", exc_info=True)
                 await self.propagate_event(Events.RUNTIME_ERROR, {"message": str(e)})
                 return ErrorPacket(type="error", message=str(e))
             finally:
@@ -1276,7 +1276,7 @@ class Orchestrator(Supervisor, Entity):
         except Exception as e:
             # L'événement d'erreur est déjà émis par _call_llm_with_schema
             # On peut juste relancer l'exception après log
-            Logger.error(f"[Orchestrator] Échec de la génération de la décision : {e}")
+            Logger.error(f"[Orchestrator] Échec de la génération de la décision : {e}", exc_info=True)
             raise
         
     async def _evaluate_learning_trigger(self, mission_context: Dict[str, Any]) -> None:
