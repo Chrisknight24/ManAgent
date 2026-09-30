@@ -44,6 +44,97 @@ def _normalize_text(text: str) -> str:
     return t
 
 
+def _parse_step_args(raw: Any) -> Dict[str, Any]:
+    """Arguments d'étape en dict (jamais d'exception, jamais de secret filtré ici)."""
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw.strip() or raw.strip() == "{}":
+        return {}
+    try:
+        import json as _json
+        parsed = _json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _short_value(value: Any, limit: int = 40) -> str:
+    """Valeur tronquée pour affichage (anti-fuite de longs secrets/texte)."""
+    try:
+        text = value if isinstance(value, str) else __import__("json").dumps(value, ensure_ascii=False)
+    except Exception:
+        text = str(value)
+    text = str(text).replace("\n", " ").strip()
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def compare_plan_novelty(plan: Any, previous_attempts: Optional[List[Any]] = None,
+                         max_shown: int = 3) -> Optional[str]:
+    """Dit SI le plan est nouveau, et OÙ (structure ? arguments ? textes ?).
+
+    Le juge LLM ne voit que des noms d'étapes : sans ce calcul, un plan qui
+    corrige juste un argument (ex : touche `lwin` → `WIN`) ressemble à une
+    redite et se fait refuser à tort. Fonction pure, sans LLM, testée vite.
+    Retourne un bloc texte injecté dans le prompt, ou None (premier plan).
+    """
+    failed = [a for a in (previous_attempts or [])
+              if getattr(a, "outcome", None) == "failed"
+              and getattr(a, "proposed_plan", None)]
+    if not failed:
+        return None
+
+    current_steps = list(getattr(plan, "steps", []) or [])
+    current_sig = PlanValidator._plan_step_signature(current_steps)
+    current_args = [_parse_step_args(getattr(s, "tool_args_json", "{}")) for s in current_steps]
+    current_descs = [_normalize_text(getattr(s, "description", "")) for s in current_steps]
+
+    blocks: List[str] = []
+    for attempt in failed[-max_shown:]:
+        proposed = getattr(attempt, "proposed_plan", None) or {}
+        past_steps = proposed.get("steps", []) if isinstance(proposed, dict) else []
+        past_sig = PlanValidator._plan_step_signature(past_steps)
+        att_num = getattr(attempt, "attempt_number", "?")
+
+        if past_sig != current_sig:
+            blocks.append(
+                _("Tentative {n} : STRUCTURE NOUVELLE (outils/types différents) — jugez sur le fond, pas de redite.")
+                .format(n=att_num)
+            )
+            continue
+
+        changes: List[str] = []
+        for idx, past in enumerate(past_steps):
+            past_id = past.get("id", f"step_{idx + 1}") if isinstance(past, dict) else f"step_{idx + 1}"
+            past_args = _parse_step_args(past.get("tool_args_json") if isinstance(past, dict) else {})
+            cur_args = current_args[idx] if idx < len(current_args) else {}
+            for key in sorted(set(past_args) | set(cur_args)):
+                old, new = past_args.get(key), cur_args.get(key)
+                if old != new:
+                    if key not in past_args:
+                        changes.append(f"{past_id}: +{key}={_short_value(new)}")
+                    elif key not in cur_args:
+                        changes.append(f"{past_id}: -{key} (valait {_short_value(old)})")
+                    else:
+                        changes.append(f"{past_id}: {key} {_short_value(old)}→{_short_value(new)}")
+            past_desc = _normalize_text(past.get("description", "") if isinstance(past, dict) else "")
+            if idx < len(current_descs) and past_desc != current_descs[idx]:
+                changes.append(_("{sid} : texte d'étape reformulé").format(sid=past_id))
+
+        if not changes:
+            blocks.append(
+                _("Tentative {n} : IDENTIQUE (même structure, mêmes arguments, mêmes textes) — vigilance maximale, refusez si la cause est ignorée.")
+                .format(n=att_num)
+            )
+        else:
+            shown = "; ".join(changes[:6])
+            blocks.append(
+                _("Tentative {n} : MÊME STRUCTURE mais ARGUMENTS MODIFIÉS ({changes}) — ceci PEUT répondre à la cause. Validez si ça la traite, refusez seulement si ça l'ignore.")
+                .format(n=att_num, changes=shown)
+            )
+
+    return "\n".join(blocks) if blocks else None
+
+
 def find_unknown_plan_tools(plan: Any, known_tool_names=None,
                             production_skill_ids=None) -> List[str]:
     """Gate déterministe (fail-fast) : outils/skills du plan qui N'EXISTENT PAS.
@@ -580,8 +671,10 @@ class PlanValidator:
 
     def _summarize_plan_for_prompt(self, plan: Plan) -> str:
         """
-        Résumé épuré du plan : objectif, type d'étape, outil appelé, description et flags d'irréversibilité.
-        Aucun bruit de syntaxe de variables, de nommage ou de tuyauterie interne.
+        Résumé du plan : objectif, type d'étape, outil appelé, description,
+        ARGUMENTS (tronqués) et condition. Le juge ne peut pas voir un correctif
+        (ex : touche `lwin` → `WIN`) si on lui cache les arguments : sans eux,
+        tout replan ressemble à une redite et se fait refuser à tort.
         """
         lines = [f"Objectif déclaré du plan : {plan.goal}"]
         for step in plan.steps:
@@ -589,7 +682,16 @@ class PlanValidator:
             reason = f" ({step.irreversibility_reason})" if getattr(step, "irreversibility_reason", None) else ""
             tool = f" [outil: {step.tool_name}]" if getattr(step, "tool_name", None) else ""
             step_type_str = step.type.value if hasattr(step.type, 'value') else str(step.type)
-            lines.append(f"- {step.id} [{step_type_str}]{tool} : {step.description}{marker}{reason}")
+            args = _parse_step_args(getattr(step, "tool_args_json", "{}"))
+            args_str = ""
+            if args:
+                try:
+                    import json as _json2
+                    args_str = f" args={_json2.dumps(args, ensure_ascii=False)[:150]}"
+                except Exception:
+                    args_str = ""
+            cond = f" [SI {step.execute_if}]" if getattr(step, "execute_if", None) else ""
+            lines.append(f"- {step.id} [{step_type_str}]{tool} : {step.description}{args_str}{cond}{marker}{reason}")
         return "\n".join(lines)
 
     async def validate(
@@ -613,6 +715,11 @@ class PlanValidator:
             all_warnings.append(repeated_warning)
         all_warnings.extend(recursion_warnings)
         pattern_warning = "\n\n".join(all_warnings) if all_warnings else None
+
+        # Nouveauté calculée (fait déterministe) : le juge voit les arguments
+        # ET sait ce qui a changé vs les échecs. Sans ça, un correctif
+        # d'argument ressemble à une redite et se fait refuser à tort.
+        novelty_assessment = compare_plan_novelty(plan, previous_attempts or [])
 
         # Gate déterministe (fail-fast) : UNIQUEMENT les cas sûrs à 100%,
         # zéro faux positif, pas chers. Doctrine : un rejet coûte une tentative
@@ -662,6 +769,7 @@ class PlanValidator:
             plan_summary=self._summarize_plan_for_prompt(plan),
             rules=self._rules_text or _("(rules.md absent ou vide — aucun critère explicite fourni.)"),
             pattern_warning=pattern_warning,
+            novelty_assessment=novelty_assessment,
             mission_history_summary=mission_history_summary,
             declared_irreversible_steps=declared_irreversible,
             hitl_policy=self._hitl_policy,

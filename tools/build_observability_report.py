@@ -2530,17 +2530,18 @@ function renderMissionDetail(missionId) {
     <!-- Mission Header Card -->
     <div style="background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:18px 22px; margin-bottom:18px; box-shadow:var(--shadow-xs);">
       <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px;">
-        <div>
+        <div style="min-width:0;">
           <div style="font-size:11px; font-weight:800; color:var(--text-faint); text-transform:uppercase; font-family:var(--mono);">Mission ID: ${esc(ep.mission_id)}</div>
           <h1 style="font-size:19px; font-weight:800; margin-top:4px; color:var(--text);">${esc(ep.goal)}</h1>
         </div>
-        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px;">
+        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px; flex-shrink:0;">
           <div>${statusBadge(ep.status)}</div>
-          ${ep._routing_call ? `
-            <button class="badge badge--purple" style="cursor:pointer;" onclick="inspectMissionRouting('${esc(ep.mission_id)}')">🔍 Décision Routage Orchestrateur (${formatDuration(ep._routing_call.duration_ms)}) ${modelBadge(ep._routing_call)}</button>
-          ` : ''}
         </div>
       </div>
+      ${ep._routing_call ? `
+      <div style="margin-top:10px;">
+        <button class="badge badge--purple" style="cursor:pointer;" onclick="inspectMissionRouting('${esc(ep.mission_id)}')">🔍 Décision Routage Orchestrateur (${formatDuration(ep._routing_call.duration_ms)}) ${modelBadge(ep._routing_call)}</button>
+      </div>` : ''}
       <div style="display:flex; gap:16px; margin-top:12px; font-size:12px; color:var(--text-muted); font-family:var(--mono); flex-wrap:wrap;">
         <span>🕒 Début: ${formatTimestamp(ep.created_at)}</span>
         <span>🏁 Fin: ${formatTimestamp(ep.finished_at)}</span>

@@ -44,6 +44,16 @@ Tu as 3 missions :
 
 ---
 
+{% if novelty_assessment %}
+## 🧪 Deterministic novelty analysis (computed fact, not an opinion)
+
+{{ novelty_assessment }}
+
+Trust this computation: modified arguments addressing the cause = a new plan, even with equal structure. Refuse an equal-structure plan only if NOTHING changed AND the cause is ignored.
+{% endif %}
+
+---
+
 ## 🧰 Disponibilités vérifiées (fait déterministe, pas une opinion)
 
 {{ availability_summary }}

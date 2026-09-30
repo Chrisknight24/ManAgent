@@ -44,6 +44,16 @@ Tu as 3 missions :
 
 ---
 
+{% if novelty_assessment %}
+## 🧪 Analyse déterministe de nouveauté (fait calculé, pas une opinion)
+
+{{ novelty_assessment }}
+
+Fais confiance à ce calcul : des arguments modifiés pour traiter la cause = un plan nouveau, même à structure égale. Ne refuse un plan à structure égale que si RIEN n'a changé (ni args, ni textes) ET que la cause est ignorée.
+{% endif %}
+
+---
+
 ## 🧰 Disponibilités vérifiées (fait déterministe, pas une opinion)
 
 {{ availability_summary }}
