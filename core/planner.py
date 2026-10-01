@@ -7,6 +7,7 @@ Version corrigée : activation explicite de la Progressive Disclosure.
 """
 
 import asyncio
+import difflib
 import json
 from pydantic import ValidationError
 from .plan_models import Plan, PlanStep, StepType
@@ -299,6 +300,10 @@ class Planner(Entity):
         warnings = []
         all_steps_by_id = {step.id: step for step in plan.steps}
         steps_seen_so_far = set()
+        # Pistes de correction : (variable demandée, variables connues à ce point).
+        # Le feedback doit montrer la sortie, pas seulement l'erreur, sinon un
+        # modèle faible rejoue la même variable inconnue en boucle.
+        unknown_hints = []
 
         def _produced_names(st) -> set:
             """Noms produits par une étape (pour exempter sa propre prose)."""
@@ -380,6 +385,8 @@ class Planner(Entity):
                         _("L'étape '{}' tente d'utiliser la variable inconnue '{}' qui n'a été produite par aucune étape antérieure ni par le contexte.")
                         .format(step.id, var)
                     )
+                    if not is_prose:
+                        unknown_hints.append((var, sorted(set(known))))
 
         for step_idx, step in enumerate(plan.steps):
             # 1. Champs exécutables : antériorités seules (strict, erreur = rejet).
@@ -422,6 +429,24 @@ class Planner(Entity):
                                 break
                 except (json.JSONDecodeError, TypeError):
                     pass
+
+        if unknown_hints:
+            # Une seule piste par variable : proches + disponibles (capé).
+            # Sans ça, un modèle faible ne voit pas la sortie et rejoue pareil.
+            seen_vars = set()
+            for bad_var, known_list in unknown_hints:
+                if bad_var in seen_vars:
+                    continue
+                seen_vars.add(bad_var)
+                suggestions = difflib.get_close_matches(bad_var, known_list, n=2, cutoff=0.6)
+                available = ", ".join(f"$@_{k}" for k in known_list[:12])
+                hint = _("Variables disponibles à ce point : {available}.").format(
+                    available=available or _("(aucune — produisez d'abord une étape)"))
+                if suggestions:
+                    hint += " " + _("Vouliez-vous dire {guess} ?").format(
+                        guess=" ou ".join(f"$@_{s}" for s in suggestions))
+                errors.append(
+                    _("Piste pour '{var}' : {hint}").format(var=bad_var, hint=hint))
 
         if not errors:
             return True, warnings
