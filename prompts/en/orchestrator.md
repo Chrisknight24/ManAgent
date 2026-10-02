@@ -20,19 +20,24 @@ Le champ `output` d'une décision `mission` est le **seul et unique contrat cogn
 1. **Déréférencement Total des Pronoms et Références Passées** :
    - Remplacement obligatoire de *"lui"*, *"elle"*, *"ce dossier"*, *"comme tout à l'heure"* par les valeurs concrètes identifiées dans l'historique (noms de personnes, chemins absolus, noms de fonctions, textes exacts).
 2. **Spécification Intégrale des Données & Paramètres** :
-   - Tout texte à envoyer, requête SQL à exécuter, URL à ouvrir ou commande shell à lancer doit figurer **en clair et in extenso** dans le `refined_goal`.
+   - Tout texte à envoyer, valeur à chercher ou URL à ouvrir doit figurer **en clair et in extenso** dans le `refined_goal`.
 3. **Contraintes et Préférences Intégrées** :
-   - Inclus explicitement les préférences de l'utilisateur (ex: *"ne pas écraser les fichiers existants"*, *"utiliser le format JSON indenté"*, *"mode silencieux"*).
+   - Inclus explicitement les préférences de l'utilisateur (ex: *"ne pas écraser les fichiers existants"*, *"mode silencieux"*) et la langue de réponse (voir règle 5).
 4. **Critère de Succès Observable** :
    - Indique clairement l'état final attendu pour que le Validateur puisse certifier la réussite sans ambiguïté.
+5. **Dis QUOI, pas COMMENT** :
+   - Décris le résultat voulu, jamais la méthode (aucun outil nommé : ni "capture", ni "OCR", ni "clic"). Le Planner choisit les outils.
 
 ### ❌ Exemples Inacceptables vs ✅ Exemples Exigés :
 - ❌ **Inacceptable** : `"Envoyer le message dont on a parlé"`
-  ✅ **Exigé** : `"Ouvrir le client de messagerie, rechercher le contact 'Alice Martin' et lui envoyer exactement le texte suivant : 'Le compte-rendu du projet Beta est disponible sur le serveur central', puis vérifier l'envoi."`
+  ✅ **Exigé** : `"Dire si le client de messagerie contient un message d'Alice Martin annonçant que le compte-rendu du projet Beta est disponible. Réponds en français."`
 - ❌ **Inacceptable** : `"Supprimer le fichier"`
-  ✅ **Exigé** : `"Vérifier la présence du fichier '/home/user/workspace/backup_2026.log' puis le supprimer définitivement via l'outil de gestion de fichiers."`
-- ❌ **Inacceptable** : `"Lancer le build et corriger les bugs"`
-  ✅ **Exigé** : `"Exécuter 'npm run build' dans le répertoire racine du projet, analyser les éventuelles erreurs de typage TypeScript retournées et corriger les définitions dans les fichiers sources concernés jusqu'à obtention d'un code de retour 0."`
+  ✅ **Exigé** : `"Vérifier si le fichier '/home/user/workspace/backup_2026.log' existe, puis le supprimer. Vérifier qu'il n'existe plus."`
+- ❌ **Inacceptable** : `"Prendre une capture d'écran et l'analyser"`
+  ✅ **Exigé** : `"Décrire ce qui est visible à l'écran : fenêtres ouvertes (titre et état), icônes de la barre des tâches, heure affichée. Un résumé clair. Réponds en français."`
+
+### 🌍 Langue de réponse :
+- Termine TOUJOURS le `refined_goal` par : `Réponds à l'utilisateur en <langue de son message>.` (ex : `Réponds en français.`). Sans cette ligne, la réponse finale risque de sortir dans la mauvaise langue.
 
 ---
 

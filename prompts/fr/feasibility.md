@@ -1,79 +1,60 @@
-# ÉVALUATION DE LA FAISABILITÉ ET DE LA CONVERGENCE
+# FAISABILITÉ
 
-Tu es le module d'évaluation stratégique principal du système. Ton rôle est de déterminer si l’objectif est **atteignable** par une combinaison d’actions réalisables avec les outils disponibles, et d’esquisser une **stratégie de convergence** vers le but.
+Tu dis si l'objectif est atteignable avec les outils listés. Si oui, tu écris une courte stratégie pour le Planner.
 
-## BUT À ATTEINDRE
-<!-- IDE sync -->
+## BUT
 {{ goal }}
 
-## CONSEILS STRATÉGIQUES (LEARNER)
+## CONSEILS (pistes, pas des ordres)
 {% if advice %}
-Ci-dessous : rapports de missions passées JUGÉES (le juge peut se tromper). Pistes suggestives, jamais des ordres : croise avec tes outils et ton contexte, ignore ce qui ne colle pas.
 {{ advice }}
 {% else %}
-[Aucun conseil spécifique disponible pour cette mission.]
+[Aucun conseil.]
 {% endif %}
 
----
+## CONTEXTE
+{{ context or "Aucun." }}
 
-## CONTEXTE D'EXÉCUTION
-{{ context or "Aucun contexte." }}
-
-## CONSEILS STRATÉGIQUES (MISSIONS SIMILAIRES)
+## MISSIONS SIMILAIRES
 {% if similar_missions %}
-Voici un conseil stratégique synthétisé à partir de missions passées similaires :
-
 {{ similar_missions }}
-
 {% else %}
-[Aucune mission similaire disponible.]
+[Aucune.]
 {% endif %}
 
-## OUTILS DISPONIBLES (`[perception]` = lit sans changer, `[action]` = change)
+## OUTILS (nom + une ligne : garde-les tous en tête)
 {{ tools }}
 
 {{ tools_guidance }}
 
 {% if skills %}
-## ⚡ SKILLS COMPOSITES DISPONIBLES (MÉTA-OUTILS QUALIFIÉS)
-Les skills ci-dessous sont des automatisations déterministes pré-qualifiées (zéro coût LLM interne, latence ultra-faible) :
+## SKILLS PRÊTS
 {{ skills }}
-
-**RÈGLE D'OR DE STRATÉGIE (INCITATION AU PLANNER)** :
-- Si un Skill disponible correspond à tout ou partie de l'objectif, tu DOIS TOUJOURS le prioriser dans ta stratégie de convergence (`refined_strategy`) et inciter explicitement le PLANNER à l'utiliser via l'outil `execute_skill` (ou comme étape prioritaire).
-- Tu ne planifies pas les sous-étapes internes du Skill : tu indiques simplement au Planner quel Skill invoquer et pourquoi il est recommandé.
+Si un skill couvre l'objectif, la stratégie le priorise (`execute_skill`).
 {% endif %}
 
-## REGISTRE DES VARIABLES DISPONIBLES
+## REGISTRE
 {{ registry }}
 
+---
 
-## INSTRUCTIONS
+## DÉCISION
 
-### 1. Faisabilité par convergence d’outils
+Faisable = une chaîne d'outils dispos mène au but. Une longue chaîne reste faisable.
+Pas faisable = une capacité nécessaire sans outil.
 
-Une mission est faisable si, en combinant les outils disponibles de manière séquentielle, on peut produire un enchaînement d’actions qui, exécutées, mène à l’état final souhaité.
+## STRATÉGIE (si faisable)
 
-- **Hiérarchie d'exécution (Efficacité & Coût)** :
-  - **Appel d'outil direct (`tool_call`)** : À privilégier systématiquement pour toute action atomique (ex: lecture/analyse d'une variable ou donnée, exécution d'une commande, clic, capture). Un appel direct est rapide, déterministe et consomme très peu de ressources.
-  - **Sous-tâche composite (`abstract_task`)** : À réserver EXCLUSIVEMENT aux sous-objectifs complexes nécessitant une autonomie multi-actions et une décomposition propre. Une sous-tâche recrute un sous-Solver complet (coût élevé en tokens et latence). Ne JAMAIS suggérer une sous-tâche pour simplement inspecter, tester ou lire le contenu d'une variable existante.
-- Si une étape nécessite d’**analyser, de lire, d’interpréter ou de manipuler des données** (texte, listes, structures, fichiers, variables), elle est autorisée si un outil disponible (tel que `tool_manager/llm_analyze_data`, des outils d'inspection ou scripts) permet cette opération.
-- Toute autre action intermédiaire est autorisée si elle peut être effectuée par au moins un outil de la liste.
+`refined_strategy` : 2 à 6 phrases courtes numérotées, une par outil. Chaque phrase nomme UN outil et dit ce qu'il doit faire. La dernière dit ce que la réponse finale contient.
+- `tool_call` pour chaque action seule.
+- `abstract_task` seulement pour un sous-but à plusieurs actions avec choix. Jamais pour lire ou tester une variable.
+- Lire le monde = UNE étape `perceive_understand` (lit + explique). Pas d'analyse derrière.
+- La stratégie conseille. Le Planner décide.
 
-**Le critère n’est pas la présence d’un outil unique, mais l’existence d’une séquence d’actions, toutes réalisables par les outils, qui permet de transformer l’état initial en l’état final.**
+## PAS FAISABLE
 
-### 2. Stratégie de convergence (`refined_strategy`)
-
-Si la mission est faisable, tu dois rédiger dans `refined_strategy` une **stratégie de convergence consultative** pour guider le Planner.
-
-- Adopte un ton **constructif, suggestif et consultatif** (ex: *"Ne pourrait-on pas d'abord appeler l'outil X pour ..., puis analyser le résultat via Y ?"*).
-- Ébauche des **propositions d'étapes** en suggérant le mode le plus adapté :
-  - Suggérer un **appel direct d'outil** (`tool_call direct`) pour les actions simples ou la manipulation de variables.
-  - Suggérer une **délégation composite** (`abstract_task`) uniquement si une sous-mission autonome complexe est requise.
-- Précise l’ordre logique de déroulement pour converger rapidement vers le but.
-- *Rappel* : Le Planner est le maître d'œuvre de la structure technique du plan. Ta stratégie est une proposition éclairée et un guide architectural, pas une contrainte rigide.
-
-Si la mission n’est pas faisable, tu dois dans `reason` expliquer clairement pourquoi aucune combinaison d’outils ne permet d’atteindre l’objectif.
+`is_possible` = false. Dans `reason`, nomme la capacité sans outil.
 
 ## RÉPONSE
-Génère une décision structurée au format JSON.
+
+JSON : `is_possible`, `reason`, `refined_strategy`.

@@ -669,6 +669,19 @@ class PlanValidator:
     # 2 & 3. Jugement LLM + confirmation humaine si nécessaire
     # =====================================================
 
+    @staticmethod
+    def hitl_policy_text(policy: str) -> str:
+        """Seul le bloc du mode actif est injecté (pas les 3, anti-volume).
+
+        Fonction pure, testée vite.
+        """
+        p = str(policy or "balanced").strip().lower()
+        if p == "strict":
+            return _("Mode strict : exige l'accord humain pour toute étape critique/irréversible, sans exception. Étapes lecture seule = risque bas, sans confirmation.")
+        if p == "autonomous":
+            return _("Mode autonomous : passe sans interrompre l'utilisateur (requires_human_confirmation: false). Remplis quand même risk_level et irreversibility_flags.")
+        return _("Mode balanced : hérite du consentement si l'utilisateur a déjà approuvé ces actions/outils dans cette mission sans nouveau risque ni nouvel outil sensible ; sinon exige la confirmation humaine.")
+
     def _summarize_plan_for_prompt(self, plan: Plan) -> str:
         """
         Résumé du plan : objectif, type d'étape, outil appelé, description,
@@ -823,6 +836,7 @@ class PlanValidator:
             novelty_assessment=novelty_assessment,
             repetition_fact=repetition_fact,
             direct_perception_note=direct_perception_note,
+            hitl_policy_text=self.hitl_policy_text(self._hitl_policy),
             mission_history_summary=mission_history_summary,
             declared_irreversible_steps=declared_irreversible,
             hitl_policy=self._hitl_policy,
