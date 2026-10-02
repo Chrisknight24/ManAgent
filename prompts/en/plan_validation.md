@@ -52,6 +52,20 @@ Tu as 3 missions :
 Trust this computation: modified arguments addressing the cause = a new plan, even with equal structure. Refuse an equal-structure plan only if NOTHING changed AND the cause is ignored.
 {% endif %}
 
+{% if repetition_fact %}
+## 🔁 Repetition fact (typed, not a vague alert)
+
+{{ repetition_fact }}
+
+A pre-execution rejection is cheap and proves no failure: never count it as a failed run.
+{% endif %}
+{% if direct_perception_note %}
+
+## 👁️ Perception note (engine fact, not an opinion)
+
+{{ direct_perception_note }}
+{% endif %}
+
 ---
 
 ## 🧰 Disponibilités vérifiées (fait déterministe, pas une opinion)

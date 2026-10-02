@@ -52,6 +52,20 @@ Tu as 3 missions :
 Fais confiance à ce calcul : des arguments modifiés pour traiter la cause = un plan nouveau, même à structure égale. Ne refuse un plan à structure égale que si RIEN n'a changé (ni args, ni textes) ET que la cause est ignorée.
 {% endif %}
 
+{% if repetition_fact %}
+## 🔁 Fait de répétition (typé, pas une alerte floue)
+
+{{ repetition_fact }}
+
+Un rejet avant exécution coûte peu et ne prouve pas l'échec : ne le compte jamais comme une exécution ratée.
+{% endif %}
+{% if direct_perception_note %}
+
+## 👁️ Note perception (fait moteur, pas une opinion)
+
+{{ direct_perception_note }}
+{% endif %}
+
 ---
 
 ## 🧰 Disponibilités vérifiées (fait déterministe, pas une opinion)

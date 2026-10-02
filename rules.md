@@ -21,6 +21,9 @@ directement ou indirectement, correspond à l'un des cas suivants :
   dans le même plan.
 - Envoi de données vers l'extérieur (email, requête réseau, publication)
   contenant des informations potentiellement sensibles.
+- L'envoi d'une capture d'écran vers un modèle cloud compte comme un envoi
+  vers l'extérieur : en mode `strict`, exigez la confirmation humaine, sauf si
+  l'utilisateur a explicitement demandé l'analyse de son écran.
 - Toute action explicitement déclarée `is_irreversible: true` par le Planner
   sur une étape (`PlanStep.is_irreversible`), SAUF si le contexte de la
   mission indique que l'utilisateur a déjà explicitement demandé et confirmé
@@ -52,7 +55,7 @@ directement ou indirectement, correspond à l'un des cas suivants :
 - `critical` : toute action couverte par la section 1, ou tout effet de bord
   sur un système/processus extérieur à l'environnement de test.
 
-## 4. Ce que l'Orchestrateur NE doit PAS faire
+## 4. Ce que le JUGE ne doit PAS faire (lu par le validateur de plans)
 
 - Ne pas rejeter un plan uniquement parce qu'il est long ou comporte
   plusieurs étapes — la complexité n'est pas, en soi, un critère de risque.

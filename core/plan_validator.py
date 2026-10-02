@@ -691,8 +691,56 @@ class PlanValidator:
                 except Exception:
                     args_str = ""
             cond = f" [SI {step.execute_if}]" if getattr(step, "execute_if", None) else ""
-            lines.append(f"- {step.id} [{step_type_str}]{tool} : {step.description}{args_str}{cond}{marker}{reason}")
+            out_var = f" -> {step.output_variable_name}" if getattr(step, "output_variable_name", None) else ""
+            exp = f" attend={step.expected_result}" if getattr(step, "expected_result", None) else ""
+            lines.append(f"- {step.id} [{step_type_str}]{tool} : {step.description}{args_str}{cond}{out_var}{exp}{marker}{reason}")
         return "\n".join(lines)
+
+    @staticmethod
+    def build_repetition_fact(plan: Any, previous_attempts: Optional[List[Any]] = None) -> Optional[str]:
+        """Un seul fait de répétition, typé (pas un signal flou).
+
+        Distingue les plans JETÉS avant exécution (pas chers, le planner peut
+        être juste bloqué) des plans ÉCHOUÉS à l'exécution (vrai coût). Le juge
+        ne doit pas traiter un rejet de syntaxe comme une preuve d'échec.
+        Fonction pure, testée vite.
+        """
+        failed = [a for a in (previous_attempts or []) if getattr(a, "outcome", None) == "failed"]
+        if not failed:
+            return None
+        current_sig = PlanValidator._plan_step_signature(list(getattr(plan, "steps", []) or []))
+        preexec = 0
+        executed = 0
+        for attempt in failed:
+            proposed = getattr(attempt, "proposed_plan", None) or {}
+            steps = proposed.get("steps", []) if isinstance(proposed, dict) else []
+            if PlanValidator._plan_step_signature(steps) != current_sig:
+                continue
+            nodes = getattr(attempt, "nodes", None)
+            if nodes:
+                executed += 1
+            else:
+                preexec += 1
+        if not preexec and not executed:
+            return None
+        parts = []
+        if executed:
+            parts.append(_("{n} échec(s) À L'EXÉCUTION à structure égale").format(n=executed))
+        if preexec:
+            parts.append(_("{n} rejet(s) AVANT exécution à structure égale (pas chers, pas une preuve d'échec)").format(n=preexec))
+        return _("Répétition : ") + " ; ".join(parts) + "."
+
+    @staticmethod
+    def build_direct_perception_note(plan: Any, perception_tool_names=None, tool_returns=None) -> Optional[str]:
+        """Fait moteur sur les appels perception directs (le juge n'a plus à deviner).
+
+        Liste les étapes concernées et rappelle l'exception pixels : un outil à
+        charge média déclarée peut être appelé en direct sans tuer les pixels.
+        """
+        ids = find_direct_perception_calls(plan, perception_tool_names, tool_returns)
+        if not ids:
+            return None
+        return _("Appels perception directs : {ids} (hors exception pixels : charge média déclarée = appel direct légitime, les pixels sont préservés).").format(ids=", ".join(ids))
 
     async def validate(
         self,
@@ -720,6 +768,9 @@ class PlanValidator:
         # ET sait ce qui a changé vs les échecs. Sans ça, un correctif
         # d'argument ressemble à une redite et se fait refuser à tort.
         novelty_assessment = compare_plan_novelty(plan, previous_attempts or [])
+        repetition_fact = self.build_repetition_fact(plan, previous_attempts or [])
+        direct_perception_note = self.build_direct_perception_note(
+            plan, self._perception_tools, self._tool_returns)
 
         # Gate déterministe (fail-fast) : UNIQUEMENT les cas sûrs à 100%,
         # zéro faux positif, pas chers. Doctrine : un rejet coûte une tentative
@@ -770,6 +821,8 @@ class PlanValidator:
             rules=self._rules_text or _("(rules.md absent ou vide — aucun critère explicite fourni.)"),
             pattern_warning=pattern_warning,
             novelty_assessment=novelty_assessment,
+            repetition_fact=repetition_fact,
+            direct_perception_note=direct_perception_note,
             mission_history_summary=mission_history_summary,
             declared_irreversible_steps=declared_irreversible,
             hitl_policy=self._hitl_policy,

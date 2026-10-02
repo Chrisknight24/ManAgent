@@ -1281,6 +1281,13 @@ class Executor:
                             right = right.lower() == "true"
                         elif isinstance(right, bool) and isinstance(left, str) and left.lower() in ["true", "false"]:
                             left = left.lower() == "true"
+                        elif (isinstance(left, str) and isinstance(right, str)
+                                and op_type in (ast.Eq, ast.NotEq)):
+                            # Normalisation texte : un LLM répond "Yes", "yes.", " OUI " —
+                            # exiger la casse/ponctuation exacte tuerait les branches
+                            # oui/non (et les noms de fenêtres). Comparaison insensible.
+                            left = left.strip().casefold().rstrip(".")
+                            right = right.strip().casefold().rstrip(".")
                         return operators[op_type](left, right)
                     raise ValueError(_("Opérateur de comparaison non supporté : {}").format(op_type))
                 elif isinstance(node, ast.BoolOp):
