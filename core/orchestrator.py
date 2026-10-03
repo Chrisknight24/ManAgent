@@ -859,6 +859,7 @@ class Orchestrator(Supervisor, Entity):
 
                 # 6. Récupérer les conseils pour l'Orchestrateur (routage)
                 advice_orchestrator = await self._get_orchestrator_advice(effective_user_message)
+                known_facts_text = await self._get_known_facts_text(effective_user_message)
 
                 # 7. Construire le prompt d'orchestration
                 loader = get_prompt_loader()
@@ -928,6 +929,7 @@ class Orchestrator(Supervisor, Entity):
                     user_message=effective_user_message,
                     history=context_str,
                     advice=advice_orchestrator,
+                    known_facts=known_facts_text,
                     model_id=forced_model,
                     supported_modalities=supported_modalities,
                     unsupported_modalities=unsupported_modalities,
@@ -1210,8 +1212,35 @@ class Orchestrator(Supervisor, Entity):
 
         return outcome.approved
 
-    async def _get_orchestrator_advice(self, user_message: str) -> str:
-        advice = ""
+    async def _get_known_facts_text(self, user_message: str) -> str:
+        """2-3 faits connus proches du message (le modèle n'écrit que le nouveau).
+
+        Jamais bloquant : vide si rien (pas de bruit pour le modèle faible).
+        """
+        try:
+            store = getattr(self.runtime_state, "lesson_store", None)
+            if store is None or not hasattr(store, "get_similar_facts"):
+                return ""
+            mgr = getattr(self.runtime_state, "embedding_manager", None)
+            query_emb = None
+            if mgr is not None and getattr(mgr, "active_provider", None) is not None:
+                try:
+                    query_emb = await mgr.embed(user_message)
+                except Exception:
+                    query_emb = None
+            if not query_emb:
+                return ""
+            env = getattr(self.runtime_state, "environment", "simulated")
+            facts = store.get_similar_facts(query_emb, env, top_k=3)
+            lines = []
+            for f in facts or []:
+                date = str(f.get("created_at") or "?")[:10]
+                lines.append(f"- {f.get('recommendation', '')} ({date})")
+            return "\n".join(lines)
+        except Exception:
+            return ""
+
+    async def _get_orchestrator_advice(self, user_message: str) -> str:        advice = ""
         if hasattr(self.runtime_state, 'learner') and self.runtime_state.learner:
             try:
                 advice = await self.runtime_state.learner.get_advice(

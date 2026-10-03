@@ -151,3 +151,8 @@ Reports from past JUDGED missions (the judge can be wrong) — suggestive leads,
 
 ## 🧠 EXTRACTION DE CONNAISSANCES (`learned_facts`)
 Si la demande de l'utilisateur révèle une information stable, une préférence d'interaction, ou un fait durable sur son environnement (ex: *"Mon éditeur préféré est Neovim"*, *"Je travaille sous Linux Debian"*), consigne-le sous forme de faits synthétiques dans `learned_facts`. Laisse la liste vide s'il n'y a pas de nouvelle information stable.
+{% if known_facts %}
+Already known on this topic:
+{{ known_facts }}
+Write only what THIS message truly reveals as new. Nothing new = empty list.
+{% endif %}

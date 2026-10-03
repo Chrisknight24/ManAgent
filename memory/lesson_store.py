@@ -614,8 +614,70 @@ class LessonStore:
             Logger.error(f"[LessonStore] Erreur get_similar_lessons : {e}")
             return []
 
+    def get_similar_facts(self, query_embedding: List[float], environment: str = "simulated",
+                          top_k: int = 3, min_similarity: float = 0.30) -> List[Dict[str, Any]]:
+        """Faits connus proches d'un message (pour dire au modèle ce qu'on sait déjà).
+
+        Pur côté décision : tri cosinus, seuil, jamais de fusion ni suppression.
+        """
+        if not query_embedding:
+            return []
+        try:
+            with self._get_connection() as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT id, scope, recommendation, confidence, evidence_count,
+                           created_at, last_verified_at
+                    FROM lessons
+                    WHERE is_active = 1 AND scope = 'semantic_fact' AND environment = ?
+                ''', (environment,))
+                scored = []
+                for row in cursor.fetchall():
+                    d = dict(row)
+                    emb_blob = None
+                    try:
+                        emb_blob = cursor.execute(
+                            "SELECT embedding FROM lessons WHERE id = ?", (d["id"],)).fetchone()
+                        emb_blob = emb_blob[0] if emb_blob else None
+                    except Exception:
+                        emb_blob = None
+                    sim = 0.0
+                    if emb_blob:
+                        vec = self._deserialize_embedding(emb_blob)
+                        if vec:
+                            sim = self._cosine_similarity(query_embedding, vec)
+                    if sim >= min_similarity:
+                        d["similarity"] = sim
+                        scored.append(d)
+                scored.sort(key=lambda x: x["similarity"], reverse=True)
+                return scored[:top_k]
+        except Exception as e:
+            Logger.error(f"[LessonStore] Erreur get_similar_facts : {e}")
+            return []
+
     def get_lessons_count(self) -> int:
         """Retourne le nombre total de règles/leçons apprises."""
+
+    def mark_group_consolidated(self, entity_type: str, scope: str, environment: str) -> int:
+        """Marque les brutes d'un groupe (classées, jamais effacées).
+
+        Après ça, le groupe ne se regroupe plus, mais chaque ligne reste
+        lisible en base et en HTML. Retourne le nombre de lignes marquées.
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE lessons SET is_consolidated = 1
+                    WHERE entity_type = ? AND scope = ? AND environment = ?
+                      AND is_consolidated = 0 AND is_active = 1
+                ''', (entity_type, scope, environment))
+                conn.commit()
+                return cursor.rowcount or 0
+        except Exception as e:
+            Logger.error(f"[LessonStore] Erreur mark_group_consolidated : {e}")
+            return 0
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()

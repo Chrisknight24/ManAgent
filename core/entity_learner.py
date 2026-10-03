@@ -125,4 +125,13 @@ class EntityLearner:
             except Exception as e:
                 Logger.warning(f"[EntityLearner] Échec invalidation cache : {e}")
 
+        # Classer sans effacer : les sources sont marquées (plus jamais
+        # regroupées) mais restent lisibles en base et en HTML.
+        if new_id:
+            try:
+                marked = self.lesson_store.mark_group_consolidated(entity_type, scope, environment)
+                Logger.debug(f"[EntityLearner] Groupe {scope} classé : {marked} source(s) marquée(s).")
+            except Exception as e:
+                Logger.warning(f"[EntityLearner] Échec marquage groupe {scope} : {e}")
+
         Logger.info(f"[EntityLearner] Consolidation terminée pour {scope} (nouvel id={new_id})")
