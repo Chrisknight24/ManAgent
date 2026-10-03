@@ -1240,7 +1240,8 @@ class Orchestrator(Supervisor, Entity):
         except Exception:
             return ""
 
-    async def _get_orchestrator_advice(self, user_message: str) -> str:        advice = ""
+    async def _get_orchestrator_advice(self, user_message: str) -> str:
+        advice = ""
         if hasattr(self.runtime_state, 'learner') and self.runtime_state.learner:
             try:
                 advice = await self.runtime_state.learner.get_advice(
