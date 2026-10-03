@@ -7,6 +7,7 @@ Outils internes pour l'analyse de données structurées.
 import json
 import re
 from typing import Dict, Any, Optional, List
+from pydantic import BaseModel, Field
 from core.prompt_loader import get_prompt_loader
 try:
     from core.tools_models import AnalysisResult
@@ -658,7 +659,7 @@ async def execute_skill_tool(args: Dict[str, Any], runtime_state) -> Dict[str, A
 _INTERNAL_TOOL_NAMES = frozenset({
     "extract_json_value", "llm_analyze_data", "llm_analyze_multi_data",
     "execute_skill", "tool_manager", "analyze_data", "load_literal_data",
-    "perceive_understand",
+    "perceive_understand", "perceive_action",
 })
 
 
@@ -768,3 +769,106 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
     if media_assets:
         return await _run_llm_analysis(raw_data, query, runtime_state, tag="perceive_understand", media_assets=media_assets)
     return await _run_llm_analysis(raw_data, query, runtime_state, tag="perceive_understand")
+
+
+class _GroundingResult(BaseModel):
+    """Ancrage d'une cible perçue : quelle référence d'action exacte utiliser."""
+    target_ref: str = Field(default="", description="Référence exacte à passer à l'outil d'action (id élément ou case), vide si incertain")
+    reason: str = Field(default="", description="Pourquoi cette cible (1 phrase)")
+
+
+async def perceive_action(args: Dict[str, Any], runtime_state) -> Dict[str, Any]:
+    """
+    Méta-outil : VOIT puis AGIT en une seule étape, sans écrire de référence
+    dans le plan. La référence (id/case) vit quelques millisecondes dans
+    l'appel, toujours fraîche — fini les "null", cellules quotées et refs
+    périmées recopiées de mémoire.
+
+    Args:
+        args: {
+            "question": str (requis : que trouver, ex "où est l'icône Edge ?"),
+            "source_tool": str (requis : outil perception hôte),
+            "source_args": dict (optionnel),
+            "action_tool": str (requis : outil action hôte),
+            "action_args": dict (optionnel : gabarit ; toute valeur EXACTEMENT
+                égale à "$TARGET" reçoit la référence ancrée),
+            "target_hint": str (optionnel : description de la cible),
+        }
+
+    Retourne: dict {"result": bool, "data": {"seen": ..., "done": ...}}.
+    Ancrage incertain (pas de référence) = échec honnête, JAMAIS d'action
+    aveugle.
+    """
+    question = (args.get("question") or "").strip()
+    source_tool = (args.get("source_tool") or "").strip()
+    source_args = args.get("source_args") or {}
+    action_tool = (args.get("action_tool") or "").strip()
+    action_args = args.get("action_args") or {}
+    target_hint = (args.get("target_hint") or "").strip()
+
+    def _fail(msg: str) -> Dict[str, Any]:
+        return {"result": False, "data": None, "error_reason": msg, "message": msg}
+
+    if not question:
+        return _fail(_("Le paramètre 'question' est requis."))
+    if not source_tool:
+        return _fail(_("Le paramètre 'source_tool' est requis (quoi regarder)."))
+    if not action_tool:
+        return _fail(_("Le paramètre 'action_tool' est requis (quoi faire)."))
+    if source_tool in _INTERNAL_TOOL_NAMES or action_tool in _INTERNAL_TOOL_NAMES:
+        return _fail(_("source_tool et action_tool doivent être des outils externes (hôte)."))
+    tools_mgr = getattr(runtime_state, "tools_manager", None)
+    if tools_mgr is None or not hasattr(tools_mgr, "execute_tool"):
+        return _fail(_("Aucun gestionnaire d'outils pour percevoir/agir."))
+
+    # 1. Perception fraîche (jamais une référence stockée).
+    try:
+        seen_str = await tools_mgr.execute_tool(source_tool, dict(source_args))
+        seen = json.loads(seen_str) if isinstance(seen_str, str) else seen_str
+    except Exception as e:
+        return _fail(_("La perception '{tool}' a échoué : {err}").format(tool=source_tool, err=e))
+    if isinstance(seen, dict) and not seen.get("result", True):
+        return _fail(str(seen.get("error_reason") or seen.get("message") or _("Perception en échec.")))
+
+    # 2. Ancrage : quelle référence exacte pour l'action ?
+    llm = await _get_tools_llm(runtime_state)
+    if llm is None:
+        return _fail(_("Aucun LLM disponible pour l'ancrage."))
+    ground_prompt = (
+        f"Cible cherchée : {target_hint or question}\n"
+        f"Observation fraîche : {json.dumps(seen, ensure_ascii=False)[:4000]}\n"
+        "Donne la référence EXACTE à passer à l'outil d'action (identifiant "
+        "d'élément ou case de grille, recopiée telle quelle de l'observation). "
+        "Si aucune cible sûre, laisse target_ref vide."
+    )
+    try:
+        grounding = await llm.generate_structured(
+            prompt=ground_prompt, schema=_GroundingResult, tag="perceive_action",
+        )
+    except Exception as e:
+        return _fail(_("Ancrage impossible : {err}").format(err=e))
+    target_ref = (getattr(grounding, "target_ref", "") or "").strip().strip("\"'")
+    if not target_ref or "*" in target_ref or target_ref.lower() == "null":
+        return _fail(_("Ancrage incertain : aucune cible sûre dans l'observation, pas d'action aveugle."))
+
+    # 3. Action immédiate avec la référence fraîche.
+    resolved_args = {}
+    for key, val in (action_args if isinstance(action_args, dict) else {}).items():
+        resolved_args[key] = target_ref if (isinstance(val, str) and val.strip() == "$TARGET") else val
+    if not any(v == target_ref for v in resolved_args.values()):
+        resolved_args = dict(resolved_args)
+        resolved_args.setdefault("target", target_ref)
+    try:
+        done_str = await tools_mgr.execute_tool(action_tool, resolved_args)
+        done = json.loads(done_str) if isinstance(done_str, str) else done_str
+    except Exception as e:
+        return _fail(_("L'action '{tool}' a échoué : {err}").format(tool=action_tool, err=e))
+    if isinstance(done, dict) and not done.get("result", True):
+        return _fail(str(done.get("error_reason") or done.get("message") or _("Action en échec.")))
+    return {
+        "result": True,
+        "data": {"seen": seen if not isinstance(seen, dict) else seen.get("data", seen),
+                 "done": done if not isinstance(done, dict) else done.get("data", done),
+                 "target": target_ref},
+        "message": _("Cible ancrée et action exécutée."),
+    }

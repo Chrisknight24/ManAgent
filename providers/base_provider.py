@@ -8,9 +8,19 @@ Gère nativement le pool de clés API et le cooldown par clé.
 from typing import Optional, AsyncGenerator, Type, List, Dict, Any
 from pydantic import BaseModel
 from abc import ABC, abstractmethod
+import asyncio
+import random
 import time
 from core.i18n import _
 from utils.logger import Logger
+
+
+# Backoff pro (niveaux pool, pas juste par clé) : le quota est souvent commun
+# au compte, changer de clé ne suffit pas. Exponentiel + jitter + Retry-After.
+RATE_LIMIT_BASE_COOLDOWN = 60.0
+RATE_LIMIT_MAX_COOLDOWN = 600.0
+RATE_LIMIT_BASE_SLEEP = 0.5
+RATE_LIMIT_MAX_SLEEP = 30.0
 
 
 # =========================================================
@@ -63,6 +73,9 @@ class BaseProvider(ABC):
         self.api_keys_pool: List[Dict[str, Any]] = []
         self.active_key_index: int = 0
         self._key_cooldowns: Dict[str, float] = {}  # key_str -> timestamp expiration cooldown
+        # Débit : rafales 429/503 consécutives au niveau du pool (quota commun).
+        self._rate_limit_streak: int = 0
+        self._pool_cooldown_until: float = 0.0
 
     @staticmethod
     def extract_normalized_media_assets(media_assets: Optional[List[Any]]) -> List[Dict[str, Any]]:
@@ -220,8 +233,11 @@ class BaseProvider(ABC):
         """
         Retourne la première clé active non en cooldown,
         ou la clé dont le cooldown expire le plus tôt.
+        Pool en cooldown global : None (échec rapide, pas de spirale 429).
         """
         now = time.time()
+        if now < self._pool_cooldown_until:
+            return None
         for idx, k_info in enumerate(self.api_keys_pool):
             if not k_info.get("is_active", True):
                 continue
@@ -272,7 +288,9 @@ class BaseProvider(ABC):
         """
         Promeut une clé fonctionnelle en première position du pool (index 0)
         afin que tous les appels suivants réutilisent directement la dernière clé ayant réussi.
+        Un succès efface aussi la rafale de débit (streak + cooldown pool).
         """
+        self.note_provider_success()
         if not key_str or not self.api_keys_pool:
             return
 
@@ -294,6 +312,8 @@ class BaseProvider(ABC):
 
     def has_available_keys(self) -> bool:
         """Indique si au moins une clé active n'est pas en cooldown."""
+        if time.time() < self._pool_cooldown_until:
+            return False
         if not self.api_keys_pool:
             return False
         now = time.time()
@@ -304,6 +324,34 @@ class BaseProvider(ABC):
             if key_str and now >= self._key_cooldowns.get(key_str, 0):
                 return True
         return False
+
+    def note_rate_limit(self, key_str: str, retry_after: Optional[float] = None) -> float:
+        """Enregistre un 429/503 : cooldown clé CROISSANT + cooldown pool partagé.
+
+        Retourne les secondes à attendre avant de réessayer (backoff
+        exponentiel + jitter, Retry-After honoré). Fonction sync (pas d'await),
+        l'appelant dort lui-même.
+        """
+        self._rate_limit_streak += 1
+        n = min(self._rate_limit_streak, 4)
+        cooldown = min(RATE_LIMIT_MAX_COOLDOWN, RATE_LIMIT_BASE_COOLDOWN * (2 ** (n - 1)))
+        self.mark_key_in_cooldown(key_str, cooldown)
+        if not self.has_available_keys():
+            self._pool_cooldown_until = time.time() + cooldown
+        sleep = min(RATE_LIMIT_MAX_SLEEP, RATE_LIMIT_BASE_SLEEP * (2 ** (n - 1)))
+        sleep = sleep * (0.75 + random.random() * 0.5)
+        if retry_after:
+            try:
+                # Le serveur a parlé : jamais en dessous (jitter appliqué avant).
+                sleep = max(sleep, min(float(retry_after), RATE_LIMIT_MAX_SLEEP))
+            except Exception:
+                pass
+        return sleep
+
+    def note_provider_success(self) -> None:
+        """Un appel a réussi : la rafale est finie, compteurs remis à zéro."""
+        self._rate_limit_streak = 0
+        self._pool_cooldown_until = 0.0
 
     @abstractmethod
     async def initialize(self):

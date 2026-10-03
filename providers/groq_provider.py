@@ -69,10 +69,10 @@ class GroqProvider(BaseProvider):
 
                         if response.status in [429, 503] or "rate_limit" in error_text.lower() or "quota" in error_text.lower():
                             attempts += 1
-                            self.mark_key_in_cooldown(active_key, 60.0)
+                            _wait = self.note_rate_limit(active_key, response.headers.get("Retry-After"))
                             Logger.warning(f"[Groq Failover] Erreur {response.status} sur clé [{masked_key}...]. Rotation ({attempts}/{total_keys}).")
                             if self.has_available_keys():
-                                await asyncio.sleep(0.5)
+                                await asyncio.sleep(_wait)
                                 continue
                             raise ProviderQuotaExhaustedError(_("[GroqProvider] Quota épuisé sur toutes les clés : {}").format(error_text))
                         elif response.status in [401, 403]:
@@ -146,9 +146,9 @@ class GroqProvider(BaseProvider):
                         if response.status in [429, 503]:
                             error_text = await response.text()
                             attempts += 1
-                            self.mark_key_in_cooldown(active_key, 60.0)
+                            _wait = self.note_rate_limit(active_key, response.headers.get("Retry-After"))
                             if self.has_available_keys():
-                                await asyncio.sleep(0.5)
+                                await asyncio.sleep(_wait)
                                 continue
                             raise ProviderQuotaExhaustedError(_("[GroqProvider] Quota streaming épuisé : {}").format(error_text))
 

@@ -212,6 +212,44 @@ def find_reserved_plan_tools(plan: Any) -> List[str]:
     return bad
 
 
+def find_unresolved_plan_refs(plan: Any) -> List[str]:
+    """Références devinées dans les args (gate anti-devinettes, 100% générique).
+
+    Refuse, quel que soit l'outil ou le nom d'argument :
+    - la valeur littérale "null" (toute casse, valeur entière) : aucun hôte
+      ne peut agir sur "null", c'est toujours une devinette ;
+    - les refs avec joker (`*`) ou nom vide (`$@_data_`, `$@__`) : syntaxe
+      invalide, jamais résoluble à l'exécution.
+    Chaînes vides "" restent autorisées (défauts légitimes). Fonction pure.
+    Retourne ["step_id: chemin.argument=valeur", ...].
+    """
+    hits: List[str] = []
+
+    def _scan(value: Any, path: str, step_id: str) -> None:
+        if isinstance(value, dict):
+            for key, sub in value.items():
+                _scan(sub, f"{path}.{key}" if path else str(key), step_id)
+        elif isinstance(value, list):
+            for idx, sub in enumerate(value):
+                _scan(sub, f"{path}[{idx}]", step_id)
+        elif isinstance(value, str):
+            stripped = value.strip()
+            if stripped.lower() == "null":
+                hits.append(f"{step_id}: {path}=null")
+            elif "*" in stripped and ("$@_" in stripped or "@$_" in stripped):
+                hits.append(f"{step_id}: {path}={_short_value(stripped)}")
+            elif re.fullmatch(r"\$@_[a-z_]*|@\$_[a-z_]*", stripped):
+                hits.append(f"{step_id}: {path}={_short_value(stripped)}")
+
+    for step in getattr(plan, "steps", []) or []:
+        stype = getattr(getattr(step, "type", None), "value", getattr(step, "type", None))
+        if stype != "tool_call":
+            continue
+        args = _parse_step_args(getattr(step, "tool_args_json", "{}"))
+        _scan(args, "", str(getattr(step, "id", "?")))
+    return hits
+
+
 def find_skill_missing_params(plan: Any, skill_required_params: Optional[Dict[str, List[str]]] = None) -> Dict[str, List[str]]:
     """Étapes execute_skill dont des paramètres requis manquent (avertissement, jamais rejet).
 
@@ -802,9 +840,11 @@ class PlanValidator:
         malformed = find_malformed_step_args(plan)
         reserved = find_reserved_plan_tools(plan)
         direct_perception = find_direct_perception_calls(plan, self._perception_tools, self._tool_returns)
+        unresolved = find_unresolved_plan_refs(plan)
         problems = [f"inconnu:{u}" for u in unknown]
         problems += [f"args illisibles étape:{s}" for s in malformed]
         problems += [f"outil réservé au validateur étape:{s}" for s in reserved]
+        problems += [f"référence devinée {u} (jamais de null ni de joker : résolvez avant d'agir)" for u in unresolved]
         problems += [
             f"perception directe interdite étape:{s} "
             "(lire le monde uniquement via perceive_understand)"

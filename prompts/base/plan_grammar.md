@@ -97,6 +97,7 @@ Les outils sont **stateless (sans mémoire)** et ne peuvent pas définir de vari
 
 3. **Arguments d'outils résolus** :
    Les valeurs passées dans `tool_args_json` doivent être des valeurs concrètes ou des pointeurs `$@_data_...` résolus, jamais des fragments de pseudo-code non évalués.
+   Une valeur = soit du texte à envoyer, soit une touche/option exacte, jamais les deux collés (ex : pas de texte suivi d'une action entre crochets dans le même champ).
 
 4. **Règles de causalité et de validité (STRICTES)** :
    - **Causalité temporelle** : Une étape ne peut utiliser que les variables d'étapes **antérieures**.

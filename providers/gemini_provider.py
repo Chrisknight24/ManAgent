@@ -118,7 +118,7 @@ class GeminiProvider(BaseProvider):
                 # 429: Too Many Requests / Resource Exhausted, 503: Service Unavailable
                 if e.code in [429, 503] or "RESOURCE_EXHAUSTED" in str(e) or "429" in str(e):
                     attempts += 1
-                    self.mark_key_in_cooldown(current_key, cooldown_seconds=60.0)
+                    _wait = self.note_rate_limit(current_key)
                     self.client = None
                     self._current_client_key = None
 
@@ -130,7 +130,7 @@ class GeminiProvider(BaseProvider):
                     self.check_cancelled()
 
                     if self.has_available_keys():
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(_wait)
                         continue
                     else:
                         Logger.error(_("[Gemini Failover] 💥 Toutes les clés Gemini configurées sont saturées."))
@@ -146,11 +146,11 @@ class GeminiProvider(BaseProvider):
                 err_str = str(e)
                 if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
                     attempts += 1
-                    self.mark_key_in_cooldown(current_key, cooldown_seconds=60.0)
+                    _wait = self.note_rate_limit(current_key)
                     self.client = None
                     self._current_client_key = None
                     if self.has_available_keys():
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(_wait)
                         continue
                     raise ProviderQuotaExhaustedError(_("[GeminiProvider] Quota épuisé : {}").format(err_str)) from e
                 raise e
@@ -328,22 +328,22 @@ class GeminiProvider(BaseProvider):
             except APIError as e:
                 if e.code in [429, 503] or "RESOURCE_EXHAUSTED" in str(e) or "429" in str(e):
                     attempts += 1
-                    self.mark_key_in_cooldown(current_key, 60.0)
+                    _wait = self.note_rate_limit(current_key)
                     self.client = None
                     self._current_client_key = None
                     if self.has_available_keys():
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(_wait)
                         continue
                     raise ProviderQuotaExhaustedError(_("[GeminiProvider] Quota épuisé streaming.")) from e
                 raise e
             except Exception as e:
                 if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
                     attempts += 1
-                    self.mark_key_in_cooldown(current_key, 60.0)
+                    _wait = self.note_rate_limit(current_key)
                     self.client = None
                     self._current_client_key = None
                     if self.has_available_keys():
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(_wait)
                         continue
                     raise ProviderQuotaExhaustedError(_("[GeminiProvider] Quota épuisé streaming.")) from e
                 raise e

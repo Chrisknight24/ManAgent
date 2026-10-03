@@ -29,7 +29,7 @@ from core.constants import (
     MAX_INSIGHTS_PER_TARGET,
 )
 from .supervisor import Supervisor
-from .plan_models import FeasibilityDecision, Plan, SolverResult, ExecutionStatus, MissionSignature, CompactedAdvice, normalize_failure_signature, is_sterile_streak
+from .plan_models import FeasibilityDecision, Plan, SolverResult, ExecutionStatus, MissionSignature, CompactedAdvice, normalize_failure_signature, is_sterile_streak, is_quota_streak
 from .planner import Planner
 from .executor import Executor
 from core.llm import Llm
@@ -420,6 +420,19 @@ class Solver(Supervisor, Entity):
                         self.context += _("\n[Abandon] {}.").format(_resign_why)
                         break
 
+                    # Disjoncteur quota : le quota vide ne se répare pas en
+                    # replanifiant. Stopper proprement au lieu de spiraler en 429.
+                    if fail_history and is_quota_streak(fail_history):
+                        _quota_why = _("Arrêt : quota d'IA épuisé 2 fois de suite. Réessayez plus tard, inutile de brûler des tentatives.")
+                        Logger.warning(f"[Solver:{self.id}] 🛑 {_quota_why}")
+                        Logger.event(
+                            "quota_circuit_open",
+                            solver_id=self.id,
+                            consecutive_quota_failures=2,
+                        )
+                        self.context += _("\n[Abandon] {}.").format(_quota_why)
+                        break
+
                     if execution_attempt >= max_allowed:
                         if not await self._maybe_extend_budget(fail_history, max_allowed):
                             break
@@ -596,6 +609,20 @@ class Solver(Supervisor, Entity):
 
                         self.context = result.final_context
                         self.current_attempt.ended_at = time.time()
+
+                        # Étapes cruciales sautées : pas de convergence dessus.
+                        # (Avant : SKIPPED comptait comme convergé, même sur erreur.)
+                        _skipped_crucial = list(getattr(result, "skipped_crucial_ids", None) or [])
+                        if result.status == ExecutionStatus.SUCCESS and _skipped_crucial:
+                            _why = _("Étape(s) cruciale(s) sautée(s) : {} — pas de convergence.").format(
+                                ", ".join(_skipped_crucial[:5]))
+                            Logger.error(f"[Solver:{self.id}] ❌ {_why}")
+                            self.current_attempt.outcome = "failed"
+                            self.current_attempt.failure_class = FailureClass.EXECUTION_FAILURE
+                            self.current_attempt.failure_reason = _why
+                            self.context += _("\n[Échec] {}.").format(_why)
+                            self._record_failure(fail_history, FailureClass.EXECUTION_FAILURE, _why, result)
+                            continue
 
                         try:
                             seen_tool_steps_total += sum(

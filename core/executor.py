@@ -21,6 +21,12 @@ from core.execution_models import (
 from core.discovery.data_asset import ToolOutputDataAsset
 import time
 
+
+class _ConditionError(Exception):
+    """Condition `execute_if` inexploitable (syntaxe/typage) : l'étape échoue,
+    elle n'est jamais sautée silencieusement."""
+
+
 class Executor:
     def __init__(self, solver_node):
         self.solver = solver_node
@@ -52,6 +58,17 @@ class Executor:
         # Anti faux-succès (Alerte 1) : seules les actions matérielles comptent.
         tool_call_count = 0
         material_success_count = 0
+        # Étapes cruciales sautées : une mission ne converge jamais dessus.
+        skipped_crucial_ids: List[str] = []
+        # Micro-réessais locaux : 1 seul par étape et par tentative (cas H4 :
+        # chargement en cours). Jamais sur args invalides (attendre ne répare
+        # pas une mauvaise commande).
+        micro_retried_ids: set = set()
+        _NO_RETRY_MARKERS = (
+            "unknown", "inconnu", "invalid", "invalide", "missing", "manquant",
+            "required", "requis", "schema", "illegal", "interdit", "parse",
+            "syntax", "syntaxe",
+        )
 
         if not hasattr(self.solver.runtime_state, 'mission_rum'):
             self.solver.runtime_state.mission_rum = {}
@@ -81,7 +98,24 @@ class Executor:
                     current_attempt.add_node(node)
 
                     if step.execute_if:
-                        condition_evaluation = self._evaluate_condition(step.execute_if)
+                        try:
+                            condition_evaluation = self._evaluate_condition(step.execute_if)
+                        except _ConditionError as cond_err:
+                            Logger.error(f"[Executor] ⛔ Condition cassée à l'étape [{step.id}] : {cond_err}")
+                            step.status = ExecutionStatus.FAILED
+                            node.status = ExecutionStatus.FAILED
+                            node.error_reason = str(cond_err)
+                            node.ended_at = time.time()
+                            await self.solver.propagate_event(Events.STEP_STATUS_CHANGED, {
+                                "step_id": step.id,
+                                "status": ExecutionStatus.FAILED,
+                                "reason": str(cond_err),
+                                **self._step_event_meta(node)
+                            })
+                            step.result_context = str(cond_err)
+                            if step.is_crucial:
+                                skipped_crucial_ids.append(step.id)
+                            continue
                         if not condition_evaluation:
                             Logger.info(f"[Executor] ⏭️ Étape [{step.id}] SAUTÉE.")
                             step.status = ExecutionStatus.SKIPPED
@@ -119,6 +153,8 @@ class Executor:
                                 if step.is_crucial:
                                     self._propagate_crucial_variable(step.output_variable_name)
 
+                            if step.is_crucial:
+                                skipped_crucial_ids.append(step.id)
                             continue
 
                     if step.type == StepType.TOOL_CALL:
@@ -191,7 +227,25 @@ class Executor:
                                             error_reason=_("Arrêté par l'utilisateur."))
 
                     if not success:
-                        Logger.error(f"[Executor] ❌ Échec à l'étape [{step.id}].")
+                        _err_text = str(supplemental_data or "")
+                        _bad_args = any(m in _err_text.lower() for m in _NO_RETRY_MARKERS)
+                        if (step.type == StepType.TOOL_CALL and not _bad_args
+                                and step.id not in micro_retried_ids):
+                            micro_retried_ids.add(step.id)
+                            Logger.info(f"[Executor] 🔁 Micro-réessai local de [{step.id}] après pause (1 tentative).")
+                            await self.solver.propagate_event(Events.STEP_STATUS_CHANGED, {
+                                "step_id": step.id,
+                                "status": ExecutionStatus.RUNNING,
+                                "reason": _("Micro-réessai local après pause."),
+                                **self._step_event_meta(node)
+                            })
+                            try:
+                                await asyncio.sleep(1.5)
+                            except Exception:
+                                pass
+                            success, execution_output, supplemental_data = await self._execute_step_action(step, accumulated_context, node=node)
+                        if not success:
+                            Logger.error(f"[Executor] ❌ Échec à l'étape [{step.id}].")
                         step.status = ExecutionStatus.FAILED
                         step.result_context = supplemental_data or _("Échec d'exécution de l'action.")
                         node.status = ExecutionStatus.FAILED
@@ -325,6 +379,7 @@ class Executor:
                 failure_class=None,
                 material_success_count=material_success_count,
                 tool_call_count=tool_call_count,
+                skipped_crucial_ids=list(skipped_crucial_ids),
             )
 
         except Exception as e:
@@ -1302,6 +1357,13 @@ class Executor:
             result = eval_node(tree.body)
             return bool(result)
 
+        except _ConditionError:
+            raise
         except Exception as e:
-            Logger.error(f"[Executor] ⚠️ Erreur syntaxique ou typage dans la condition '{condition_raw}' (Normalisé: '{interpolated}'). Motif: {e}")
-            return False
+            # Erreur de syntaxe/typage : la condition elle-même est cassée.
+            # Ce n'est PAS un "faux" légitime : l'étape échoue au lieu d'être
+            # sautée silencieusement (sinon la mission peut se déclarer
+            # convergée sur une erreur de typage).
+            raise _ConditionError(
+                _("Condition inexploitable '{}' : {}").format(condition_raw, e)
+            ) from e

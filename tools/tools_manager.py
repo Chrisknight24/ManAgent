@@ -72,6 +72,7 @@ class ToolsManager(Entity):
                 llm_analyze_multi_data,
                 execute_skill_tool,
                 perceive_understand,
+                perceive_action,
             )
 
             self.register_internal_tool(
@@ -209,9 +210,42 @@ class ToolsManager(Entity):
                 ]
             )
 
+            self.register_internal_tool(
+                name="perceive_action",
+                handler=perceive_action,
+                description=_(
+                    "VOIT puis AGIT en une seule étape (méta-outil) : perçoit via un outil "
+                    "EXTERNE, ancre la cible (référence exacte de l'observation fraîche), "
+                    "puis exécute l'action hôte aussitôt. À préférer dès qu'il faut agir "
+                    "sur ce qu'on voit (clic sur une icône, lecture puis saisie). "
+                    "Avantage : aucune référence (id/case) à écrire dans le plan, donc "
+                    "aucune devinette ni référence périmée. "
+                    "Requiert 'question' + 'source_tool' + 'action_tool'. "
+                    "'action_args' : gabarit ; toute valeur EXACTEMENT égale à \"$TARGET\" "
+                    "reçoit la référence ancrée. 'target_hint' optionnel. "
+                    "Ancrage incertain = échec honnête, jamais d'action aveugle."
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string", "description": "Que trouver, en langage naturel"},
+                        "source_tool": {"type": "string", "description": "Outil perception EXTERNE (hôte)"},
+                        "source_args": {"type": "object", "description": "Arguments de la perception"},
+                        "action_tool": {"type": "string", "description": "Outil action EXTERNE (hôte)"},
+                        "action_args": {"type": "object", "description": "Gabarit d'args ($TARGET = référence ancrée)"},
+                        "target_hint": {"type": "string", "description": "Description de la cible"}
+                    },
+                    "required": ["question", "source_tool", "action_tool"]
+                },
+                capabilities=[
+                    "voir puis agir en une étape sans écrire de référence",
+                    "ancrer une cible perçue puis exécuter l'action aussitôt",
+                ]
+            )
+
             Logger.debug(
                 "[ToolsManager] Outils internes enregistrés : "
-                "extract_json_value, llm_analyze_data, llm_analyze_multi_data, execute_skill, perceive_understand."
+                "extract_json_value, llm_analyze_data, llm_analyze_multi_data, execute_skill, perceive_understand, perceive_action."
             )
         except ImportError as e:
             Logger.warning(f"[ToolsManager] Impossible d'importer les outils internes : {e}")

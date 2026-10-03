@@ -224,6 +224,7 @@ class SolverResult(BaseModel):
     breakout_report: Optional[Any] = None
     material_success_count: int = Field(default=0, description=_("Étapes tool_call convergées (actions matérielles réussies)."))
     tool_call_count: int = Field(default=0, description=_("Étapes tool_call tentées (hors sautées)."))
+    skipped_crucial_ids: List[str] = Field(default_factory=list, description=_("Étapes cruciales sautées : la mission ne peut pas converger dessus."))
     failure_class: Optional[FailureClass] = Field(
         None,
         description=_("Classe d'échec détectée par l'Executor (EXECUTION_FAILURE ou CONVERGENCE_FAILURE).")
@@ -488,6 +489,28 @@ def normalize_failure_signature(failure_class: Any, reason: Any) -> str:
     text = re.sub(r'\d+', '#', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text[:200]
+
+
+def is_quota_streak(history, threshold: int = 2) -> bool:
+    """Le quota LLM est-il la cause répétée (pur, sans LLM) ?
+
+    history = liste de (signature, actions_matérielles), signatures déjà
+    normalisées en minuscules. Vrai si les `threshold` derniers échecs
+    parlent quota/débit. Le replan ne réparera pas un quota vide : stopper
+    proprement au lieu de brûler des tentatives en spirale 429.
+    """
+    import re as _re
+    if not isinstance(history, list) or len(history) < threshold:
+        return False
+    pattern = _re.compile(r"quota|exhaust|resource_exhausted|\brate\b|d[ée]bit")
+    try:
+        tail = history[-threshold:]
+    except Exception:
+        return False
+    for sig, _ in tail:
+        if not pattern.search(str(sig or "")):
+            return False
+    return True
 
 
 def is_sterile_streak(history) -> bool:
