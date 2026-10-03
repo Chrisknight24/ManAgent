@@ -50,6 +50,21 @@ MAX_EXECUTION_TRIES = SOLVER_MAX_EXECUTION_TRIES
 MAX_PREEXECUTION_FAILURES = SOLVER_MAX_PREEXECUTION_FAILURES
 
 
+def _is_pure_direct_answer_plan(plan) -> bool:
+    """Plan 100% réponse directe : RIEN à valider (ni gates, ni juge).
+
+    Que du texte, aucune action : valider reviendrait à punir l'honnêteté
+    (refus polis rejetés en boucle). Fonction pure, testée vite.
+    """
+    steps = list(getattr(plan, "steps", []) or [])
+    if not steps:
+        return False
+    return all(
+        getattr(getattr(s, "type", None), "value", getattr(s, "type", None)) == "direct_answer"
+        for s in steps
+    )
+
+
 
 class Solver(Supervisor, Entity):
     """
@@ -504,32 +519,43 @@ class Solver(Supervisor, Entity):
                             break
 
                         previous_attempts = self.execution_tree.attempts[:-1] if self.execution_tree else []
-                        validation_outcome = await self.validate_plan(
-                            proposed_plan, self.id, previous_attempts=previous_attempts
-                        )
-                        is_valid = bool(validation_outcome)
-                        rejection_reason = getattr(
-                            validation_outcome, "reason", _("Plan refusé par le superviseur")
-                        )
-                        if not is_valid:
-                            self.runtime_state.update_marker("plan_rejected", True)
-                            Logger.warning(f"[Solver:{self.id}] Plan refusé par le superviseur : {rejection_reason}")
+                        if _is_pure_direct_answer_plan(proposed_plan):
+                            # Réponse directe pure : RIEN à valider (ni gates, ni juge).
+                            # Valider du texte reviendrait à punir l'honnêteté.
+                            Logger.info(f"[Solver:{self.id}] 🕊️ Réponse directe pure : validation sautée.")
                             Logger.event(
-                                "plan_rejected_supervisor",
+                                "plan_validation_skipped",
                                 solver_id=self.id,
                                 attempt=attempt_counter,
-                                reason=rejection_reason
+                                reason="direct_answer only"
                             )
-                            self.current_attempt.ended_at = time.time()
-                            self.current_attempt.outcome = "failed"
-                            self.current_attempt.failure_class = FailureClass.PLAN_REJECTED_SUPERVISOR
-                            self.current_attempt.failure_reason = rejection_reason
-                            self.current_attempt.target_entity = "Planner"
-                            self.context += _("\n[Échec] Plan refusé par le Superviseur : {reason}").format(reason=rejection_reason)
-                            self._preexecution_failures += 1
-                            if self._preexecution_failures >= MAX_PREEXECUTION_FAILURES:
-                                break
-                            continue
+                        else:
+                            validation_outcome = await self.validate_plan(
+                                proposed_plan, self.id, previous_attempts=previous_attempts
+                            )
+                            is_valid = bool(validation_outcome)
+                            rejection_reason = getattr(
+                                validation_outcome, "reason", _("Plan refusé par le superviseur")
+                            )
+                            if not is_valid:
+                                self.runtime_state.update_marker("plan_rejected", True)
+                                Logger.warning(f"[Solver:{self.id}] Plan refusé par le superviseur : {rejection_reason}")
+                                Logger.event(
+                                    "plan_rejected_supervisor",
+                                    solver_id=self.id,
+                                    attempt=attempt_counter,
+                                    reason=rejection_reason
+                                )
+                                self.current_attempt.ended_at = time.time()
+                                self.current_attempt.outcome = "failed"
+                                self.current_attempt.failure_class = FailureClass.PLAN_REJECTED_SUPERVISOR
+                                self.current_attempt.failure_reason = rejection_reason
+                                self.current_attempt.target_entity = "Planner"
+                                self.context += _("\n[Échec] Plan refusé par le Superviseur : {reason}").format(reason=rejection_reason)
+                                self._preexecution_failures += 1
+                                if self._preexecution_failures >= MAX_PREEXECUTION_FAILURES:
+                                    break
+                                continue
 
                         for step in proposed_plan.steps:
                             step.id = make_step_id(step.id)

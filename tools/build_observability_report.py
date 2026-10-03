@@ -818,7 +818,7 @@ def attach_llm_calls_by_mission(episodes, llm_calls, events):
     return unattached
 
 
-CODE_VALIDATION_EVENTS = ("plan_validation_decision", "plan_rejected_validation", "plan_rejected_supervisor", "skill_params_warning", "skill_params_refused")
+CODE_VALIDATION_EVENTS = ("plan_validation_decision", "plan_rejected_validation", "plan_rejected_supervisor", "plan_validation_skipped", "skill_params_warning", "skill_params_refused")
 
 
 def attach_code_validation_events(episodes, events):
@@ -2989,12 +2989,14 @@ function renderSolverNodeModern(ep, treeNode, depth) {
         attCode.forEach((cev) => {
           const evName = esc(cev.event || 'code');
           const isWarn = evName === 'skill_params_warning';
+          const isSkip = evName === 'plan_validation_skipped';
           const isOk = !isWarn && cev.is_valid !== false;
           const barColor = isWarn ? 'var(--warning)' : (isOk ? 'var(--success)' : 'var(--failure)');
           const badgeCls = isWarn ? 'badge--pending' : (isOk ? 'badge--success' : 'badge--failed');
+          const badgeTxt = isSkip ? '🕊️ SANS VALIDATION' : (isWarn ? '⚠️ AVERTISSEMENT' : '⛔ CODE');
           const why = esc(cev.reason || cev.failure_class || '');
           html += `<div style="background:var(--surface); padding:8px 12px; border-radius:6px; border-left:3px solid ${barColor}; border:1px solid var(--border); font-size:12px;">`
-            + `<span class="badge ${badgeCls}" style="font-size:10.5px; font-weight:800;">${isWarn ? '⚠️ AVERTISSEMENT' : '⛔ CODE'} · ${evName}</span>`
+            + `<span class="badge ${badgeCls}" style="font-size:10.5px; font-weight:800;">${badgeTxt} · ${evName}</span>`
             + (why ? ` <span style="color:var(--text);"><b>Raison :</b> ${why}</span>` : '')
             + `</div>`;
         });
