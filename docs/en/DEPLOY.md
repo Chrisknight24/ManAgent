@@ -26,3 +26,13 @@ pointing at a dev folder.
 - Health: wait for `runtime.ready` (15 s), then `runtime.configure`.
 - Embedding models: setup screen → `embeddings.catalog`, download with
   progress, see `HOST_CONTRACT.md` §3b–3c.
+
+## 4. After a code fix: restart the runtime
+
+- Prompts (`.md`) reload on every call: immediate effect.
+- Code (`.py`) loads at startup: **every code fix requires restarting
+  the runtime** (dev) or rebuilding + reshipping the exe.
+- Anti-trap: a run after a fix without restart tests old code with new
+  prompts — guaranteed false conclusion.
+- Landmark: `runtime.ready` carries `git_commit` + `dirty`: compare with
+  `git log` before any test.

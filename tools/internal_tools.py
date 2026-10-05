@@ -663,6 +663,11 @@ _INTERNAL_TOOL_NAMES = frozenset({
 })
 
 
+def _text(value: Any) -> str:
+    """Texte sûr depuis un arg LLM (objet -> refus honnête en aval, jamais de crash `.strip()`)."""
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _prevalidate_external(tools_mgr, tool_name: str, args) -> Optional[str]:
     """Vérifie les args AVANT l'appel hôte (schéma déclaré, agnostique).
 
@@ -702,11 +707,11 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
 
     Retourne: dict {"result": bool, "data": Any, "error_reason": str}.
     """
-    question = (args.get("question") or "").strip()
-    source_tool = (args.get("source_tool") or "").strip()
+    question = _text(args.get("question"))
+    source_tool = _text(args.get("source_tool"))
     source_args = args.get("source_args") or {}
-    source_data = (args.get("source_data") or "").strip()
-    format_response = (args.get("format_response") or "").strip()
+    source_data = _text(args.get("source_data"))
+    format_response = _text(args.get("format_response"))
 
     if not question:
         msg = _("Le paramètre 'question' est requis.")
@@ -822,12 +827,12 @@ async def perceive_action(args: Dict[str, Any], runtime_state) -> Dict[str, Any]
     Ancrage incertain (pas de référence) = échec honnête, JAMAIS d'action
     aveugle.
     """
-    question = (args.get("question") or "").strip()
-    source_tool = (args.get("source_tool") or "").strip()
+    question = _text(args.get("question"))
+    source_tool = _text(args.get("source_tool"))
     source_args = args.get("source_args") or {}
-    action_tool = (args.get("action_tool") or "").strip()
+    action_tool = _text(args.get("action_tool"))
     action_args = args.get("action_args") or {}
-    target_hint = (args.get("target_hint") or "").strip()
+    target_hint = _text(args.get("target_hint"))
 
     def _fail(msg: str) -> Dict[str, Any]:
         return {"result": False, "data": None, "error_reason": msg, "message": msg}

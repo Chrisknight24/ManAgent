@@ -95,3 +95,38 @@ def test_prompt_montre_schemas_hote():
             external_tools_description="- **vision** [perception] : requis=['mode']",
             registry_metadata="m")
         assert "{{" not in out and "vision" in out and "mode" in out
+
+
+def test_objet_a_la_place_du_texte_refus_honnete_sans_crash():
+    from tools.internal_tools import _text
+    assert _text({"a": 1}) == ""
+    assert _text(None) == ""
+    assert _text("  x  ") == "x"
+
+    tm = _mgr()
+    calls = []
+
+    async def _fake_host(name, args):
+        calls.append(name)
+        return '{"result": true, "data": {"elements": []}}'
+
+    tm.execute_tool = _fake_host
+    # target_hint objet : ignoré proprement, la perception a lieu, puis
+    # l'ancrage échoue honnêtement (aucune cible) — jamais de crash .strip().
+    out = asyncio.run(perceive_action(
+        {"question": "q ?", "source_tool": "vision",
+         "source_args": {"mode": "image"},
+         "action_tool": "mouse",
+         "action_args": {"action": "click", "cell": "$TARGET"},
+         "target_hint": {"name_contains": "Bloc-notes", "role": "ListItem"}},
+        _rs(tm)))
+    assert out["result"] is False
+    assert "strip" not in (out.get("error_reason") or "").lower()
+    assert "AttributeError" not in (out.get("error_reason") or "")
+    assert calls == ["vision"]
+
+    out2 = asyncio.run(perceive_understand(
+        {"question": {"objet": "pas un texte"}, "source_tool": "vision",
+         "source_args": {"mode": "image"}}, _rs(tm)))
+    assert out2["result"] is False
+    assert "question" in (out2.get("error_reason") or "")

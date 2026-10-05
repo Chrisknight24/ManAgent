@@ -29,3 +29,13 @@ vers un dossier de dev (ex : `C:/.../managent-data-dev`).
 
 La source ManAgent vit HORS du build Qt : `Documents/QtProjets/ManAgent/`
 (clone GitHub). Le dossier `build/` de Qt peut être effacé à tout moment.
+
+## 5. Après un fix code : relancer le runtime
+
+- Les prompts (`.md`) se rechargent à chaque appel : effet immédiat.
+- Le code (`.py`) se charge au démarrage : **tout fix code exige de
+  relancer le runtime** (dev) ou de reconstruire + relivrer l'exe.
+- Anti-piège : un run après fix sans relance teste l'ancien code avec les
+  nouveaux prompts — conclusion fausse garantie.
+- Repère : `runtime.ready` embarque `git_commit` + `dirty` : comparer avec
+  `git log` avant tout test.
