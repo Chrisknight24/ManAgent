@@ -1282,7 +1282,10 @@ class Orchestrator(Supervisor, Entity):
                     for fact in decision.learned_facts:
                         try:
                             # 1. On vectorise le fait sémantique (modèle actif de l'hôte)
-                            fact_emb = await embed_managed(self.runtime_state, fact)
+                            _store = getattr(self.runtime_state, "lesson_store", None)
+                            fact_emb = await embed_managed(
+                                self.runtime_state, fact,
+                                expect_model=getattr(_store, "embedding_model", None))
                             
                             # 2. On l'enregistre en tant que "lesson" durable
                             self.runtime_state.learner.lesson_store.upsert_lesson(

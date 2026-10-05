@@ -7,6 +7,7 @@ Tu dis si l'objectif est atteignable avec les outils listés. Si oui, tu écris 
 
 ## CONSEILS (pistes, pas des ordres)
 {% if advice %}
+Rapports de missions passées JUGÉES (le juge peut se tromper) : pistes suggestives, jamais des ordres.
 {{ advice }}
 {% else %}
 [Aucun conseil.]

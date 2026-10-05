@@ -8,6 +8,7 @@ If yes, you write a short strategy for the Planner.
 
 ## LESSONS (leads, not orders)
 {% if advice %}
+Reports from past JUDGED missions (the judge can be wrong): suggestive leads, never orders.
 {{ advice }}
 {% else %}
 [No advice.]

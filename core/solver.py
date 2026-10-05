@@ -1000,6 +1000,10 @@ class Solver(Supervisor, Entity):
                 return
             store = MissionProfileStore()
             active_model = embedding_manager.active_provider.model_name
+            try:
+                store.use_embedding_model(active_model)
+            except Exception:
+                pass
             dimension = embedding_manager.dimension
             root_mission_id = self.runtime_state.current_mission_id or self.id
 
@@ -1248,6 +1252,13 @@ class Solver(Supervisor, Entity):
             host_gov = _host_governance()
 
             profile_store = MissionProfileStore()
+            try:
+                _mgr2 = getattr(self.runtime_state, "embedding_manager", None)
+                _mid2 = getattr(_mgr2, "active_provider_id", None) if _mgr2 else None
+                if _mid2:
+                    profile_store.use_embedding_model(_mid2)
+            except Exception:
+                pass
             registry = SkillRegistry()
 
             # Concaténation de toutes les signatures de l'intention globale
@@ -1269,13 +1280,18 @@ class Solver(Supervisor, Entity):
                 
             combined_signature_text = ", ".join(signature_parts)
             
-            # Embed avec le modèle actif de l'hôte (même espace que la requête)
+            # Embed avec le modèle actif de l'hôte (même espace que la requête).
+            # Échec = pas de vecteur (comptage par hash exact uniquement) :
+            # jamais de zéros factices, ils se ressemblent tous.
             from core.embedding_service import embed_managed
+            embedding = None
             try:
-                embedding = await embed_managed(self.runtime_state, combined_signature_text)
+                embedding = await embed_managed(
+                    self.runtime_state, combined_signature_text,
+                    expect_model=getattr(profile_store, "embedding_model", None))
             except Exception as e:
-                Logger.warning(f"[Solver:{self.id}] Échec de l'embedding, fallback sur mock. {e}")
-                embedding = [0.0] * 384
+                Logger.warning(f"[Solver:{self.id}] Échec de l'embedding, comptage par hash uniquement. {e}")
+                embedding = None
                 
             # 1. Enregistrer le résultat (vectoriel) et obtenir l'ID canonique et le compte
             canonical_profile_id, consecutive_count = profile_store.record_execution_result_vectorial(

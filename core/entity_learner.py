@@ -99,7 +99,9 @@ class EntityLearner:
 
         # Générer le vecteur de la leçon consolidée (modèle actif de l'hôte)
         emb_text = f"{scope} {winner['recommendation']} {' '.join(list(all_keywords))}"
-        embedding = await embed_managed(self.runtime_state, emb_text)
+        embedding = await embed_managed(
+            self.runtime_state, emb_text,
+            expect_model=getattr(self.lesson_store, "embedding_model", None))
 
         # Créer la leçon consolidée
         new_id = self.lesson_store.create_consolidated_lesson(

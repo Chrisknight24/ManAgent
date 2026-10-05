@@ -146,6 +146,16 @@ class LessonStore:
                 self._ensure_column(conn, "lessons", "consolidated_from_id", "INTEGER")
                 self._ensure_column(conn, "lessons", "conflict_resolution", "TEXT")
                 self._ensure_column(conn, "lessons", "embedding", "BLOB")
+                self._ensure_column(conn, "lessons", "embedding_model", "TEXT")
+                # Lignes historiques sans modèle = espace MiniLM d'origine.
+                try:
+                    from embeddings.catalog import HISTORIC_MODEL_ID
+                    cursor.execute(
+                        "UPDATE lessons SET embedding_model = ? "
+                        "WHERE embedding_model IS NULL",
+                        (HISTORIC_MODEL_ID,))
+                except Exception:
+                    pass
 
                 self._ensure_extension_loaded(conn)
                 cursor.execute(f'''
@@ -166,13 +176,22 @@ class LessonStore:
     def upsert_lesson(self, entity_type: str, scope: str, recommendation: str,
                    environment: str = "simulated", keywords: Optional[List[str]] = None,
                    mission_id: Optional[str] = None, polarity: str = "avoid",
-                   embedding: Optional[List[float]] = None) -> None:
+                   embedding: Optional[List[float]] = None,
+                   embedding_model: Optional[str] = None) -> None:
         """
         Ajoute une nouvelle leçon brute (ne met pas à jour l'existante).
         Pour la consolidation, on veut des lignes distinctes.
+        Même espace uniquement : on ne renforce/contrarie que les lignes du
+        même modèle (sinon MiniLM vs BGE se mélangeraient à dim égale).
         """
         keywords = (keywords or [])[:self.MAX_KEYWORDS_PER_CALL]
         blob = self._serialize_embedding(embedding) if embedding else None
+        model = embedding_model or self.embedding_model
+        try:
+            from embeddings.catalog import HISTORIC_MODEL_ID
+            legacy_model = HISTORIC_MODEL_ID
+        except Exception:
+            legacy_model = "sentence-transformers/all-MiniLM-L6-v2"
         try:
             with self._get_connection() as conn:
                 self._ensure_extension_loaded(conn)
@@ -182,11 +201,14 @@ class LessonStore:
                 # Lissage de Laplace cohérent avec la naissance (2/3) :
                 # preuve 2 → 0.75, preuve 3 → 0.80, plafond 0.95.
                 norm = " ".join(str(recommendation or "").lower().split())
+                _model_filter = "AND (embedding_model = ? OR embedding_model IS NULL)"
+                _model_value = model or legacy_model
                 cursor.execute(
                     "SELECT id, evidence_count, keywords_json, source_episodes_json, polarity "
                     "FROM lessons WHERE entity_type = ? AND scope = ? AND environment = ? "
+                    f"{_model_filter} "
                     "AND is_active = 1 ORDER BY id DESC LIMIT 20",
-                    (entity_type, scope, environment),
+                    (entity_type, scope, environment, _model_value),
                 )
                 rows = cursor.fetchall()
                 opposite_ids = []
@@ -250,8 +272,9 @@ class LessonStore:
                     cursor.execute(
                         "SELECT id, evidence_count, keywords_json FROM lessons "
                         "WHERE scope = ? AND LOWER(TRIM(recommendation)) = ? "
+                        f"{_model_filter} "
                         "ORDER BY id DESC LIMIT 5",
-                        (scope, norm),
+                        (scope, norm, _model_value),
                     )
                     for row in cursor.fetchall():
                         lid, ev, kw_json = row[0], row[1], row[2]
@@ -275,13 +298,13 @@ class LessonStore:
                         entity_type, scope, recommendation, environment,
                         confidence, evidence_count, keywords_json,
                         source_episodes_json, polarity,
-                        is_consolidated, is_active, embedding
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?)
+                        is_consolidated, is_active, embedding, embedding_model
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)
                 ''', (entity_type, scope, recommendation, environment,
                     initial_confidence, 1,
                     json.dumps(sorted(set(keywords)), ensure_ascii=False),
                     json.dumps(sources, ensure_ascii=False),
-                    polarity, blob))
+                    polarity, blob, model))
                 
                 lesson_id = cursor.lastrowid
                 if blob:
@@ -448,7 +471,8 @@ class LessonStore:
                                     contradiction_count: int, keywords: List[str],
                                     polarity: str, source_episodes: List[str],
                                     conflict_resolution: Optional[str] = None,
-                                    embedding: Optional[List[float]] = None) -> int:
+                                    embedding: Optional[List[float]] = None,
+                                    embedding_model: Optional[str] = None) -> int:
         blob = self._serialize_embedding(embedding) if embedding else None
         try:
             with self._get_connection() as conn:
@@ -459,15 +483,17 @@ class LessonStore:
                         entity_type, scope, environment, is_consolidated,
                         consolidated_from_id, recommendation, confidence,
                         evidence_count, contradiction_count, keywords_json,
-                        source_episodes_json, polarity, conflict_resolution, embedding
-                    ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        source_episodes_json, polarity, conflict_resolution, embedding,
+                        embedding_model
+                    ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     entity_type, scope, environment,
                     from_lesson_id, recommendation, confidence,
                     evidence_count, contradiction_count,
                     json.dumps(keywords, ensure_ascii=False),
                     json.dumps(source_episodes, ensure_ascii=False),
-                    polarity, conflict_resolution, blob
+                    polarity, conflict_resolution, blob,
+                    embedding_model or self.embedding_model
                 ))
                 new_id = cursor.lastrowid
                 if blob:
@@ -525,6 +551,15 @@ class LessonStore:
                 
                 placeholders = ",".join("?" for _ in expanded_entities)
                 
+                _active_model = self.embedding_model or ""
+                # Sans modèle actif connu : pas de filtre (compat tests/legacy).
+                # Avec modèle : même espace uniquement (NULL = lignes historiques,
+                # déjà migrées vers l'espace d'origine à l'init).
+                _model_filter = ""
+                _model_params: list = []
+                if _active_model:
+                    _model_filter = "AND (embedding_model = ? OR embedding_model IS NULL)"
+                    _model_params = [_active_model]
                 if include_semantic_facts:
                     sql = f"""
                         SELECT id, entity_type, scope, recommendation, confidence,
@@ -533,8 +568,9 @@ class LessonStore:
                         FROM lessons
                         WHERE is_active = 1
                           AND (entity_type IN ({placeholders}) OR scope = 'semantic_fact')
+                          {_model_filter}
                     """
-                    cursor.execute(sql, expanded_entities)
+                    cursor.execute(sql, expanded_entities + _model_params)
                 else:
                     sql = f"""
                         SELECT id, entity_type, scope, recommendation, confidence,
@@ -544,8 +580,9 @@ class LessonStore:
                         WHERE is_active = 1
                           AND entity_type IN ({placeholders})
                           AND (scope IS NULL OR scope != 'semantic_fact')
+                          {_model_filter}
                     """
-                    cursor.execute(sql, expanded_entities)
+                    cursor.execute(sql, expanded_entities + _model_params)
                     
                 rows = cursor.fetchall()
                 
@@ -626,12 +663,19 @@ class LessonStore:
             with self._get_connection() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
-                cursor.execute('''
+                _active_model = self.embedding_model or ""
+                _model_filter = ""
+                _model_params: list = []
+                if _active_model:
+                    _model_filter = "AND (embedding_model = ? OR embedding_model IS NULL)"
+                    _model_params = [_active_model]
+                cursor.execute(f'''
                     SELECT id, scope, recommendation, confidence, evidence_count,
                            created_at, last_verified_at
                     FROM lessons
                     WHERE is_active = 1 AND scope = 'semantic_fact' AND environment = ?
-                ''', (environment,))
+                    {_model_filter}
+                ''', (environment, *_model_params))
                 scored = []
                 for row in cursor.fetchall():
                     d = dict(row)

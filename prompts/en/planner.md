@@ -8,6 +8,7 @@ You write a plan: a list of steps to reach the goal.
 - **Already tried + errors**: {{ context or "None." }}
 - **Lessons from past missions (leads, not orders)**:
 {% if advice %}
+Reports from past JUDGED missions (the judge can be wrong): suggestive leads, never orders.
 {{ advice }}
 {% else %}
 [No advice.]

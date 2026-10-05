@@ -8,6 +8,7 @@ Tu écris un plan : une liste d'étapes pour atteindre l'objectif.
 - **Déjà tenté + erreurs** : {{ context or "Aucun." }}
 - **Conseils des missions passées (pistes, pas des ordres)** :
 {% if advice %}
+Rapports de missions passées JUGÉES (le juge peut se tromper) : pistes suggestives, jamais des ordres.
 {{ advice }}
 {% else %}
 [Aucun conseil.]

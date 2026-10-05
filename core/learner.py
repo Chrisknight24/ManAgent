@@ -124,7 +124,9 @@ class Analyzer:
             keywords = []
 
         emb_text = f"{scope} {recommendation} {' '.join(keywords)}"
-        embedding = await embed_managed(self.runtime_state, emb_text)
+        embedding = await embed_managed(
+            self.runtime_state, emb_text,
+            expect_model=getattr(self.lesson_store, "embedding_model", None))
 
         self.lesson_store.upsert_lesson(
             entity_type="Presentator", scope=scope, recommendation=recommendation,
@@ -209,7 +211,9 @@ class Analyzer:
             return
 
         emb_text = f"{scope} {recommendation} {' '.join(keywords)}"
-        embedding = await embed_managed(self.runtime_state, emb_text)
+        embedding = await embed_managed(
+            self.runtime_state, emb_text,
+            expect_model=getattr(self.lesson_store, "embedding_model", None))
 
         self.lesson_store.upsert_lesson(
             entity_type=entity_type, scope=scope, recommendation=recommendation,
@@ -267,7 +271,9 @@ class Analyzer:
             return
 
         emb_text = f"{scope} {recommendation} {' '.join(keywords)}"
-        embedding = await embed_managed(self.runtime_state, emb_text)
+        embedding = await embed_managed(
+            self.runtime_state, emb_text,
+            expect_model=getattr(self.lesson_store, "embedding_model", None))
 
         self.lesson_store.upsert_lesson(
             entity_type=entity_type, scope=scope, recommendation=recommendation,

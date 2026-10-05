@@ -251,14 +251,16 @@ class MissionProfileStore:
         clean_state = clean_signature_str(desired_state) if desired_state else ""
         sig_hash = self.compute_hash(clean_act, clean_obj) if clean_act and clean_obj else None
 
-        # 1. Tenter la recherche vectorielle avec un seuil de similarité plus souple (distance <= 0.35 -> similarity >= 0.65)
-        try:
-            similar = self.get_similar_profiles(query_embedding=embedding, top_k=1, threshold=0.35)
-            if similar:
-                canonical_profile_id = similar[0]["id"]
-                Logger.debug(f"[MissionProfileStore] Matching vectoriel réussi (sim={similar[0]['similarity']:.2f}) -> Profil ID {canonical_profile_id}")
-        except Exception as e:
-            Logger.debug(f"[MissionProfileStore] Matching vectoriel échoué ou non disponible : {e}")
+        # 1. Tenter la recherche vectorielle avec un seuil de similarité plus souple (distance <= 0.35 -> similarity >= 0.65).
+        # Sans vecteur : on saute (le hash exact ci-dessous prend le relais).
+        if embedding:
+            try:
+                similar = self.get_similar_profiles(query_embedding=embedding, top_k=1, threshold=0.35)
+                if similar:
+                    canonical_profile_id = similar[0]["id"]
+                    Logger.debug(f"[MissionProfileStore] Matching vectoriel réussi (sim={similar[0]['similarity']:.2f}) -> Profil ID {canonical_profile_id}")
+            except Exception as e:
+                Logger.debug(f"[MissionProfileStore] Matching vectoriel échoué ou non disponible : {e}")
 
         try:
             with self._get_connection() as conn:
@@ -295,14 +297,17 @@ class MissionProfileStore:
                         conn.commit()
                         return (canonical_profile_id, new_successes)
 
-                # 3. Si aucun profil existant, on l'insère (utilise insert_profile pour gérer le BLOB)
+                # 3. Si aucun profil existant, on l'insère (utilise insert_profile pour gérer le BLOB).
+                # Modèle/dimension du store (synchronisé à l'hôte), jamais les défauts.
                 profile_id = self.insert_profile(
                     mission_id=f"sig_{now}", # Placeholder
                     signature_text=signature_text,
                     embedding=embedding,
                     action=clean_act,
                     object=clean_obj,
-                    desired_state=clean_state
+                    desired_state=clean_state,
+                    embedding_model=self.embedding_model,
+                    embedding_dimension=self._vector_dim,
                 )
                 
                 new_successes = 1 if is_success else 0
@@ -400,7 +405,7 @@ class MissionProfileStore:
         self,
         mission_id: str,
         signature_text: str,
-        embedding: List[float],
+        embedding: Optional[List[float]],
         action: Optional[str] = None,
         object: Optional[str] = None,
         desired_state: Optional[str] = None,
@@ -412,6 +417,9 @@ class MissionProfileStore:
     ) -> int:
         """
         Insère un MissionProfile vectoriel.
+        embedding None = comptage par hash exact uniquement, sans vecteur
+        (jamais de zéros factices : des zéros se ressemblent tous et
+        créeraient de faux appariements).
         """
         if embedding_model is None:
             embedding_model = _default_embedding_model()
@@ -437,19 +445,23 @@ class MissionProfileStore:
                     embedding_model, embedding_dimension, root_mission_id)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (mission_id, signature_text, sig_hash, action, object, desired_state,
-                    self._serialize_embedding(embedding),
+                    (self._serialize_embedding(embedding) if embedding else None),
                     signature_index, signature_count,
                     embedding_model, embedding_dimension, root_id))
                 profile_id = cursor.lastrowid
 
                 # Insertion dans la table virtuelle vectorielle si elle existe
-                try:
-                    cursor.execute(f"""
-                        INSERT INTO {self._vec_table} (rowid, embedding)
-                        VALUES (?, ?)
-                    """, (profile_id, self._serialize_embedding(embedding)))
-                except Exception:
-                    pass
+                # (seulement avec un vrai vecteur, jamais de zéros factices :
+                # des zéros se ressemblent tous et créeraient de faux matchs).
+                _blob = self._serialize_embedding(embedding) if embedding else None
+                if _blob:
+                    try:
+                        cursor.execute(f"""
+                            INSERT INTO {self._vec_table} (rowid, embedding)
+                            VALUES (?, ?)
+                        """, (profile_id, _blob))
+                    except Exception:
+                        pass
 
                 conn.commit()
                 Logger.debug(f"[MissionProfileStore] Profile inséré : {mission_id} / {signature_text} (root={root_id})")

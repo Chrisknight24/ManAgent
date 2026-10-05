@@ -133,6 +133,12 @@ class EmbeddingService:
         except AttributeError:
             return self._model.get_sentence_embedding_dimension()
 
+    def effective_model_id(self) -> str:
+        """Id du modèle réellement servi (pour ne jamais étiqueter un vecteur au mauvais espace)."""
+        if self._lite:
+            return "lite-hash"
+        return self.model_name or EmbeddingService.DEFAULT_MODEL
+
 
 _embedding_service_instance: Optional[EmbeddingService] = None
 
@@ -146,12 +152,14 @@ async def embed_text(text: str) -> List[float]:
     return await get_embedding_service().embed(text)
 
 
-async def embed_managed(runtime_state, text: str) -> List[float]:
+async def embed_managed(runtime_state, text: str, expect_model: Optional[str] = None) -> Optional[List[float]]:
     """Source unique de vérité : le provider actif choisi par l'hôte.
 
     Stockage ET requête passent ici, donc même modèle des deux côtés —
     fini les leçons écrites en mini et relues en BGE (cosinus poubelle).
-    Sans provider actif : repli singleton historique (MiniLM/hash).
+    expect_model = l'espace où le vecteur sera stocké : si le repli ne peut
+    pas le fournir, on rend None (invisible mais sain) au lieu d'un vecteur
+    d'un autre espace. Sans expect_model : comportement historique.
     """
     try:
         mgr = getattr(runtime_state, "embedding_manager", None)
@@ -159,4 +167,16 @@ async def embed_managed(runtime_state, text: str) -> List[float]:
             return await mgr.embed(text)
     except Exception as e:
         Logger.warning(f"[embed_managed] Provider actif indisponible, repli singleton : {e}")
-    return await embed_text(text)
+    fallback = await embed_text(text)
+    if expect_model:
+        try:
+            served = get_embedding_service().effective_model_id()
+        except Exception:
+            served = None
+        if served is not None and served != expect_model:
+            Logger.warning(
+                f"[embed_managed] Repli {served} incompatible avec l'espace attendu "
+                f"({expect_model}) : pas de vecteur plutôt qu'un vecteur menteur."
+            )
+            return None
+    return fallback
