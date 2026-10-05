@@ -306,6 +306,39 @@ def _tool_declares_media(tool_name: str, tool_returns: Any) -> bool:
     )
 
 
+def find_invalid_perceive_sources(plan: Any, known_tool_names=None) -> List[str]:
+    """Sources de `perceive_understand` inconnues (gate anti-nom-en-dur).
+
+    Agnostique (indépendant de l'hôte) : jamais de nom en dur ici.
+    On refuse seulement une source qui n'est ni au manifeste connu
+    ni une variable déjà disponible (source_data).
+    Sans référentiel (None) : pas de vérification (rétro-compat).
+    Fonction pure, testable vite.
+    Retourne ["step_id: source_tool=X", ...].
+    """
+    if known_tool_names is None:
+        return []
+    known = set(known_tool_names or [])
+    bad: List[str] = []
+    for step in getattr(plan, "steps", []) or []:
+        stype = getattr(getattr(step, "type", None), "value", getattr(step, "type", None))
+        if stype != "tool_call":
+            continue
+        tname = (getattr(step, "tool_name", None) or "").strip()
+        if tname != "perceive_understand":
+            continue
+        args = _parse_step_args(getattr(step, "tool_args_json", "{}"))
+        src_tool = str(args.get("source_tool") or "").strip()
+        src_data = str(args.get("source_data") or "").strip()
+        if src_data:
+            continue
+        if not src_tool:
+            continue  # déjà refusé par Pydantic (source requise)
+        if src_tool not in known:
+            bad.append(f"{getattr(step, 'id', '?')}: source_tool={src_tool}")
+    return bad
+
+
 def find_direct_perception_calls(plan: Any, perception_tool_names=None, tool_returns=None) -> List[str]:
     """Étapes tool_call directes vers un outil de perception externe.
 
@@ -841,6 +874,7 @@ class PlanValidator:
         reserved = find_reserved_plan_tools(plan)
         direct_perception = find_direct_perception_calls(plan, self._perception_tools, self._tool_returns)
         unresolved = find_unresolved_plan_refs(plan)
+        bad_sources = find_invalid_perceive_sources(plan, self._available_tools)
         problems = [f"inconnu:{u}" for u in unknown]
         problems += [f"args illisibles étape:{s}" for s in malformed]
         problems += [f"outil réservé au validateur étape:{s}" for s in reserved]
@@ -849,6 +883,10 @@ class PlanValidator:
             f"perception directe interdite étape:{s} "
             "(lire le monde uniquement via perceive_understand)"
             for s in direct_perception
+        ]
+        problems += [
+            f"source inconnue {u} (source_tool doit être un outil listé ou utilisez source_data)"
+            for u in bad_sources
         ]
         if problems:
             details = ", ".join(problems[:8])

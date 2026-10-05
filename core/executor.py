@@ -1116,6 +1116,18 @@ class Executor:
         expected_clean = expected.strip().lower()
 
         if expected_clean == "any":
+            # "any" accepte toute VALEUR, jamais un ÉCHEC.
+            # Un outil qui rend result=False reste un échec même si le plan dit "any".
+            if raw_success_flag:
+                flag_clean = raw_success_flag.strip().lower()
+                if flag_clean == "false":
+                    reason = _("Rejet matériel : L'outil a échoué, même si le plan acceptait toute valeur ('any').")
+                    if supplemental_data:
+                        reason += f" Raison de l'outil : {supplemental_data}"
+                    return False, reason
+            actual_clean = (actual or "").strip().lower()
+            if actual_clean.startswith("erreur") or actual_clean.startswith("error"):
+                return False, _("Rejet matériel : L'outil a renvoyé une erreur, même si le plan acceptait toute valeur ('any').")
             return True, _("Convergence acceptée : Le plan accepte toute valeur de retour pour traitement conditionnel ultérieur.")
 
         if expected_clean not in ["true", "false"]:

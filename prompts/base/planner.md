@@ -93,7 +93,7 @@ Pas de `.result`, pas de `IN`/`CONTAINS`, pas de fonctions. Combinaisons avec `a
 ## LIRE LE MONDE
 
 Avec `perceive_understand`. Il lit et explique en une étape.
-Appelle `perceive`, `get_image`, `get_annotated_image` seulement comme son `source_tool`. `get_annotated_image` si la question porte sur l'aspect de l'écran. `perceive` s'il faut des identifiants pour cliquer. Écris dans `question` tout ce que la réponse doit contenir.
+`source_tool` = recopie exacte d'un outil `[perception]` listé dans OUTILS ci-dessus. N'invente aucun nom d'outil hôte. Sans outil `[perception]` listé : utilise `source_data` (variable existante) ou termine en `direct_answer`. Écris dans `question` tout ce que la réponse doit contenir.
 Le résultat `$@_data_step_N` EST la réponse quand la question la demande : n'ajoute pas d'analyse derrière sans raison. `llm_analyze_data` sert seulement pour des données déjà en variable (fichier, long texte).
 
 ## APRÈS UN REJET
@@ -105,15 +105,16 @@ Tu reçois l'erreur, ton plan rejeté et la liste des noms valides. Corrige exac
 ## EXEMPLE 1 : lire l'écran
 
 Objectif : décris les fenêtres ouvertes et l'heure de l'horloge. Réponds en français.
+Exemples illustratifs : recopie toujours un vrai nom d'outil `[perception]` de OUTILS, jamais le placeholder.
 
-- step_1, `tool_call`, `perceive_understand`, `{"question": "Liste chaque fenêtre ouverte (titre) et l'heure de l'horloge.", "source_tool": "get_annotated_image", "source_args": {}}`
+- step_1, `tool_call`, `perceive_understand`, `{"question": "Liste chaque fenêtre ouverte (titre) et l'heure de l'horloge.", "source_tool": "<UN_OUTIL_[perception]_DE_OUTILS>", "source_args": {}}`
 - step_2, `direct_answer`, `Voici ce que je vois : $@_data_step_1`
 
 ## EXEMPLE 2 : brancher sur un fait
 
 Objectif : dis si la calculette est ouverte.
 
-- step_1, `tool_call`, `perceive_understand`, `{"question": "Une fenêtre Calculette est-elle ouverte ? Réponds yes or no.", "source_tool": "get_annotated_image", "source_args": {}, "format_response": "yes or no"}`
+- step_1, `tool_call`, `perceive_understand`, `{"question": "Une fenêtre Calculette est-elle ouverte ? Réponds yes or no.", "source_tool": "<UN_OUTIL_[perception]_DE_OUTILS>", "source_args": {}, "format_response": "yes or no"}`
 - step_2, `direct_answer`, `La calculette est ouverte.`, `execute_if` = `$@_data_step_1 == "yes"`
 - step_3, `direct_answer`, `La calculette est fermée.`, `execute_if` = `$@_data_step_1 == "no"`
 

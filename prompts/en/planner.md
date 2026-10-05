@@ -93,7 +93,7 @@ No `.result`, no `IN`/`CONTAINS`, no functions. Combine with `and` / `or`.
 ## READING THE WORLD
 
 With `perceive_understand`. It reads and explains in one step.
-Call `perceive`, `get_image`, `get_annotated_image` only as its `source_tool`. `get_annotated_image` when the question is about what the screen looks like. `perceive` when you need element ids for a click. Write in `question` everything the answer must contain.
+`source_tool` = exact copy of a `[perception]` tool listed in TOOLS above. Never invent a host tool name. With no `[perception]` tool listed: use `source_data` (existing variable) or finish with `direct_answer`. Write in `question` everything the answer must contain.
 The `$@_data_step_N` result IS the answer when the question asks for it: add no analysis after it without a reason. `llm_analyze_data` is only for data already in a variable (file, long text).
 
 ## AFTER A REJECTION
@@ -105,15 +105,16 @@ You receive the error, your rejected plan and the list of valid names. Fix exact
 ## EXAMPLE 1: read the screen
 
 Goal: describe the open windows and the clock time. Reply in French.
+Illustrative examples: always copy a real `[perception]` tool name from TOOLS, never the placeholder.
 
-- step_1, `tool_call`, `perceive_understand`, `{"question": "List every open window (title) and the clock time.", "source_tool": "get_annotated_image", "source_args": {}}`
+- step_1, `tool_call`, `perceive_understand`, `{"question": "List every open window (title) and the clock time.", "source_tool": "<A_[perception]_TOOL_FROM_TOOLS>", "source_args": {}}`
 - step_2, `direct_answer`, `Voici ce que je vois : $@_data_step_1`
 
 ## EXAMPLE 2: branch on a fact
 
 Goal: say if the Calculator window is open.
 
-- step_1, `tool_call`, `perceive_understand`, `{"question": "Is a Calculator window open? Answer yes or no.", "source_tool": "get_annotated_image", "source_args": {}, "format_response": "yes or no"}`
+- step_1, `tool_call`, `perceive_understand`, `{"question": "Is a Calculator window open? Answer yes or no.", "source_tool": "<A_[perception]_TOOL_FROM_TOOLS>", "source_args": {}, "format_response": "yes or no"}`
 - step_2, `direct_answer`, `The Calculator is open.`, `execute_if` = `$@_data_step_1 == "yes"`
 - step_3, `direct_answer`, `The Calculator is closed.`, `execute_if` = `$@_data_step_1 == "no"`
 

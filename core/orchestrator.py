@@ -2018,12 +2018,14 @@ class Orchestrator(Supervisor, Entity):
                 find_malformed_step_args,
                 find_reserved_plan_tools,
                 find_direct_perception_calls,
+                find_invalid_perceive_sources,
                 repair_direct_perception_calls,
             )
             _only_perception = (
                 not find_unknown_plan_tools(plan, _known_tools, _prod_skills)
                 and not find_malformed_step_args(plan)
                 and not find_reserved_plan_tools(plan)
+                and not find_invalid_perceive_sources(plan, _known_tools)
                 and bool(find_direct_perception_calls(plan, _perception_tools, _tool_returns))
             )
             if _only_perception:
