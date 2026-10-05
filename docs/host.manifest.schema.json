@@ -19,6 +19,7 @@
         "properties": {
           "name": { "type": "string" },
           "kind": { "type": "string", "enum": ["perception", "action", "utility"] },
+          "effects": { "type": "string", "enum": ["deterministic", "uncertain"], "description": "Optional. Undeclared action = uncertain (cautious). See docs/ALIGNMENT.md." },
           "description": { "type": "string" },
           "parameters": { "type": "object" },
           "returns": {

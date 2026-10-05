@@ -942,6 +942,7 @@ class Solver(Supervisor, Entity):
         tools_view = await self.runtime_state.tools_manager.get_tools_view(goal_query=self.goal)
         formatted_tools = [
             f"- {t['name']} [{t.get('kind', 'action')}] ({t['role']}): {t['description']}"
+            + (" [effet incertain]" if t.get("name") in self.runtime_state.tools_manager.uncertain_tool_names() else "")
             for t in tools_view
         ]
         try:
@@ -949,6 +950,16 @@ class Solver(Supervisor, Entity):
                 "_kinds_legend.md", lang=self.runtime_state.language)
         except Exception:
             tools_guidance = ""
+        try:
+            from core.alignment import toolset_nudge
+            _nudge = toolset_nudge([
+                t for t in tools_view
+                if isinstance(t, dict) and str(t.get("source") or "external") == "external"
+            ])
+            if _nudge:
+                tools_guidance = (tools_guidance + "\n\n" + _nudge).strip()
+        except Exception:
+            pass
 
         skills_text = self._format_candidate_skills(getattr(self, "_candidate_skills", []) or [])
 
@@ -1183,6 +1194,22 @@ class Solver(Supervisor, Entity):
             except Exception:
                 pass
             evidence = "\n".join(p for p in evidence_parts if p)[:1500]
+            try:
+                from core.alignment import plan_risk, risk_sentence
+                _tm = getattr(self.runtime_state, "tools_manager", None)
+                _uncertain = set(_tm.uncertain_tool_names()) if _tm is not None and hasattr(_tm, "uncertain_tool_names") else set()
+                _perception = set(_tm.perception_tool_names()) if _tm is not None and hasattr(_tm, "perception_tool_names") else set()
+                _executed_tools = []
+                try:
+                    for _node in getattr(getattr(self, "current_attempt", None), "nodes", []) or []:
+                        _tname = getattr(_node, "tool_name", None)
+                        if _tname:
+                            _executed_tools.append(str(_tname))
+                except Exception:
+                    pass
+                alignment_note = risk_sentence(plan_risk(_executed_tools, _uncertain, _perception))
+            except Exception:
+                alignment_note = ""
             prompt = loader.load(
                 "convergence.md",
                 lang=self.runtime_state.language,
@@ -1190,6 +1217,7 @@ class Solver(Supervisor, Entity):
                 expected_result=self.goal,
                 actual_result=evidence or _("(aucune preuve textuelle disponible)"),
                 tool_status="OK",
+                alignment_note=alignment_note,
             )
             conv_llm = self.llm
             try:

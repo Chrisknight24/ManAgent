@@ -13,6 +13,9 @@ Tu es un module expert chargé de vérifier si le résultat d'une étape (ou sou
 - **Description de l'étape** : {{ step_description }}
 - **Résultat attendu** : {{ expected_result }}
 - **Résultat réel** : {{ actual_result }}
+{% if alignment_note %}
+- **Fait alignement (calculé, pas une opinion)** : {{ alignment_note }}
+{% endif %}
 
 ## RÉPONSE
 Génère une décision structurée au format JSON avec `is_convergent` (booléen) et `reason` (chaîne expliquant la décision).

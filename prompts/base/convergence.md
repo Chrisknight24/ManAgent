@@ -14,6 +14,9 @@ Tu es un module expert chargé de vérifier si le résultat d'une étape (ou sou
 - **Résultat attendu** : {{ expected_result }}
 - **Statut outil** : {{ tool_status }} (`OK` = l'appel a marché, `FAILED` = raté, `UNKNOWN` = on ne sait pas — fie-toi au texte dans ce cas)
 - **Résultat réel (preuves, pas des métadonnées)** : {{ actual_result }}
+{% if alignment_note %}
+- **Fait alignement (calculé, pas une opinion)** : {{ alignment_note }}
+{% endif %}
 
 ## RÉPONSE
 Génère une décision structurée au format JSON avec `is_convergent` (booléen) et `reason` (chaîne expliquant la décision).

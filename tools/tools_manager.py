@@ -416,7 +416,7 @@ class ToolsManager(Entity):
             return self.runtime_state.host_manifest
         return None
 
-    def register_tool(self, name: str, role: str, description: str, parameters_schema: dict, source: str = "external", kind: str = "action", returns: Optional[List[Dict]] = None) -> None:
+    def register_tool(self, name: str, role: str, description: str, parameters_schema: dict, source: str = "external", kind: str = "action", returns: Optional[List[Dict]] = None, effects: Optional[str] = None) -> None:
         self._tools[name] = {
             "name": name,
             "role": role,
@@ -425,6 +425,7 @@ class ToolsManager(Entity):
             "parameters": parameters_schema,
             "source": source,
             "returns": list(returns or []),
+            "effects": (effects or "").strip().lower() or None,
         }
         Logger.debug(f"[ToolsManager] Outil enregistré : {name} (source={source}, kind={kind})")
 
@@ -478,6 +479,7 @@ class ToolsManager(Entity):
                 source=tool_def.get("source", "external"),
                 kind=tool_def.get("kind", "action"),
                 returns=tool_def.get("returns"),
+                effects=tool_def.get("effects"),
             )
 
     async def get_tools_view(self, goal_query: str = None) -> List[Dict]:
@@ -497,6 +499,17 @@ class ToolsManager(Entity):
             if isinstance(t, dict) and t.get("source", "external") == "external"
             and (t.get("kind") or "action") == "perception"
         }
+
+    def uncertain_tool_names(self) -> set:
+        """Outils EXTERNES d'action à effet incertain (voir docs/ALIGNMENT.md).
+
+        Explicite `effects: deterministic` > défaut prudent (`[action]` =
+        incertain). Perception/utilitaires exclus. Pur hormis la lecture.
+        """
+        from core.alignment import uncertain_names
+        return uncertain_names([
+            t for t in (self._tools or {}).values() if isinstance(t, dict)
+        ])
 
     def known_tool_names(self) -> set:
         """Noms d'outils connus (externes + internes + manifeste), sans valider les args.

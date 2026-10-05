@@ -6,6 +6,7 @@
     {
       "name": "cliquer",
       "kind": "action",
+      "effects": "uncertain",
       "description": "Clique à un endroit de l'écran. Renvoie true si le clic est parti.",
       "parameters": {
         "type": "object",
