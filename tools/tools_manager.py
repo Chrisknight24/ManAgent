@@ -376,6 +376,24 @@ class ToolsManager(Entity):
                 lines.append(f"  Paramètres : {meta['parameters']}")
         return "\n".join(lines) if lines else "Aucun outil interne disponible."
 
+    def _get_external_tools_description(self) -> str:
+        """Schémas des outils HÔTE pour le prompt (le LLM ne devine plus les args).
+
+        Compact : nom + kind + params requis. Pur hormis la lecture.
+        """
+        lines = []
+        for name in sorted((self._tools or {}).keys()):
+            tool = self._tools.get(name)
+            if not isinstance(tool, dict):
+                continue
+            if str(tool.get("source") or "external") != "external":
+                continue
+            params = tool.get("parameters") or {}
+            required = params.get("required", []) if isinstance(params, dict) else []
+            kind = tool.get("kind") or "action"
+            lines.append(f"- **{name}** [{kind}] : requis={list(required) or 'aucun'}")
+        return "\n".join(lines) if lines else "Aucun outil hôte déclaré."
+
     # =====================================================
     # OUTILS EXTERNES
     # =====================================================
@@ -1071,6 +1089,7 @@ class ToolsManager(Entity):
             Logger.warning("[ToolsManager] Aucun registre temporaire trouvé.")
 
         internal_tools_description = self._get_internal_tools_description()
+        external_tools_description = self._get_external_tools_description()
 
         prompt = self._prompt_loader.load(
             "tools_manager_analysis.md",
@@ -1078,6 +1097,7 @@ class ToolsManager(Entity):
             request=request,
             context=context,
             internal_tools_description=internal_tools_description,
+            external_tools_description=external_tools_description,
             registry_metadata=registry_metadata_str
         )
 

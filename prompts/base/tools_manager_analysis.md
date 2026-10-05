@@ -8,6 +8,14 @@ Tu es le ToolsManager. Tu dois interpréter une requête et sélectionner un out
 - **Variables disponibles** : {{ registry_metadata }}
 - **Outils disponibles** : {{ internal_tools_description }}
 
+## OUTILS HÔTE (schémas réels — recopie les params, n'invente rien)
+
+{{ external_tools_description }}
+
+Quand tu appelles un sous-outil qui délègue à un outil hôte (`source_tool`,
+`action_tool`), les args transmis doivent respecter son schéma ci-dessus
+(params requis présents). En cas de doute, `success: false`.
+
 ---
 
 ## RÈGLES OBLIGATOIRES

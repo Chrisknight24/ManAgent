@@ -663,6 +663,25 @@ _INTERNAL_TOOL_NAMES = frozenset({
 })
 
 
+def _prevalidate_external(tools_mgr, tool_name: str, args) -> Optional[str]:
+    """Vérifie les args AVANT l'appel hôte (schéma déclaré, agnostique).
+
+    Retourne None si appelable, sinon le motif honnête (params requis).
+    Outil inconnu ici = on laisse `execute_tool` répondre (comportement
+    inchangé). Fonction pure de lecture, jamais de faux refus.
+    """
+    try:
+        known = getattr(tools_mgr, "_tools", None) or {}
+        if not (isinstance(known, dict) and tool_name in known):
+            return None
+        tools_mgr.validate_tool_call(tool_name, dict(args or {}))
+        return None
+    except ValueError as e:
+        return str(e)
+    except Exception:
+        return None
+
+
 async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, Any]:
     """
     Méta-outil de lecture : perçoit le monde via un outil EXTERNE (hôte),
@@ -709,6 +728,10 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
         tools_mgr = getattr(runtime_state, "tools_manager", None)
         if tools_mgr is None or not hasattr(tools_mgr, "execute_tool"):
             msg = _("Aucun gestionnaire d'outils pour appeler la source.")
+            return {"result": False, "data": None, "error_reason": msg, "message": msg}
+        _bad = _prevalidate_external(tools_mgr, source_tool, source_args)
+        if _bad:
+            msg = _("La source '{tool}' est mal appelée : {err}").format(tool=source_tool, err=_bad)
             return {"result": False, "data": None, "error_reason": msg, "message": msg}
         try:
             result_str = await tools_mgr.execute_tool(source_tool, dict(source_args))
@@ -820,6 +843,17 @@ async def perceive_action(args: Dict[str, Any], runtime_state) -> Dict[str, Any]
     tools_mgr = getattr(runtime_state, "tools_manager", None)
     if tools_mgr is None or not hasattr(tools_mgr, "execute_tool"):
         return _fail(_("Aucun gestionnaire d'outils pour percevoir/agir."))
+
+    # Pré-validation déterministe AVANT tout appel hôte (schémas déclarés,
+    # agnostique). Évite l'aller-retour voué à l'échec (ex : `mode` manquant).
+    for _tname, _targs, _role in (
+        (source_tool, source_args, _("perception")),
+        (action_tool, action_args, _("action")),
+    ):
+        _bad = _prevalidate_external(tools_mgr, _tname, _targs)
+        if _bad:
+            return _fail(_("L'outil {role} '{tool}' est mal appelé : {err}").format(
+                role=_role, tool=_tname, err=_bad))
 
     # 1. Perception fraîche (jamais une référence stockée).
     try:
