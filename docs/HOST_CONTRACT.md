@@ -135,6 +135,14 @@ pas mauvaise volonté. Règles absolues pour chaque outil déclaré :
    Le cerveau suit les descriptions au mieux ; si rien n'est clair, il
    devine — c'est mécanique.
 
+## 3f. Effets des outils (optionnel)
+
+Chaque outil peut déclarer `effects` : `"deterministic"` (le résultat
+annoncé égale toujours l'effet réel) ou `"uncertain"` (les deux peuvent
+différer). Défauts prudents : `[action]` = `"uncertain"`, `[perception]`
+et utilitaires = rien. Un hôte déterministe déclare `"deterministic"`
+une fois et ne paie aucune vérification en plus. Détail : `docs/ALIGNMENT.md`.
+
 ## 4. Actions supportées (voir `core/constants.py:8`)
 
 | Action | Usage |

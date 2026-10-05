@@ -106,6 +106,14 @@ not bad will. Absolute rules for every declared tool:
    The brain follows descriptions as best it can; if nothing is clear,
    it guesses — mechanically.
 
+## 3e. Tool effects (optional)
+
+Each tool may declare `effects`: `"deterministic"` (the reported result
+always equals the real effect) or `"uncertain"` (they may differ).
+Cautious defaults: `[action]` = `"uncertain"`, `[perception]` and
+utilities = none. A deterministic host declares `"deterministic"` once
+and pays zero extra verification. Details: `docs/ALIGNMENT.md`.
+
 ## 4. Supported actions
 
 `runtime.configure`, `host.manifest.register`, `chat.send`,
