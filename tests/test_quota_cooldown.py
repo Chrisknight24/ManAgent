@@ -89,6 +89,27 @@ def test_succes_efface_le_pool():
     assert p._pool_cooldown_until == 0.0
 
 
+def test_cooldown_remaining_zero_quand_dispo():
+    assert _provider().cooldown_remaining() == 0.0
+
+
+def test_cooldown_remaining_annonce_l_attente():
+    p = _provider()
+    p.note_rate_limit("k1")
+    assert 0.0 < p.cooldown_remaining() <= 6.0
+    p.note_provider_success()
+    p._key_cooldowns = {}
+    assert p.cooldown_remaining() == 0.0
+
+
+def test_message_quota_lisible_sans_traceback():
+    from providers.base_provider import quota_friendly_message
+    short = quota_friendly_message(45)
+    assert "Traceback" not in short and "quota" in short.lower()
+    long = quota_friendly_message(300)
+    assert "minute" in long.lower()
+
+
 def test_election_ignore_provider_sans_cles():
     from providers.provider_manager import ProviderManager, ModelMetadata, ModelRequirement
 

@@ -1043,6 +1043,19 @@ class Orchestrator(Supervisor, Entity):
                     Logger.warning(f"[Orchestrator] Exception suppressed due to cancellation: {str(e)}")
                     return ResponsePacket(type="response", status="success",
                                          payload={"message": _("Action annulée")})
+                from providers.base_provider import ProviderQuotaExhaustedError, quota_friendly_message
+                if isinstance(e, ProviderQuotaExhaustedError):
+                    remaining = 0.0
+                    try:
+                        for p in getattr(self.provider_manager, "providers", []) or []:
+                            if hasattr(p, "cooldown_remaining"):
+                                remaining = max(remaining, float(p.cooldown_remaining() or 0.0))
+                    except Exception:
+                        pass
+                    friendly = quota_friendly_message(remaining)
+                    Logger.error(f"[Orchestrator] Quota épuisé (technique : {str(e)[:200]})")
+                    await self.propagate_event(Events.RUNTIME_ERROR, {"message": friendly})
+                    return ErrorPacket(type="error", message=friendly)
                 Logger.error(f"[Orchestrator] Critical failure during agent loop: {str(e)}", exc_info=True)
                 await self.propagate_event(Events.RUNTIME_ERROR, {"message": str(e)})
                 return ErrorPacket(type="error", message=str(e))

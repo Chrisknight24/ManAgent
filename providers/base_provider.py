@@ -40,6 +40,22 @@ class ProviderAuthError(ProviderError):
     """Levée en cas d'erreur d'authentification (clé invalide / 401 / 403)."""
     pass
 
+
+def quota_friendly_message(remaining_seconds: float) -> str:
+    """Message user clair pour quota épuisé (jamais de traceback côté hôte).
+
+    Fonction pure, testable vite. Ex : 45s -> secondes, 300s -> minutes.
+    """
+    try:
+        remaining = max(0.0, float(remaining_seconds or 0.0))
+    except Exception:
+        remaining = 0.0
+    if remaining < 90:
+        delay = _("~{} secondes").format(max(5, int(round(remaining))))
+    else:
+        delay = _("~{} minutes").format(max(1, int(round(remaining / 60.0))))
+    return _("IA saturée (quota épuisé), réessaie dans {}. Inutile de relancer en boucle.").format(delay)
+
 class ProviderServiceUnavailableError(ProviderError):
     """Levée en cas d'indisponibilité du service distant (503 / 500)."""
     pass
@@ -325,6 +341,24 @@ class BaseProvider(ABC):
             if key_str and now >= self._key_cooldowns.get(key_str, 0):
                 return True
         return False
+
+    def cooldown_remaining(self) -> float:
+        """Secondes avant la prochaine clé utilisable (0 = dispo maintenant).
+
+        Fonction pure de lecture (aucun effet). Sert au message user
+        « réessaie dans ~N » au lieu d'une traceback technique.
+        """
+        now = time.time()
+        if not self.api_keys_pool:
+            return 0.0
+        latest = self._pool_cooldown_until
+        for k_info in self.api_keys_pool:
+            if not k_info.get("is_active", True):
+                continue
+            key_str = k_info.get("key", "")
+            if key_str and key_str in self._key_cooldowns:
+                latest = max(latest, self._key_cooldowns[key_str])
+        return max(0.0, latest - now)
 
     def note_rate_limit(self, key_str: str, retry_after: Optional[float] = None) -> float:
         """Enregistre un 429/503 : cooldown clé CROISSANT + cooldown pool partagé.
