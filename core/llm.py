@@ -707,7 +707,12 @@ class Llm:
         return full_context
 
     def _record_usage(self, usage: Optional[Dict[str, Any]], mission_id: Optional[str] = None) -> None:
-        """Cumule l'usage tokens par mission + global (source étiquetée, jamais inventée)."""
+        """Cumule l'usage tokens par mission + global (source étiquetée, jamais inventée).
+
+        RAM + SQLite (best-effort) : la RAM sert `stats.get` en direct,
+        la base survit au redémarrage (rechargée par l'Orchestrateur).
+        Un échec base ne casse jamais l'appel LLM.
+        """
         try:
             if not isinstance(usage, dict):
                 return
@@ -737,6 +742,12 @@ class Llm:
             total["completion_tokens"] += c
             total["total_tokens"] += t
             total["calls"] += 1
+            try:
+                usage_store = getattr(rs, "usage_store", None)
+                if usage_store is not None and hasattr(usage_store, "record"):
+                    usage_store.record(mid, usage)
+            except Exception:
+                pass
         except Exception:
             pass
 

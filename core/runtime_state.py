@@ -59,6 +59,7 @@ class RuntimeState:
         self.mission_profile_store = None
         self.lesson_store = None
         self.session_store = None
+        self.usage_store = None  # Compteurs tokens persistants (SQLite, survit au redémarrage)
         self.host_skill_executor = None
         self.host_environment = None
         

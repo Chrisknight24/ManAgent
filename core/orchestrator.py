@@ -105,6 +105,13 @@ class Orchestrator(Supervisor, Entity):
         self.runtime_state.skill_registry = self.skill_registry
         self.runtime_state.session_store = self.session_store
         self.runtime_state.lesson_store = self.lesson_store
+        try:
+            from memory.usage_store import UsageStore
+            self.usage_store = UsageStore()
+            self.runtime_state.usage_store = self.usage_store
+            self.runtime_state.llm_usage = self._load_persisted_usage()
+        except Exception as e:
+            Logger.warning(f"[Orchestrator] Usage persistant indisponible (RAM seule) : {e}")
         self.marker_manager = MarkerManager()
         self.fingerprint_store = FingerprintStore()
         self.input_ingestor = InputIngestor()
@@ -120,6 +127,22 @@ class Orchestrator(Supervisor, Entity):
         # critères explicites plutôt que de bloquer toutes les missions.
         self._rules_path = "rules.md"
         self._rules_cache: Optional[str] = None
+
+    def _load_persisted_usage(self) -> Dict[str, Any]:
+        """Recharge les compteurs tokens depuis SQLite (survit au redémarrage)."""
+        store: Dict[str, Any] = {
+            "by_mission": {},
+            "total": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0},
+        }
+        try:
+            by_mission = self.usage_store.load_all()
+        except Exception:
+            by_mission = {}
+        for mid, entry in (by_mission or {}).items():
+            store["by_mission"][mid] = dict(entry)
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens", "calls"):
+                store["total"][key] += int(entry.get(key) or 0)
+        return store
 
     def _get_or_create_asset_registry(self, session_id: str) -> AssetRegistry:
         """Récupère ou crée le registre de DataAssets pour la session (avec restauration depuis SQLite)."""
@@ -613,6 +636,7 @@ class Orchestrator(Supervisor, Entity):
                         results["sessions_cleared"] = await asyncio.to_thread(self.session_store.clear_all_sessions)
 
                 # Si purge totale ("all"), réinitialiser aussi les logs d'observabilité (events.jsonl)
+                # + les compteurs tokens persistants (sinon stats.get montrerait des missions effacées).
                 if target == "all":
                     try:
                         events_file = "observability/events.jsonl"
@@ -622,6 +646,13 @@ class Orchestrator(Supervisor, Entity):
                             results["events_log_cleared"] = True
                     except Exception as e_ev:
                         Logger.warning(f"[Orchestrator] Erreur lors de la réinitialisation de events.jsonl: {e_ev}")
+                    try:
+                        usage_store = getattr(self.runtime_state, "usage_store", None) or getattr(self, "usage_store", None)
+                        if usage_store is not None and hasattr(usage_store, "clear_all"):
+                            usage_store.clear_all()
+                            results["usage_cleared"] = True
+                    except Exception as e_usage:
+                        Logger.warning(f"[Orchestrator] Erreur lors de la purge des compteurs tokens: {e_usage}")
 
                 Logger.info(f"[Orchestrator] Réinitialisation/Purge de données exécutée (action: {packet.action}, cible: {target}) : {results}")
                 return ResponsePacket(type="response", status="success", payload={
