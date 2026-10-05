@@ -50,11 +50,32 @@ MAX_EXECUTION_TRIES = SOLVER_MAX_EXECUTION_TRIES
 MAX_PREEXECUTION_FAILURES = SOLVER_MAX_PREEXECUTION_FAILURES
 
 
-def _is_pure_direct_answer_plan(plan) -> bool:
-    """Plan 100% réponse directe : RIEN à valider (ni gates, ni juge).
+def _update_tool_health(streak: Dict[str, int], attempts: List[Any]) -> List[str]:
+    """Santé outils : même outil en échec 3 tentatives DE SUITE = malades.
 
-    Que du texte, aucune action : valider reviendrait à punir l'honnêteté
-    (refus polis rejetés en boucle). Fonction pure, testée vite.
+    Pur (sans LLM) : ne regarde que la DERNIÈRE tentative (vrai consécutif),
+    remet à zéro les outils qui n'y ont pas échoué. Retourne la liste triée
+    des outils malades (>= 3). Testé vite.
+    """
+    failed_now = set()
+    last = attempts[-1] if attempts else None
+    if last is not None and getattr(last, "outcome", None) == "failed":
+        for node in getattr(last, "nodes", None) or []:
+            if getattr(node, "status", None) == "failed" and getattr(node, "tool_name", None):
+                failed_now.add(str(getattr(node, "tool_name")))
+    for tool in list(streak.keys()):
+        if tool not in failed_now:
+            streak[tool] = 0
+    for tool in failed_now:
+        streak[tool] = streak.get(tool, 0) + 1
+    return sorted([t for t, n in streak.items() if n >= 3])
+
+
+def _is_pure_direct_answer_plan(plan) -> bool:
+    """Plan 100% reponse directe : RIEN a valider (ni gates, ni juge).
+
+    Que du texte, aucune action : valider reviendrait a punir
+    l'honnetete (refus polis rejetes en boucle). Fonction pure.
     """
     steps = list(getattr(plan, "steps", []) or [])
     if not steps:
@@ -406,9 +427,18 @@ class Solver(Supervisor, Entity):
                 # Stérile 2x de suite = résignation. Progrès + budget épuisé
                 # = rallonge jugée (root seul, plafond dur côté orchestrateur).
                 fail_history = []
+                # Recul solver : 2 échecs d'exécution/convergence de même classe
+                # = la stratégie est peut-être mauvaise, pas le plan. On la
+                # rafraîchit (re-faisabilité) au lieu de replanifier pareil.
+                # Erreurs de variables → direct planner (pas de recul utile).
+                strategy_refreshed_key: Optional[str] = None
                 # Anti faux-succès (Alerte 1) : cumul inter-tentatives.
                 seen_tool_steps_total = 0
                 material_success_total = 0
+                # Santé outils : même outil en échec N fois (toutes signatures)
+                # = les outils sont en cause, pas le plan. On résigne au lieu
+                # de brûler le budget. Remis à zéro dès qu'un outil réussit.
+                tool_fail_streak: Dict[str, int] = {}
 
                 while True:
                     if self.runtime_state.cancel_requested:
@@ -419,6 +449,26 @@ class Solver(Supervisor, Entity):
                         Logger.warning(f"[Solver:{self.id}] 🛑 {_resign_why}")
                         self.context += _("\n[Abandon] {}.").format(_resign_why)
                         break
+
+                    # Recul solver : 2 échecs d'exécution/convergence de même
+                    # classe = peut-être la stratégie, pas le plan. On la
+                    # rafraîchit une fois par série avant de replanifier.
+                    if len(fail_history) >= 2:
+                        _c1 = str(fail_history[-1][0]).split(" :: ")[0]
+                        _c2 = str(fail_history[-2][0]).split(" :: ")[0]
+                        if _c1 == _c2 and _c1 in ("execution_failure", "convergence_failure"):
+                            if strategy_refreshed_key != _c1:
+                                strategy_refreshed_key = _c1
+                                try:
+                                    with self.runtime_state.execution_context.scope(entity_name="Feasibility", entity_role="Solver"):
+                                        _new_decision = await self._check_feasibility(similar_missions_context)
+                                    if getattr(_new_decision, "is_possible", True):
+                                        decision = _new_decision
+                                        Logger.info(f"[Solver:{self.id}] 🔄 Stratégie rafraîchie après 2 échecs {_c1}.")
+                                        self.context += _("\n[Recul] Nouvelle stratégie après échecs répétés : {}.").format(
+                                            getattr(decision, "refined_strategy", "")[:500])
+                                except Exception as _e:
+                                    Logger.warning(f"[Solver:{self.id}] Recul impossible ({_e}) — on garde l'ancienne stratégie.")
 
                     # Disjoncteur quota : le quota vide ne se répare pas en
                     # replanifiant. Stopper proprement au lieu de spiraler en 429.
@@ -432,6 +482,25 @@ class Solver(Supervisor, Entity):
                         )
                         self.context += _("\n[Abandon] {}.").format(_quota_why)
                         break
+
+                    # Santé outils : on juge les outils, pas seulement les plans.
+                    # Même outil en échec 3 tentatives DE SUITE = résignation
+                    # explicite, pas de replan aveugle.
+                    try:
+                        _past = (self.execution_tree.attempts or []) if self.execution_tree else []
+                        _sick = _update_tool_health(tool_fail_streak, list(_past))
+                        if _sick:
+                            _tool_why = _("Arrêt : outil(s) en échec répété ({tools}) malgré 3 tentatives — le problème vient des outils, pas du plan.").format(tools=", ".join(_sick[:3]))
+                            Logger.warning(f"[Solver:{self.id}] 🛑 {_tool_why}")
+                            Logger.event(
+                                "tool_health_resign",
+                                solver_id=self.id,
+                                tools=_sick[:5],
+                            )
+                            self.context += _("\n[Abandon] {}.").format(_tool_why)
+                            break
+                    except Exception as _e:
+                        Logger.debug(f"[Solver:{self.id}] Santé outils indisponible ({_e}).")
 
                     if execution_attempt >= max_allowed:
                         if not await self._maybe_extend_budget(fail_history, max_allowed):
@@ -1089,21 +1158,46 @@ class Solver(Supervisor, Entity):
     async def _verify_mission_convergence(self, final_result) -> tuple:
         """Vérification finale ROOT : le but est-il VRAIMENT atteint ?
 
-        Un appel sémantique (PD-capable : peut inspecter le monde en cas de
-        doute). Échec infra -> on ne tue PAS la mission (fail-open + warning).
+        Preuves compactes (texte final + variables cruciales, capées), jamais
+        de dump de registre : le juge voyait des métadonnées au lieu de la
+        preuve et échouait sur du "tronqué". Juge isolé, PD restreinte
+        (registre + monde) pour un éventuel contrôle visuel.
+        Échec infra -> on ne tue PAS la mission (fail-open + warning).
         Retour (ok, raison).
         """
         try:
             from core.plan_models import ConvergenceDecision
             loader = get_prompt_loader()
+            response_text = str(getattr(final_result, "response", "") or "")
+            evidence_parts = [response_text[:1200]] if response_text.strip() else []
+            try:
+                rum = getattr(self.runtime_state, "mission_rum", None) or {}
+                for name in sorted(rum.keys())[:8]:
+                    entry = rum.get(name) or {}
+                    val = entry.get("value", entry) if isinstance(entry, dict) else entry
+                    evidence_parts.append(f"{name} = {str(val)[:200]}")
+            except Exception:
+                pass
+            evidence = "\n".join(p for p in evidence_parts if p)[:1500]
             prompt = loader.load(
                 "convergence.md",
                 lang=self.runtime_state.language,
                 step_description=self.goal,
                 expected_result=self.goal,
-                actual_result=(getattr(final_result, "final_context", "") or "")[-4000:],
+                actual_result=evidence or _("(aucune preuve textuelle disponible)"),
+                tool_status="OK",
             )
-            decision = await self.llm.generate_structured(
+            conv_llm = self.llm
+            try:
+                conv_llm = self.llm.clone(role_name="convergence")
+                engine = getattr(self.runtime_state, "discovery_engine", None)
+                if engine is not None:
+                    conv_llm.enable_discovery(engine, self, allowed_data_types={"world", "registry"})
+                    conv_llm.set_data_context(getattr(self, "variable_registry", None))
+            except Exception as e:
+                Logger.warning(f"[Solver:{self.id}] Clone convergence impossible ({e}).")
+                conv_llm = self.llm
+            decision = await conv_llm.generate_structured(
                 prompt=prompt,
                 schema=ConvergenceDecision,
                 tag="ConvergenceDecision",

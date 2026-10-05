@@ -1195,16 +1195,35 @@ class Executor:
             mission_id = self.solver.runtime_state.execution_context.get("mission_id")
 
         loader = get_prompt_loader()
+        text = str(actual_result or "")
+        if "[TOOLS FAILED]" in text:
+            tool_status = "FAILED"
+        elif "[TOOLS OK]" in text:
+            tool_status = "OK"
+        else:
+            tool_status = "UNKNOWN"
         prompt = loader.load(
             "convergence.md",
             lang=self.solver.runtime_state.language,
             step_description=step.description,
             expected_result=step.expected_result,
-            actual_result=actual_result
+            actual_result=actual_result,
+            tool_status=tool_status,
         )
-        restore = self._ensure_convergence_discovery()
+        # Juge isolé : clone dédié, PD restreinte (registre + monde). Le juge
+        # peut re-percevoir en cas de doute, sans le bruit des autres axes.
+        conv_llm = self.solver.llm
         try:
-            return await self.solver.llm.generate_structured(
+            conv_llm = self.solver.llm.clone(role_name="convergence")
+            engine = getattr(self.solver.runtime_state, "discovery_engine", None)
+            if engine is not None:
+                conv_llm.enable_discovery(engine, self.solver, allowed_data_types={"world", "registry"})
+                conv_llm.set_data_context(getattr(self.solver, "variable_registry", None))
+        except Exception as e:
+            Logger.warning(f"[Executor] Clone convergence impossible ({e}) — LLM du solver.")
+            conv_llm = self.solver.llm
+        try:
+            return await conv_llm.generate_structured(
                 prompt=prompt,
                 schema=ConvergenceDecision,
                 tag="ConvergenceDecision",
@@ -1214,11 +1233,6 @@ class Executor:
         except Exception as e:
             Logger.error(f"[Executor] 🔥 Panne de l'infrastructure de validation sémantique à l'étape [{step.id}] : {str(e)}")
             raise e
-        finally:
-            try:
-                restore()
-            except Exception:
-                pass
 
     # =====================================================
     # UTILITAIRES (JSON, conditions, etc.)

@@ -74,6 +74,7 @@ class Llm:
         # --- PROGRESSIVE DISCLOSURE ---
         self._discovery_enabled = False
         self._discovery_engine = None
+        self._discovery_allowlist = None
         self._entity = None
         self._entity_id: Optional[str] = None
         self._entity_name: Optional[str] = None
@@ -194,10 +195,13 @@ class Llm:
 
         return cloned
     
-    def enable_discovery(self, engine, entity: 'Entity') -> None:
+    def enable_discovery(self, engine, entity: 'Entity', allowed_data_types=None) -> None:
         """
         Active la Progressive Disclosure pour ce LLM.
         Met à jour l'engine, l'entité, le contexte de données et logge les providers actifs.
+        allowed_data_types : périmètre restreint optionnel (ex : {"world", "registry"}
+        pour un juge de convergence : ancrage visuel possible, sans le bruit
+        des autres axes). None = tout ce que l'entité expose.
         """
         self._discovery_enabled = True
         self._discovery_engine = engine
@@ -205,6 +209,7 @@ class Llm:
         self._entity_id = entity.entity_id
         self._entity_name = getattr(entity, "name", None)
         self._entity_role = getattr(entity, "role", None)
+        self._discovery_allowlist = set(allowed_data_types) if allowed_data_types else None
 
         if hasattr(entity, 'get_data_context'):
             self.set_data_context(entity.get_data_context())
@@ -224,6 +229,7 @@ class Llm:
         """
         self._discovery_enabled = False
         self._discovery_engine = None
+        self._discovery_allowlist = None
         self._entity = None
         self._entity_id = None
         self._entity_name = None
@@ -251,10 +257,14 @@ class Llm:
             Logger.debug(f"[LLM] _build_discovery_section: providers trouvés = {list(providers.keys())}")
 
             data_types_info = {}
+            allowlist = getattr(self, "_discovery_allowlist", None)
             for provider_name, provider in providers.items():
                 try:
                     data_type = provider.get_data_type()
-                    
+
+                    if allowlist is not None and data_type not in allowlist:
+                        Logger.debug(f"[LLM] _build_discovery_section: type '{data_type}' hors périmètre restreint, ignoré.")
+                        continue
                     if data_type in blocked_data_types:
                         Logger.debug(f"[LLM] _build_discovery_section: Type '{data_type}' est bloqué. Ignoré.")
                         continue
