@@ -56,13 +56,19 @@ def test_dim_guard_skips_foreign_lessons(tmp_path):
     assert isinstance(res, list)
 
 
+def _uses_managed(text: str) -> int:
+    # Les appels s'étalent sur plusieurs lignes : normaliser avant de compter.
+    flat = "".join(text.split())
+    return flat.count("embed_managed(self.runtime_state,")
+
+
 def test_learner_and_solver_use_managed():
     base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     learner = open(os.path.join(base, "core", "learner.py"), encoding="utf-8").read()
-    assert learner.count("embed_managed(self.runtime_state") >= 3
+    assert _uses_managed(learner) >= 3
     solver = open(os.path.join(base, "core", "solver.py"), encoding="utf-8").read()
-    assert "embed_managed(self.runtime_state" in solver
+    assert _uses_managed(solver) >= 1
     orch = open(os.path.join(base, "core", "orchestrator.py"), encoding="utf-8").read()
-    assert "embed_managed(self.runtime_state" in orch
+    assert _uses_managed(orch) >= 1
     ent = open(os.path.join(base, "core", "entity_learner.py"), encoding="utf-8").read()
-    assert "embed_managed(self.runtime_state" in ent
+    assert _uses_managed(ent) >= 1
