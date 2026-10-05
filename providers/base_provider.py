@@ -17,8 +17,9 @@ from utils.logger import Logger
 
 # Backoff pro (niveaux pool, pas juste par clé) : le quota est souvent commun
 # au compte, changer de clé ne suffit pas. Exponentiel + jitter + Retry-After.
-RATE_LIMIT_BASE_COOLDOWN = 60.0
-RATE_LIMIT_MAX_COOLDOWN = 600.0
+# Base courte (5s) : un 503 isolé ne bloque plus l'utilisateur une minute.
+RATE_LIMIT_BASE_COOLDOWN = 5.0
+RATE_LIMIT_MAX_COOLDOWN = 60.0
 RATE_LIMIT_BASE_SLEEP = 0.5
 RATE_LIMIT_MAX_SLEEP = 30.0
 
