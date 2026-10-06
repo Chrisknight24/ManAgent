@@ -122,6 +122,32 @@ def risk_sentence(risk: Dict[str, Any]) -> str:
     ).format(n=risk.get("uncovered", 0))
 
 
+def world_guidance_visible(tools: Any) -> bool:
+    """Faut-il afficher le guidage perception ? Masqué SEULEMENT si l'hôte
+    déclare tout déterministe ET sans aucun outil `[perception]`.
+
+    Défaut prudent : visible (non déclaré = incertain). Fonction pure.
+    """
+    try:
+        externals = [
+            t for t in (tools or [])
+            if isinstance(t, dict) and str(t.get("source") or "external") == "external"
+        ]
+        if not externals:
+            return True
+        if any(str(t.get("kind") or "action").lower() == "perception" for t in externals):
+            return True
+        actions = [
+            t for t in externals
+            if str(t.get("kind") or "action").lower() not in ("perception", "utility")
+        ]
+        if not actions:
+            return True
+        return any(effect_of(t) == EFFECT_UNCERTAIN for t in actions)
+    except Exception:
+        return True
+
+
 def planner_nudge(tool_names_in_order: List[str], uncertain: Set[str], perception: Set[str]) -> str:
     """Nudge concret planner : nomme les outils incertains utilisés. Crédit au planner."""
     seq = [str(t or "").strip() for t in (tool_names_in_order or [])]

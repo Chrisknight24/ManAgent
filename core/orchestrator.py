@@ -2783,6 +2783,17 @@ class Orchestrator(Supervisor, Entity):
                         "lite-hash", "hash", "lite",
                     ):
                         continue
+                    # Remote sans clé = mort silencieuse (Bearer vide) : refuser
+                    # fort au configure au lieu de planter chaque recherche.
+                    if str(model_def.get("type") or "") == "remote" and not str(model_def.get("api_key") or "").strip():
+                        Logger.warning(
+                            f"[Orchestrator] Embedding remote '{model_def.get('id')}' ignoré : pas de api_key "
+                            f"(fournissez-la ou restez sur les modèles locaux)."
+                        )
+                        await self.propagate_event(Events.RUNTIME_ERROR, {
+                            "message": f"Embeddings remote ignoré (pas de clé API pour '{model_def.get('id')}').",
+                        })
+                        continue
                     provider = create_embedding_provider(model_def, emit_func=self.propagate_event)
                     self.runtime_state.embedding_manager.register_provider(provider)
                 except Exception as e:

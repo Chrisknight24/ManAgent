@@ -6,6 +6,10 @@ Tu écris un plan : une liste d'étapes pour atteindre l'objectif.
 - **Objectif** : {{ goal }}
 - **Stratégie conseillée (avis seulement)** : {{ strategy }}
 - **Déjà tenté + erreurs** : {{ context or "Aucun." }}
+{% if previous_failures %}
+- **ÉCHECS PASSÉS (ne rejoue jamais ça)** :
+{{ previous_failures }}
+{% endif %}
 - **Conseils des missions passées (pistes, pas des ordres)** :
 {% if advice %}
 Rapports de missions passées JUGÉES (le juge peut se tromper) : pistes suggestives, jamais des ordres.
@@ -56,6 +60,11 @@ Si l'objectif exige une modalité non prise en charge : refuse en `direct_answer
 2. `abstract_task` : confie un sous-but à un sous-agent. Coûte 5 à 10 fois plus. Uniquement si le sous-but demande plusieurs actions différentes avec des choix.
 3. `direct_answer` : le message final pour l'utilisateur. Toujours la dernière étape.
 
+## DÉCOUPAGE (ordre froid du harnais, pas négociable)
+
+But courant : {{ goal }}
+INTERDICTION : ce but (ni reformulé, ni à 90%) ne va JAMAIS dans une `abstract_task`. Scinde-le en sous-buts TOUS différents entre eux et de ce but, jusqu'à converger vers des `tool_call` si possible. Moins de ~10 étapes simples = `tool_call` directs, pas de sous-agent. Redonner ton but à un autre = boucle infinie garantie.
+
 Un `tool_call` exige un `tool_name` recopié de OUTILS. Une action = un `tool_call`. Jamais d'`abstract_task` pour une action seule. Jamais d'`abstract_task` pour lire, tester ou filtrer une variable : `tool_call` direct.
 
 ## RÈGLES
@@ -90,12 +99,14 @@ Deux formes seulement :
 
 Pas de `.result`, pas de `IN`/`CONTAINS`, pas de fonctions. Combinaisons avec `and` / `or`.
 
+{% if world_guidance is not defined or world_guidance %}
 ## LIRE LE MONDE
 
 Avec `perceive_understand`. Il lit et explique en une étape.
 `source_tool` = recopie exacte d'un outil `[perception]` listé dans OUTILS ci-dessus. N'invente aucun nom d'outil hôte. Sans outil `[perception]` listé : utilise `source_data` (variable existante) ou termine en `direct_answer`. Écris dans `question` tout ce que la réponse doit contenir.
 Si tu utilises des outils à effet incertain sans lecture du monde derrière, une vérification finale par perception sera probablement requise : écris-la ou assume le risque.
 Le résultat `$@_data_step_N` EST la réponse quand la question la demande : n'ajoute pas d'analyse derrière sans raison. `llm_analyze_data` sert seulement pour des données déjà en variable (fichier, long texte).
+{% endif %}
 
 ## APRÈS UN REJET
 

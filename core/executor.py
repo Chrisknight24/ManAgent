@@ -27,6 +27,13 @@ class _ConditionError(Exception):
     elle n'est jamais sautée silencieusement."""
 
 
+# Champs-références : NOMS de variables à résoudre par l'outil lui-même,
+# jamais interpolés par l'executor (sinon l'outil reçoit la valeur et la
+# cherche comme un nom -> "Variable ... introuvable"). Noms de nos
+# méta-outils internes, aucun hôte cité.
+_REFERENCE_FIELDS = frozenset({"source_data", "source", "sources"})
+
+
 class Executor:
     def __init__(self, solver_node):
         self.solver = solver_node
@@ -549,14 +556,19 @@ class Executor:
 
         return re.sub(r'(\$@_|@\$_)([a-zA-Z0-9_-]+)', replace_var, text)
 
-    def _interpolate_dict(self, obj, for_json: bool = True):
+    def _interpolate_dict(self, obj, for_json: bool = True, skip_keys=None):
         """
         Parcourt récursivement un objet et interpole les chaînes.
+        `skip_keys` : clés de premier niveau conservées brutes (champs-références).
         Si une valeur correspond exactement à $@_var_name ou @$_var_name et pointe sur un virtual_asset,
         retourne directement la structure hydratée (brute textuelle ou dictionnaire binaire avec base64).
         """
+        skip = set(skip_keys or ())
         if isinstance(obj, dict):
-            return {k: self._interpolate_dict(v, for_json) for k, v in obj.items()}
+            return {
+                k: (v if k in skip else self._interpolate_dict(v, for_json, skip_keys))
+                for k, v in obj.items()
+            }
         elif isinstance(obj, list):
             return [self._interpolate_dict(item, for_json) for item in obj]
         elif isinstance(obj, str):
@@ -811,7 +823,10 @@ class Executor:
             Logger.debug(f"[Executor] tool_manager appelé avec arguments bruts : {tool_args_raw}")
             self.solver.runtime_state._solver_registry_for_tools = self.solver.variable_registry
         else:
-            tool_args_raw = self._interpolate_dict(tool_args, for_json=True)
+            tool_args_raw = self._interpolate_dict(
+                tool_args, for_json=True,
+                skip_keys=_REFERENCE_FIELDS,
+            )
 
         # Validation déterministe pré-exécution des arguments d'outil
         is_valid_args, validation_err = self._validate_tool_args(step.tool_name, tool_args_raw)

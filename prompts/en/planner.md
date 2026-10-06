@@ -6,6 +6,10 @@ You write a plan: a list of steps to reach the goal.
 - **Goal**: {{ goal }}
 - **Suggested strategy (advice only)**: {{ strategy }}
 - **Already tried + errors**: {{ context or "None." }}
+{% if previous_failures %}
+- **PAST FAILURES (never replay this)**:
+{{ previous_failures }}
+{% endif %}
 - **Lessons from past missions (leads, not orders)**:
 {% if advice %}
 Reports from past JUDGED missions (the judge can be wrong): suggestive leads, never orders.
@@ -56,6 +60,11 @@ If the goal needs an unsupported modality: refuse with a polite `direct_answer`,
 2. `abstract_task`: gives a sub-goal to a new sub-solver. Costs 5 to 10 times more. Only when the sub-goal needs several different actions with choices.
 3. `direct_answer`: the final message to the user. Always the last step.
 
+## SPLITTING (cold order from the harness, not negotiable)
+
+Current goal: {{ goal }}
+FORBIDDEN: this goal (neither reworded nor at 90%) NEVER goes into an `abstract_task`. Split it into sub-goals ALL different from each other and from this goal, converging to `tool_call` where possible. Under ~10 simple steps = direct `tool_call`, no sub-solver. Handing your goal to another is a guaranteed infinite loop.
+
 A `tool_call` needs a `tool_name` copied from TOOLS. One action = one `tool_call`. Never `abstract_task` for one action. Never `abstract_task` to read, test or filter a variable: direct `tool_call`.
 
 ## RULES
@@ -90,12 +99,14 @@ Two forms only:
 
 No `.result`, no `IN`/`CONTAINS`, no functions. Combine with `and` / `or`.
 
+{% if world_guidance is not defined or world_guidance %}
 ## READING THE WORLD
 
 With `perceive_understand`. It reads and explains in one step.
 `source_tool` = exact copy of a `[perception]` tool listed in TOOLS above. Never invent a host tool name. With no `[perception]` tool listed: use `source_data` (existing variable) or finish with `direct_answer`. Write in `question` everything the answer must contain.
 If you use uncertain-effect tools with no world reading after them, a final perception check will probably be required: write it or own the risk.
 The `$@_data_step_N` result IS the answer when the question asks for it: add no analysis after it without a reason. `llm_analyze_data` is only for data already in a variable (file, long text).
+{% endif %}
 
 ## AFTER A REJECTION
 

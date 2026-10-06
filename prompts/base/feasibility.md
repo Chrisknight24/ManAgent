@@ -47,10 +47,11 @@ Pas faisable = une capacité nécessaire sans outil.
 ## STRATÉGIE (si faisable)
 
 `refined_strategy` : 2 à 6 phrases courtes numérotées, une par outil. Chaque phrase nomme UN outil et dit ce qu'il doit faire. La dernière dit ce que la réponse finale contient.
+- Sous-buts TOUS différents entre eux et du BUT : jamais le BUT recopié comme sous-but (boucle infinie garantie sinon).
 - `tool_call` pour chaque action seule.
 - `abstract_task` seulement pour un sous-but à plusieurs actions avec choix. Jamais pour lire ou tester une variable.
-- Lire le monde = UNE étape `perceive_understand` (lit + explique). Pas d'analyse derrière.
-- La stratégie conseille. Le Planner décide.
+{% if world_guidance is not defined or world_guidance %}- Lire le monde = UNE étape `perceive_understand` (lit + explique). Pas d'analyse derrière.
+{% endif %}- La stratégie conseille. Le Planner décide.
 
 ## PAS FAISABLE
 

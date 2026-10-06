@@ -134,6 +134,7 @@ class Planner(Entity):
         variable_registry: dict,
         candidate_skills: Optional[Union[List[Dict[str, Any]], str]] = None,
         enable_world_pd: bool = False,
+        previous_failures: str = "",
     ) -> Plan:
         if hasattr(self.runtime_state, 'orchestrator') and self.runtime_state.orchestrator:
             await self.runtime_state.orchestrator.propagate_event(Events.STATUS_UPDATE, {"message": "planning"})
@@ -157,6 +158,11 @@ class Planner(Entity):
             Logger.info(f"[Planner] 💡 Conseil injecté ({len(advice)} caractères).")
 
         tools_view = await self.runtime_state.tools_manager.get_tools_view()
+        try:
+            from core.alignment import world_guidance_visible
+            show_world_guidance = world_guidance_visible(tools_view)
+        except Exception:
+            show_world_guidance = True
         # Monde vivant : UNIQUEMENT en retry (premier passage inchangé :
         # rapide, pas cher). Le solver active après le 1er échec.
         if enable_world_pd and self.runtime_state.discovery_engine:
@@ -250,6 +256,8 @@ class Planner(Entity):
             goal=goal,
             context=context,
             strategy=strategy,
+            previous_failures=previous_failures or "",
+            world_guidance=show_world_guidance,
             variable_registry=enriched_registry,
             tools=tools_view,
             skills=skills_text,

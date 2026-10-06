@@ -522,6 +522,15 @@ class Solver(Supervisor, Entity):
                     with self.runtime_state.execution_context.scope(attempt_number=attempt_counter):
                         try:
                             with self.runtime_state.execution_context.scope(entity_name="Planner", entity_role="Solver"):
+                                _past_failures = []
+                                try:
+                                    for _att in (getattr(getattr(self, "execution_tree", None), "attempts", None) or []):
+                                        if getattr(_att, "outcome", None) == "failed" and getattr(_att, "failure_reason", None):
+                                            _past_failures.append(
+                                                f"- tentative {getattr(_att, 'attempt_number', '?')} : {str(_att.failure_reason)[:300]}"
+                                            )
+                                except Exception:
+                                    _past_failures = []
                                 proposed_plan = await self.planner.propose_plan(
                                     goal=self.goal,
                                     context=self.context,
@@ -529,6 +538,7 @@ class Solver(Supervisor, Entity):
                                     variable_registry=self.variable_registry,
                                     candidate_skills=getattr(self, "_candidate_skills", []) or [],
                                     enable_world_pd=attempt_counter > 1,
+                                    previous_failures="\n".join(_past_failures[-3:]),
                                 )
                             self.current_attempt.proposed_plan = proposed_plan.model_dump(mode='json')
                             self.current_attempt.advice_injected = getattr(self.planner, "_cached_advice", None) or None
@@ -958,6 +968,14 @@ class Solver(Supervisor, Entity):
             ])
             if _nudge:
                 tools_guidance = (tools_guidance + "\n\n" + _nudge).strip()
+            _tm = getattr(self.runtime_state, "tools_manager", None)
+            _perception = set(_tm.perception_tool_names()) if _tm is not None and hasattr(_tm, "perception_tool_names") else set()
+            if _perception and "perceive_action" in {str(t.get("name")) for t in tools_view if isinstance(t, dict)}:
+                tools_guidance = (tools_guidance + "\n\n" + _(
+                    "Pour agir sur ce qu'on voit (clic sur un élément perçu) : "
+                    "préfère `perceive_action` (voit + agit, aucune référence à écrire). "
+                    "Seulement si des outils `[perception]` sont listés ci-dessus."
+                )).strip()
         except Exception:
             pass
 
@@ -980,6 +998,11 @@ class Solver(Supervisor, Entity):
                 except Exception as e:
                     Logger.error(f"[Solver:{self.id}] Erreur récupération des conseils : {e}")
 
+        try:
+            from core.alignment import world_guidance_visible
+            _show_world = world_guidance_visible(tools_view)
+        except Exception:
+            _show_world = True
         prompt = loader.load(
             "feasibility.md",
             lang=self.runtime_state.language,
@@ -987,7 +1010,7 @@ class Solver(Supervisor, Entity):
             context=self.context,
             tools="\n".join(formatted_tools),
             tools_guidance=tools_guidance,
-            skills=skills_text,
+            world_guidance=_show_world,            skills=skills_text,
             similar_missions=similar_missions_context,
             registry=registry_text,
             advice=advice
@@ -1021,6 +1044,13 @@ class Solver(Supervisor, Entity):
             for idx, sig in enumerate(self.signatures):
                 signature_text = f"{sig.action} {sig.object}"
                 embedding = await embedding_manager.embed(signature_text)
+                if embedding is None:
+                    # Pas de vecteur (fallback incompatible) : ne pas stocker
+                    # de trace introuvable (sinon apprentissage sur du vide).
+                    Logger.warning(
+                        f"[Solver:{self.id}] Vecteur indisponible pour '{signature_text}' : profil ignoré."
+                    )
+                    continue
                 store.insert_profile(
                     mission_id=self.id,
                     signature_text=signature_text,

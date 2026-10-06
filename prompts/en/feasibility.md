@@ -48,10 +48,11 @@ Not feasible = a needed capability with no tool.
 ## STRATEGY (when feasible)
 
 `refined_strategy`: 2 to 6 short numbered sentences, one per tool. Each sentence names ONE tool and says what it must do. The last one says what the final answer contains.
+- Sub-goals ALL different from each other and from the GOAL: never the GOAL copied as a sub-goal (guaranteed infinite loop otherwise).
 - `tool_call` for every single action.
 - `abstract_task` only for a sub-goal with several actions and choices. Never to read or test a variable.
-- Read the world = ONE `perceive_understand` step (reads + explains). No analysis after it.
-- The strategy advises. The Planner decides.
+{% if world_guidance is not defined or world_guidance %}- Read the world = ONE `perceive_understand` step (reads + explains). No analysis after it.
+{% endif %}- The strategy advises. The Planner decides.
 
 ## NOT FEASIBLE
 
