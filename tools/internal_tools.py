@@ -671,7 +671,8 @@ def _text(value: Any) -> str:
 def _prevalidate_external(tools_mgr, tool_name: str, args) -> Optional[str]:
     """Vérifie les args AVANT l'appel hôte (schéma déclaré, agnostique).
 
-    Retourne None si appelable, sinon le motif honnête (params requis).
+    Présence des requis PUIS valeurs `enum` déclarées. Retourne None si
+    appelable, sinon le motif honnête (avec les valeurs permises).
     Outil inconnu ici = on laisse `execute_tool` répondre (comportement
     inchangé). Fonction pure de lecture, jamais de faux refus.
     """
@@ -679,7 +680,13 @@ def _prevalidate_external(tools_mgr, tool_name: str, args) -> Optional[str]:
         known = getattr(tools_mgr, "_tools", None) or {}
         if not (isinstance(known, dict) and tool_name in known):
             return None
+        tool_def = known.get(tool_name)
         tools_mgr.validate_tool_call(tool_name, dict(args or {}))
+        if isinstance(tool_def, dict):
+            from core.alignment import invalid_enum_value
+            bad_value = invalid_enum_value(tool_def, args)
+            if bad_value:
+                return bad_value
         return None
     except ValueError as e:
         return str(e)

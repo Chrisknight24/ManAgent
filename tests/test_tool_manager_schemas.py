@@ -14,7 +14,9 @@ def _mgr():
     tm = ToolsManager(runtime_state=None)
     tm.register_tool(name="vision", role="r", description="d",
                      parameters_schema={"type": "object",
-                                        "properties": {"mode": {"type": "string"}},
+                                        "properties": {"mode": {"type": "string",
+                                                                "enum": ["image", "annotated"]},
+                                                     "query": {"type": "string"}},
                                         "required": ["mode"]},
                      kind="perception")
     tm.register_tool(name="mouse", role="r", description="d",
@@ -35,12 +37,23 @@ def test_description_externe_montre_requis():
     assert "mouse" in desc
 
 
+def test_description_externe_montre_valeurs_enum():
+    desc = _mgr()._get_external_tools_description()
+    assert "image" in desc and "annotated" in desc
+
+
 def test_prevalidate_ok_et_ko():
     tm = _mgr()
     assert _prevalidate_external(tm, "vision", {"mode": "image"}) is None
     bad = _prevalidate_external(tm, "vision", {"query": "x"})
     assert bad is not None and "mode" in bad
     assert _prevalidate_external(tm, "outil_inconnu", {}) is None
+
+
+def test_prevalidate_refuse_valeur_hors_enum():
+    tm = _mgr()
+    bad = _prevalidate_external(tm, "vision", {"mode": "capture_screenshot"})
+    assert bad is not None and "image" in bad and "annotated" in bad
 
 
 def test_perceive_action_refuse_avant_appel_hote():

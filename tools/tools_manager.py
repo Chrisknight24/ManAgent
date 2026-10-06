@@ -379,8 +379,10 @@ class ToolsManager(Entity):
     def _get_external_tools_description(self) -> str:
         """Schémas des outils HÔTE pour le prompt (le LLM ne devine plus les args).
 
-        Compact : nom + kind + params requis. Pur hormis la lecture.
+        Compact : nom + kind + params requis (+ valeurs permises si `enum`
+        déclaré). Pur hormis la lecture.
         """
+        from core.alignment import allowed_values
         lines = []
         for name in sorted((self._tools or {}).keys()):
             tool = self._tools.get(name)
@@ -390,8 +392,16 @@ class ToolsManager(Entity):
                 continue
             params = tool.get("parameters") or {}
             required = params.get("required", []) if isinstance(params, dict) else []
+            extras = []
+            if isinstance(required, list):
+                for param in required:
+                    vals = allowed_values(tool, str(param))
+                    if vals:
+                        extras.append(f"{param} in {{{'|'.join(vals)}}}")
+                    else:
+                        extras.append(str(param))
             kind = tool.get("kind") or "action"
-            lines.append(f"- **{name}** [{kind}] : requis={list(required) or 'aucun'}")
+            lines.append(f"- **{name}** [{kind}] : requis=[{', '.join(extras) or 'aucun'}]")
         return "\n".join(lines) if lines else "Aucun outil hôte déclaré."
 
     # =====================================================

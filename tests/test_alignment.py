@@ -11,6 +11,8 @@ from core.alignment import (
     plan_risk,
     risk_sentence,
     planner_nudge,
+    allowed_values,
+    invalid_enum_value,
 )
 
 
@@ -115,6 +117,19 @@ def test_convergence_rend_avec_et_sans_note():
             expected_result="e", actual_result="r", tool_status="OK",
             alignment_note="Fait alignement : 2 actions.")
         assert "2 actions" in with_note
+
+
+def test_enum_valeurs_declarees():
+    tool = {"name": "v", "kind": "perception",
+            "parameters": {"properties": {"mode": {"enum": ["image", "annotated"]}},
+                           "required": ["mode"]}}
+    assert allowed_values(tool, "mode") == ["image", "annotated"]
+    assert allowed_values(tool, "query") is None
+    assert allowed_values({}, "mode") is None
+    assert invalid_enum_value(tool, {"mode": "image"}) is None
+    bad = invalid_enum_value(tool, {"mode": "capture_screenshot"})
+    assert bad is not None and "image" in bad
+    assert invalid_enum_value(tool, {"query": "libre"}) is None
 
 
 def test_manager_expose_incertains():

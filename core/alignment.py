@@ -8,7 +8,7 @@ Jamais de nom d'hôte, d'outil ou d'application en dur : tout vient du
 manifeste (champ outil optionnel `effects`) et des listes passées en args.
 """
 
-from typing import Dict, List, Set, Tuple, Any
+from typing import Dict, List, Set, Tuple, Any, Optional
 from core.i18n import _
 
 
@@ -136,3 +136,45 @@ def planner_nudge(tool_names_in_order: List[str], uncertain: Set[str], perceptio
         "du monde derrière : une vérification finale par perception sera "
         "probablement requise. À toi de l'écrire ou d'assumer le risque."
     ).format(names=", ".join(used[:5]))
+
+
+def allowed_values(tool: Dict[str, Any], param: str) -> Optional[List[str]]:
+    """Valeurs autorisées déclarées au schéma (`enum`), ou None.
+
+    Agnostique : on lit le schéma de l'hôte, jamais de liste en dur.
+    Fonction pure.
+    """
+    try:
+        if not isinstance(tool, dict):
+            return None
+        params = tool.get("parameters") or {}
+        props = params.get("properties") or {}
+        entry = props.get(param) or {}
+        enum = entry.get("enum") if isinstance(entry, dict) else None
+        if isinstance(enum, list) and enum:
+            return [str(v) for v in enum]
+        return None
+    except Exception:
+        return None
+
+
+def invalid_enum_value(tool: Dict[str, Any], args: Any) -> Optional[str]:
+    """Valeur hors `enum` déclaré : message honnête, sinon None.
+
+    Ne juge que les valeurs texte présentes. Param absent ou schéma
+    sans `enum` = rien à dire (autres contrôles s'en chargent).
+    Fonction pure.
+    """
+    try:
+        if not isinstance(args, dict):
+            return None
+        for key, val in args.items():
+            if not isinstance(val, str):
+                continue
+            allowed = allowed_values(tool, str(key))
+            if allowed is not None and val not in allowed:
+                return _("param '{param}' = '{val}' non permis (attendus : {allowed})").format(
+                    param=key, val=val, allowed="|".join(allowed))
+        return None
+    except Exception:
+        return None
