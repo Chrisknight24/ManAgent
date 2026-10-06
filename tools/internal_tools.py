@@ -731,7 +731,13 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
     if source_data:
         raw_data = await resolve_variable(source_data, runtime_state)
         if raw_data is None:
-            msg = _("Variable '{source}' introuvable.").format(source=source_data)
+            _looks_ref = (
+                source_data.startswith(("$@_", "data_", "inputs://", "outputs://", "files://"))
+            )
+            if _looks_ref:
+                msg = _("Variable '{source}' introuvable.").format(source=source_data)
+            else:
+                msg = _("'source_data' doit être un nom ($@_...) ou une adresse d'asset, jamais du texte libre.")
             return {"result": False, "data": None, "error_reason": msg, "message": msg}
     else:
         if source_tool in _INTERNAL_TOOL_NAMES:

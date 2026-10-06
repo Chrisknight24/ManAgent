@@ -143,3 +143,17 @@ def test_objet_a_la_place_du_texte_refus_honnete_sans_crash():
          "source_args": {"mode": "image"}}, _rs(tm)))
     assert out2["result"] is False
     assert "question" in (out2.get("error_reason") or "")
+
+
+def test_source_data_texte_libre_refuse_nom_adresse_ok():
+    tm = _mgr()
+
+    async def _boom(name, args):
+        raise AssertionError("l'hôte ne doit pas être appelé")
+
+    tm.execute_tool = _boom
+    out = asyncio.run(perceive_understand(
+        {"question": "q ?", "source_data": "du texte libre qui n est ni nom ni adresse"},
+        _rs(tm)))
+    assert out["result"] is False
+    assert "jamais du texte libre" in (out.get("error_reason") or "")

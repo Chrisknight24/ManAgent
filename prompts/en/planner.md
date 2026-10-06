@@ -29,7 +29,7 @@ Reports from past JUDGED missions (the judge can be wrong): suggestive leads, ne
 
 ## TOOLS (copy names exactly)
 {% for tool in tools %}
-- **[{{ tool.name }}]** [{{ tool.kind }}]{% if tool.effects %} ({{ tool.effects }} effect){% endif %}: {{ tool.description }}
+- **[{{ tool.name }}]** [{{ tool.kind }}]{% if tool.source == 'external' %} [host]{% else %} [brain]{% endif %}{% if tool.effects %} ({{ tool.effects }} effect){% endif %}: {{ tool.description }}
   Arguments: {{ tool.parameters | tojson }}
 {% endfor %}
 
@@ -60,7 +60,7 @@ If the goal needs an unsupported modality: refuse with a polite `direct_answer`,
 2. `abstract_task`: gives a sub-goal to a new sub-solver. Costs 5 to 10 times more. Only when the sub-goal needs several different actions with choices.
 3. `direct_answer`: the final message to the user. Always the last step.
 
-## SPLITTING (cold order from the harness, not negotiable)
+## PROHIBITION WRITTEN BY THE HARNESS (not negotiable)
 
 Current goal: {{ goal }}
 FORBIDDEN: this goal (neither reworded nor at 90%) NEVER goes into an `abstract_task`. Split it into sub-goals ALL different from each other and from this goal, converging to `tool_call` where possible. Under ~10 simple steps = direct `tool_call`, no sub-solver. Handing your goal to another is a guaranteed infinite loop.

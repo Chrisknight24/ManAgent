@@ -70,7 +70,7 @@ def test_planner_masque_sans_monde():
         world_guidance=False)
     assert "{{" not in out
     assert "LIRE LE MONDE" not in out
-    assert "DÉCOUPAGE" in out
+    assert "HARNAIS" in out
 
 
 def test_planner_montre_par_defaut():

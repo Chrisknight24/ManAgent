@@ -148,3 +148,50 @@ def test_manager_expose_incertains():
         assert "a1" in tm.known_tool_names()
 
     asyncio.run(_run())
+
+
+def test_grappes_detectent_la_boucle_paint():
+    from core.alignment import redelegation_clusters
+    paint = [
+        "Ouvrir Paint et dessiner une forme",
+        "Sélectionner l'outil rectangle dans Paint et tracer la forme sur le canevas",
+        "Sélectionner l'outil rectangle dans Paint et tracer la forme sur le canevas de la case C4",
+        "Sélectionner l'outil rectangle (G2) dans Paint et tracer depuis la case C4 vers E5",
+        "Ouvrir le navigateur et chercher la météo",
+    ]
+    clusters = redelegation_clusters(paint)
+    assert len(clusters) == 1 and len(clusters[0]) == 3
+
+
+def test_grappes_vides_si_disjoints():
+    from core.alignment import redelegation_clusters
+    assert redelegation_clusters([
+        "Ouvrir Paint via le menu Démarrer",
+        "Taper du texte dans l'éditeur",
+        "Fermer sans enregistrer",
+    ]) == []
+    assert redelegation_clusters([]) == []
+
+
+def test_interdiction_intitulee_harnais():
+    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for lang in ("base", "fr"):
+        text = open(os.path.join(base, "prompts", lang, "planner.md"), encoding="utf-8").read()
+        assert "INTERDICTION ÉCRITE PAR LE HARNAIS" in text
+    en = open(os.path.join(base, "prompts", "en", "planner.md"), encoding="utf-8").read()
+    assert "PROHIBITION WRITTEN BY THE HARNESS" in en
+
+
+def test_tags_hote_brain_rendus():
+    from core.prompt_loader import get_prompt_loader
+    tools = [
+        {"name": "hext", "kind": "action", "description": "d",
+         "parameters": {"type": "object", "properties": {}}, "source": "external"},
+        {"name": "hint", "kind": "action", "description": "d",
+         "parameters": {"type": "object", "properties": {}}},
+    ]
+    out = get_prompt_loader().load(
+        "planner.md", lang="base", goal="g", strategy="s", context="c",
+        advice="", variable_registry={}, tools=tools, skills="",
+        model_id="m", supported_modalities=[], unsupported_modalities=[])
+    assert "[hôte]" in out and "[brain]" in out

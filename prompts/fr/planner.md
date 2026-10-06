@@ -29,7 +29,7 @@ Rapports de missions passées JUGÉES (le juge peut se tromper) : pistes suggest
 
 ## OUTILS (recopie les noms exactement)
 {% for tool in tools %}
-- **[{{ tool.name }}]** [{{ tool.kind }}]{% if tool.effects %} (effet {{ tool.effects }}){% endif %} : {{ tool.description }}
+- **[{{ tool.name }}]** [{{ tool.kind }}]{% if tool.source == 'external' %} [hôte]{% else %} [brain]{% endif %}{% if tool.effects %} (effet {{ tool.effects }}){% endif %} : {{ tool.description }}
   Arguments : {{ tool.parameters | tojson }}
 {% endfor %}
 
@@ -60,7 +60,7 @@ Si l'objectif exige une modalité non prise en charge : refuse en `direct_answer
 2. `abstract_task` : confie un sous-but à un sous-agent. Coûte 5 à 10 fois plus. Uniquement si le sous-but demande plusieurs actions différentes avec des choix.
 3. `direct_answer` : le message final pour l'utilisateur. Toujours la dernière étape.
 
-## DÉCOUPAGE (ordre froid du harnais, pas négociable)
+## INTERDICTION ÉCRITE PAR LE HARNAIS (pas négociable)
 
 But courant : {{ goal }}
 INTERDICTION : ce but (ni reformulé, ni à 90%) ne va JAMAIS dans une `abstract_task`. Scinde-le en sous-buts TOUS différents entre eux et de ce but, jusqu'à converger vers des `tool_call` si possible. Moins de ~10 étapes simples = `tool_call` directs, pas de sous-agent. Redonner ton but à un autre = boucle infinie garantie.

@@ -10,6 +10,7 @@ manifeste (champ outil optionnel `effects`) et des listes passées en args.
 
 from typing import Dict, List, Set, Tuple, Any, Optional
 from core.i18n import _
+import re
 
 
 EFFECT_DETERMINISTIC = "deterministic"
@@ -204,3 +205,38 @@ def invalid_enum_value(tool: Dict[str, Any], args: Any) -> Optional[str]:
         return None
     except Exception:
         return None
+
+
+def _goal_tokens(text: str) -> Set[str]:
+    tokens = re.sub(r"[^a-z0-9 ]", " ", str(text or "").lower()).split()
+    return set(w for w in tokens if len(w) > 3)
+
+
+def goal_similarity(a: str, b: str) -> float:
+    """Similarité token (Jaccard) entre deux buts. Fonction pure."""
+    sa, sb = _goal_tokens(a), _goal_tokens(b)
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+
+def redelegation_clusters(goals: List[str], threshold: float = 0.60) -> List[List[int]]:
+    """Grappes de buts quasi identiques (chaînes de re-délégation).
+
+    `goals` = buts des solvers/plans dans l'ordre. Retourne les groupes
+    d'indices dont la similarité deux-à-deux atteint le seuil.
+    Zéro grappe = aucune boucle même-but. Fonction pure, testable en ms.
+    Sert de test de succès de vague sur logs réels.
+    """
+    items = [str(g or "") for g in (goals or [])]
+    clusters: List[List[int]] = []
+    for idx in range(len(items)):
+        placed = False
+        for group in clusters:
+            if any(goal_similarity(items[idx], items[member]) >= threshold for member in group):
+                group.append(idx)
+                placed = True
+                break
+        if not placed:
+            clusters.append([idx])
+    return [sorted(group) for group in clusters if len(group) > 1]
