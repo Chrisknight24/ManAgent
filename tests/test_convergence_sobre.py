@@ -128,3 +128,12 @@ def test_analyze_prompt_success_is_technical():
         text = open(os.path.join(base, "prompts", lang, "llm_analyze_data.md"),
                     encoding="utf-8").read()
         assert "technique" in text
+
+
+def test_analyze_prompt_has_absence_escape():
+    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for lang in ("base", "en", "fr"):
+        text = open(os.path.join(base, "prompts", lang, "llm_analyze_data.md"),
+                    encoding="utf-8").read()
+        assert "success: false" in text
+        assert "TROUVER" in text or "FIND" in text
