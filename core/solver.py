@@ -87,6 +87,22 @@ def _is_pure_direct_answer_plan(plan) -> bool:
 
 
 
+def _pydantic_feedback(raw_error: str) -> str:
+    """Message de rejet Pydantic actionnable : troncation = consigne de plan court.
+
+    Fonction pure, testée vite. Le dump brut ne dit jamais quoi faire ;
+    un JSON coupé en plein milieu dit toujours la même chose : trop long.
+    """
+    raw = str(raw_error or "")
+    if "EOF while parsing" in raw or "Unterminated string" in raw:
+        return _(
+            "Votre réponse a été COUPÉE car trop longue : "
+            "refaites un plan PLUS COURT (moins d'étapes, descriptions brèves). "
+            "Détail technique : {}"
+        ).format(raw[:300])
+    return f"Erreur de validation Pydantic : {raw}"
+
+
 class Solver(Supervisor, Entity):
     """
     Solver – exécute une mission.
@@ -548,7 +564,7 @@ class Solver(Supervisor, Entity):
                                 self.runtime_state.update_marker("has_abstract_task", True)
 
                         except ValidationError as pydantic_error:
-                            error_msg = f"Erreur de validation Pydantic : {pydantic_error}"
+                            error_msg = _pydantic_feedback(str(pydantic_error))
                             Logger.warning(f"[Solver:{self.id}] ⚠️ Plan invalide (Pydantic) : {error_msg}")
                             self._record_plan_rejection(error_msg, attempt_counter, store_plan=False)
 

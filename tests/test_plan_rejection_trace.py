@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.plan_models import Plan, PlanStep, StepType
 from core.execution_models import PlanAttempt, FailureClass
-from core.solver import Solver
+from core.solver import Solver, _pydantic_feedback
 from utils.logger import Logger
 
 
@@ -67,3 +67,15 @@ def test_pydantic_path_emits_event_without_stale_plan(monkeypatch):
                for e in events)
     assert solver.current_attempt.proposed_plan is None
     assert solver.current_attempt.outcome == "failed"
+
+
+def test_troncation_dit_plus_court():
+    msg = _pydantic_feedback("1 validation error for Plan\n  Invalid JSON: EOF while parsing a string at line 82")
+    assert "PLUS COURT" in msg
+    assert "EOF" in msg
+
+
+def test_autre_erreur_garde_dump():
+    msg = _pydantic_feedback("missing field 'steps'")
+    assert "PLUS COURT" not in msg
+    assert "missing field" in msg
