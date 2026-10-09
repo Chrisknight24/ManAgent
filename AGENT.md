@@ -40,6 +40,7 @@ GO REQUIS : oui
 - Logs de mission hôte : `C:\Users\CHRISTIAN\Documents\QtProjets\CondiFlow\user_logs.txt` (lecture seule, aval permanent pour les missions).
 - Prompts rendus des entités : `prompts_log/` DANS le dossier de travail ManAgent (pas ailleurs !) — actif si `MANAGENT_RECORD_PROMPTS=1` (variable User + relance de l'app hôte). Fichiers `NNNN_template.lang.md` (+ `.vars.txt` = noms seuls) ; corréler par ordre avec les events `llm_call` des user logs.
 - Pont inter-agents : `C:\Users\CHRISTIAN\Documents\AgentBridge\` (`REGLES.md`, `host_to_brain.md` à vider après résumé, `brain_to_host.md` écriture avec GO, `brain_notes.md` = registre durable).
+- Discussion expert (depuis 2026-10-08, Christian intermédiaire) : l'expert écrit dans `AgentBridge/expert_proposal.txt`, je réponds dans `AgentBridge/expert_reponse.md` (nouveau fichier, à créer). L'expert N'EST PAS un agent : ne jamais vider/effacer son message après lecture (pas de protocole pont pour lui). Christian met à jour à la main et me tient au courant. Récap simple ici dans le tchat. Signature `— ManAgent` sur tous les messages.
 - Ce fichier + `brain_notes.md` = mémoire persistante : y inscrire règles, décisions, chemins.
 
 ## 4. Agnosticisme ManAgent (CRITIQUE, non négociable)

@@ -188,9 +188,6 @@ class Executor:
                     if step.type == StepType.DIRECT_ANSWER and success:
                         step_bool_id = f"bool_{step.id}"
                         step_data_id = f"data_{step.id}"
-                        base_step_id = re.sub(r'-\d+$', '', step.id)
-                        base_bool_id = f"bool_{base_step_id}"
-                        base_data_id = f"data_{base_step_id}"
 
                         bool_entry = {
                             "value": "true",
@@ -207,10 +204,6 @@ class Executor:
 
                         self.solver.variable_registry[step_bool_id] = bool_entry
                         self.solver.variable_registry[step_data_id] = data_entry
-                        if base_bool_id != step_bool_id:
-                            self.solver.variable_registry[base_bool_id] = bool_entry
-                        if base_data_id != step_data_id:
-                            self.solver.variable_registry[base_data_id] = data_entry
 
                         if step.output_variable_name:
                             raw_out_name = step.output_variable_name
@@ -483,7 +476,8 @@ class Executor:
             candidates.extend([f"bool_{clean_root}", f"bool_{clean_base}"])
         elif is_data:
             candidates.extend([f"data_{clean_root}", f"data_{clean_base}"])
-        candidates.extend([clean_root, clean_base, f"bool_{clean_root}", f"data_{clean_root}"])
+        else:
+            candidates.extend([clean_root, clean_base, f"bool_{clean_root}", f"data_{clean_root}"])
 
         for cand in candidates:
             if cand in reg:
@@ -493,6 +487,13 @@ class Executor:
             k_base = re.sub(r'-\d+$', '', k)
             k_clean = re.sub(r'^(bool_|data_)+', '', k_base)
             if k_base == var_name or k_base == base_var or k_clean == clean_base:
+                # Même saveur exigée : une demande bool_ ne rend jamais une
+                # donnée data_ (ni l'inverse) — sinon "true" pour "hello".
+                k_is_bool = k_base.startswith("bool_")
+                k_is_data = k_base.startswith("data_")
+                if (is_bool or is_data) and (k_is_bool or k_is_data):
+                    if is_bool != k_is_bool:
+                        continue
                 return k, v
         return None, None
 
@@ -673,12 +674,11 @@ class Executor:
             base_name = step.output_variable_name
             status_value = "true" if child_result.status == ExecutionStatus.SUCCESS else "false"
 
-        # --- 1. Enregistrement universel par ID d'étape (step_X) ---
+        # --- 1. Enregistrement par ID d'étape (step_X) : une clé statut + une clé données.
+        # Les alias (base_*, racine) ne sont plus écrits : `_find_var_in_registry`
+        # résout toutes les variantes (préfixes/suffixes) depuis la clé canonique.
         step_bool_id = f"bool_{step.id}"
         step_data_id = f"data_{step.id}"
-        base_step_id = re.sub(r'-\d+$', '', step.id)
-        base_bool_id = f"bool_{base_step_id}"
-        base_data_id = f"data_{base_step_id}"
         status_value = "true" if child_result.status == ExecutionStatus.SUCCESS else "false"
 
         bool_entry = {
@@ -688,8 +688,6 @@ class Executor:
             "timestamp": datetime.now().isoformat()
         }
         self.solver.variable_registry[step_bool_id] = bool_entry
-        if base_bool_id != step_bool_id:
-            self.solver.variable_registry[base_bool_id] = bool_entry
 
         # --- 2. Détermination de la valeur et de la description de données ---
         if child_result.status == ExecutionStatus.SUCCESS:
@@ -704,12 +702,9 @@ class Executor:
             ) + _(" (statut: {})").format(status_value)
 
         target_data_var_names = [step_data_id]
-        if base_data_id != step_data_id and base_data_id not in target_data_var_names:
-            target_data_var_names.append(base_data_id)
 
         if step.output_variable_name:
-            raw_out_name = step.output_variable_name
-            clean_out_name = re.sub(r'^(bool_|data_)+', '', raw_out_name)
+            clean_out_name = re.sub(r'^(bool_|data_)+', '', step.output_variable_name).strip() or f"out_{step.id}"
             out_bool_name = f"bool_{clean_out_name}"
             out_data_name = f"data_{clean_out_name}"
 
@@ -720,14 +715,10 @@ class Executor:
                 "source": child_solver.id,
                 "timestamp": datetime.now().isoformat()
             }
-            if raw_out_name != out_bool_name and raw_out_name != out_data_name:
-                self.solver.variable_registry[raw_out_name] = self.solver.variable_registry[out_bool_name]
 
-            # 2. Assurer que les données seront injectées sous data_ et la racine
+            # 2. Les données seront injectées sous data_ normalisé
             if out_data_name not in target_data_var_names:
                 target_data_var_names.append(out_data_name)
-            if clean_out_name not in target_data_var_names:
-                target_data_var_names.append(clean_out_name)
 
         INLINE_LIMIT = ASSET_INLINE_LIMIT
         data_val_str = str(data_value) if data_value is not None else ""
@@ -870,12 +861,11 @@ class Executor:
                 else:
                     error_reason_msg = tool_error_reason
 
-            # --- 1. Enregistrement universel par ID d'étape (step_X) ---
+            # --- 1. Enregistrement par ID d'étape (step_X) : une clé statut + une clé données.
+            # Les alias (base_*, racine, brut) ne sont plus écrits :
+            # `_find_var_in_registry` résout toutes les variantes depuis la clé canonique.
             step_bool_id = f"bool_{step.id}"
             step_data_id = f"data_{step.id}"
-            base_step_id = re.sub(r'-\d+$', '', step.id)
-            base_bool_id = f"bool_{base_step_id}"
-            base_data_id = f"data_{base_step_id}"
 
             bool_entry = {
                 "value": is_success_flag,
@@ -884,8 +874,6 @@ class Executor:
                 "timestamp": datetime.now().isoformat()
             }
             self.solver.variable_registry[step_bool_id] = bool_entry
-            if base_bool_id != step_bool_id:
-                self.solver.variable_registry[base_bool_id] = bool_entry
 
             # --- 1b. Normalisation des charges typées déclarées (contrat `returns`) ---
             # L'hôte étiquette (MIME imposés), nous convertissons en assets typés.
@@ -917,7 +905,7 @@ class Executor:
                             except Exception:
                                 _declared = ""
                             _leaf = re.sub(r'[^a-zA-Z0-9_\-]+', '_', _declared.split(".")[-1]).strip("_") or "media"
-                            _var = f"data_{base_step_id}_{_leaf}"
+                            _var = f"data_{step.id}_{_leaf}"
                             self.solver.variable_registry[_var] = {
                                 "value": _uri,
                                 "asset": _asset,
@@ -930,10 +918,11 @@ class Executor:
                 except Exception as e:
                     Logger.warning(f"[Executor] Normalisation des charges typées impossible ({e}) — repli texte.")
 
-            # --- 2. Détermination de la description de données ---
+            # --- 2. Description de données : dire ce qu'EST la donnée (pas d'où elle vient).
             if actual_data is not None:
                 data_description = (
-                    step.output_variable_desc or _("Données retournées par {}").format(step.tool_name)
+                    step.output_variable_desc or _("Résultat de '{desc}' via {tool}").format(
+                        desc=step.description, tool=step.tool_name)
                 ) + _(" (statut: {})").format(is_success_flag)
             else:
                 data_description = _("Aucune donnée retournée par {} (statut: {})").format(
@@ -941,30 +930,24 @@ class Executor:
                 )
 
             target_data_var_names = [step_data_id]
-            if base_data_id != step_data_id and base_data_id not in target_data_var_names:
-                target_data_var_names.append(base_data_id)
 
             if step.output_variable_name:
-                raw_out_name = step.output_variable_name
-                clean_out_name = re.sub(r'^(bool_|data_)+', '', raw_out_name)
+                clean_out_name = re.sub(r'^(bool_|data_)+', '', step.output_variable_name).strip() or f"out_{step.id}"
                 out_bool_name = f"bool_{clean_out_name}"
                 out_data_name = f"data_{clean_out_name}"
 
                 # 1. Enregistrer le statut d'exécution booléen sous bool_
                 self.solver.variable_registry[out_bool_name] = {
                     "value": is_success_flag,
-                    "description": step.output_variable_desc or _("Statut de l'opération {}").format(step.tool_name),
+                    "description": step.output_variable_desc or _("Statut de '{desc}' ({tool})").format(
+                        desc=step.description, tool=step.tool_name),
                     "source": self.solver.id,
                     "timestamp": datetime.now().isoformat()
                 }
-                if raw_out_name != out_bool_name and raw_out_name != out_data_name:
-                    self.solver.variable_registry[raw_out_name] = self.solver.variable_registry[out_bool_name]
 
-                # 2. Assurer que les données seront injectées sous data_ et la racine
+                # 2. Les données seront injectées sous data_ normalisé
                 if out_data_name not in target_data_var_names:
                     target_data_var_names.append(out_data_name)
-                if clean_out_name not in target_data_var_names:
-                    target_data_var_names.append(clean_out_name)
 
             # Seuil de volumétrie pour encapsulation en DataAsset (~3000 chars)
             INLINE_LIMIT = ASSET_INLINE_LIMIT

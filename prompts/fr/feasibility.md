@@ -15,6 +15,10 @@ Rapports de missions passées JUGÉES (le juge peut se tromper) : pistes suggest
 
 ## CONTEXTE
 {{ context or "Aucun." }}
+{% if world_snapshot %}
+## ÉTAT ACTUEL (photo par défaut — contexte seulement, jamais une preuve)
+{{ world_snapshot }}
+{% endif %}
 
 ## MISSIONS SIMILAIRES
 {% if similar_missions %}

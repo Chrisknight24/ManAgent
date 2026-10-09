@@ -16,6 +16,10 @@ Reports from past JUDGED missions (the judge can be wrong): suggestive leads, ne
 
 ## CONTEXT
 {{ context or "None." }}
+{% if world_snapshot %}
+## CURRENT STATE (default snapshot — context only, never proof)
+{{ world_snapshot }}
+{% endif %}
 
 ## SIMILAR MISSIONS
 {% if similar_missions %}

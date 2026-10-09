@@ -218,9 +218,16 @@ class Solver(Supervisor, Entity):
         self.executor = Executor(solver_node=self)
 
     def get_data_providers(self) -> Dict[str, Any]:
-        """Retourne les DataProviders du Solver (exclut rigoureusement 'skills')."""
+        """Retourne les DataProviders du Solver (exclut rigoureusement 'skills').
+
+        PD restreinte (Q10) : ni 'missions' (le Retriever couvre déjà via
+        `_similar_missions`), ni 'history' (la conversation vit dans le
+        contexte/mémoire, pas en forage). L'orchestrateur garde tout.
+        """
         providers = super().get_data_providers()
         providers.pop("skills", None)
+        providers.pop("missions", None)
+        providers.pop("history", None)
         return providers
 
     def _get_registry_metadata_view(self) -> Dict[str, Any]:
@@ -961,6 +968,67 @@ class Solver(Supervisor, Entity):
             lines.append(f"   Checkpoints vérifiables : {cps}")
         return "\n".join(lines)
 
+    async def _snapshot_world_default(self, max_chars: int = 1200) -> str:
+        """Photo par défaut de la situation (PUSH, Q10) : contexte affiché, jamais preuve.
+
+        L'hôte peut déclarer `world_snapshot: {source_tool, source_args,
+        max_chars}` (manifeste/metadata). Sinon premier `[perception]`
+        listé + question générique. Sinon rien. Fail-open total : échec =
+        chaîne vide, la mission continue comme avant.
+        """
+        try:
+            manifest = getattr(self.runtime_state, "host_manifest", None)
+            cfg = {}
+            if manifest is not None:
+                for holder in (getattr(manifest, "metadata", None), getattr(manifest, "environment", None)):
+                    if isinstance(holder, dict) and isinstance(holder.get("world_snapshot"), dict):
+                        cfg = holder["world_snapshot"]
+                        break
+            source_tool = str((cfg.get("source_tool") or "")).strip()
+            source_args = cfg.get("source_args") or {}
+            if not isinstance(source_args, dict):
+                source_args = {}
+            try:
+                limit = int(cfg.get("max_chars") or max_chars)
+            except Exception:
+                limit = max_chars
+            limit = max(1, min(4000, limit))
+            if not source_tool:
+                tm = getattr(self.runtime_state, "tools_manager", None)
+                names = sorted(tm.perception_tool_names()) if tm is not None and hasattr(tm, "perception_tool_names") else []
+                if not names:
+                    return ""
+                source_tool = names[0]
+            lang = getattr(self.runtime_state, "language", "en") or "en"
+            question = (
+                "Décris brièvement l'état actuel : fenêtre avant-plan, focus, état général."
+                if str(lang).startswith("fr")
+                else "Briefly describe the current state: foreground window, focus, overall state."
+            )
+            from core.discovery.explorers.world_explorer import WorldExplorer
+            explorer = WorldExplorer(self.runtime_state, getattr(self, "llm", None))
+            out = await explorer.execute_tool("sense", {
+                "question": question,
+                "source_tool": source_tool,
+                "source_args": source_args,
+            })
+            if not isinstance(out, dict) or not out.get("result", True):
+                return ""
+            text = out.get("data", "")
+            if not isinstance(text, str):
+                try:
+                    import json as _json
+                    text = _json.dumps(text, ensure_ascii=False)
+                except Exception:
+                    text = str(text)
+            text = text.strip()
+            if len(text) > limit:
+                text = text[:limit] + "…"
+            return text
+        except Exception as e:
+            Logger.debug(f"[Solver:{self.id}] Snapshot monde indisponible ({e}).")
+            return ""
+
     async def _check_feasibility(self, similar_missions_context: Optional[List[Dict]] = None) -> FeasibilityDecision:
         await self.propagate_event(Events.STATUS_UPDATE, {"message": "solving"})
         Logger.info(f"[Solver:{self.id}] 🤔 Évaluation de la faisabilité...")
@@ -1019,6 +1087,10 @@ class Solver(Supervisor, Entity):
             _show_world = world_guidance_visible(tools_view)
         except Exception:
             _show_world = True
+        try:
+            _snapshot = await self._snapshot_world_default() if _show_world else ""
+        except Exception:
+            _snapshot = ""
         prompt = loader.load(
             "feasibility.md",
             lang=self.runtime_state.language,
@@ -1026,7 +1098,9 @@ class Solver(Supervisor, Entity):
             context=self.context,
             tools="\n".join(formatted_tools),
             tools_guidance=tools_guidance,
-            world_guidance=_show_world,            skills=skills_text,
+            world_guidance=_show_world,
+            world_snapshot=_snapshot,
+            skills=skills_text,
             similar_missions=similar_missions_context,
             registry=registry_text,
             advice=advice
