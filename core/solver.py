@@ -581,8 +581,8 @@ class Solver(Supervisor, Entity):
                             Logger.warning(f"[Solver:{self.id}] ⚠️ Plan invalide (Pydantic) : {error_msg}")
                             self._record_plan_rejection(error_msg, attempt_counter, store_plan=False)
                             try:
-                                if _is_truncation_error(str(pydantic_error)):
-                                    self.runtime_state.truncation_count = int(getattr(self.runtime_state, "truncation_count", 0) or 0) + 1
+                                from core.alignment import note_truncation
+                                note_truncation(self.runtime_state, "Plan", str(pydantic_error))
                             except Exception:
                                 pass
 
