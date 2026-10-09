@@ -17,6 +17,10 @@ Rapports de missions passées JUGÉES (le juge peut se tromper) : pistes suggest
 {% else %}
 [Aucun conseil.]
 {% endif %}
+{% if world_snapshot %}
+- **ÉTAT ACTUEL (contexte frais, jamais une preuve)** :
+{{ world_snapshot }}
+{% endif %}
 
 ## REGISTRE (noms déjà produits)
 {% if variable_registry %}

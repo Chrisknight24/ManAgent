@@ -16,6 +16,78 @@ import re
 EFFECT_DETERMINISTIC = "deterministic"
 EFFECT_UNCERTAIN = "uncertain"
 
+# Convention de contrat (docs/HOST_CONTRACT.md) : l'hôte qui veut
+# fournir son état du monde expose un outil avec CE nom, sans argument
+# obligatoire. Nom conventionnel documenté (comme les noms d'actions
+# du protocole), jamais deviné : un seul endroit, pas de fallback créatif.
+WORLD_STATE_TOOL = "get_world_state"
+
+
+async def fetch_world_state_snapshot(runtime_state, max_chars: int = 800) -> str:
+    """Photo d'état du monde : manifeste déclaré > convention > rien.
+
+    Retourne du texte brut capé, ou "" avec un log `snapshot.skip`
+    motivé (no_world_state_tool, ...). Jamais d'exception, jamais de
+    devinette sur un outil au hasard. Fail-open total.
+    """
+    from utils.logger import Logger
+    try:
+        manifest = getattr(runtime_state, "host_manifest", None)
+        cfg = {}
+        if manifest is not None:
+            for holder in (getattr(manifest, "metadata", None), getattr(manifest, "environment", None)):
+                if isinstance(holder, dict) and isinstance(holder.get("world_snapshot"), dict):
+                    cfg = holder["world_snapshot"]
+                    break
+        source_tool = str((cfg.get("source_tool") or "")).strip()
+        source_args = cfg.get("source_args") or {}
+        if not isinstance(source_args, dict):
+            source_args = {}
+        try:
+            limit = int(cfg.get("max_chars") or max_chars)
+        except Exception:
+            limit = max_chars
+        limit = max(1, min(4000, limit))
+        if not source_tool:
+            tm = getattr(runtime_state, "tools_manager", None)
+            known = set(tm.known_tool_names()) if tm is not None and hasattr(tm, "known_tool_names") else set()
+            if WORLD_STATE_TOOL in known:
+                source_tool = WORLD_STATE_TOOL
+                source_args = {}
+        if not source_tool:
+            Logger.info("[snapshot] snapshot.skip reason=no_world_state_tool.")
+            return ""
+        tm = getattr(runtime_state, "tools_manager", None)
+        if tm is None or not hasattr(tm, "execute_tool"):
+            Logger.info("[snapshot] snapshot.skip reason=no_tools_manager.")
+            return ""
+        result_str = await tm.execute_tool(source_tool, dict(source_args))
+        import json as _json
+        try:
+            parsed = _json.loads(result_str) if isinstance(result_str, str) else result_str
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            if not parsed.get("result", True):
+                Logger.info("[snapshot] snapshot.skip reason=source_failed.")
+                return ""
+            data = parsed.get("data", parsed)
+        else:
+            data = parsed
+        if data is None:
+            return ""
+        text = data if isinstance(data, str) else _json.dumps(data, ensure_ascii=False)
+        text = str(text).strip()
+        if len(text) > limit:
+            text = text[:limit] + "…"
+        return text
+    except Exception as e:
+        try:
+            Logger.debug(f"[snapshot] snapshot.skip reason=error ({e}).")
+        except Exception:
+            pass
+        return ""
+
 
 def effect_of(tool: Dict[str, Any]) -> str:
     """Effet effectif d'un outil déclaré : deterministic | uncertain | none.

@@ -939,7 +939,7 @@ class Solver(Supervisor, Entity):
         for step in plan.steps:
             for field in [step.execute_if, step.response_text, step.tool_args_json]:
                 if field:
-                    matches = re.findall(r'\$@_([a-zA-Z0-9_]+)', field)
+                    matches = re.findall(r'\$@_([a-zA-Z0-9_-]+)', field)
                     used_vars.update(matches)
         lines.append(f"Variables utilisées : {', '.join(used_vars) if used_vars else 'aucune'}")
         return "\n".join(lines)
@@ -969,62 +969,14 @@ class Solver(Supervisor, Entity):
         return "\n".join(lines)
 
     async def _snapshot_world_default(self, max_chars: int = 1200) -> str:
-        """Photo par défaut de la situation (PUSH, Q10) : contexte affiché, jamais preuve.
+        """Photo par défaut (Prices : manifeste > convention > rien, log motivé).
 
-        L'hôte peut déclarer `world_snapshot: {source_tool, source_args,
-        max_chars}` (manifeste/metadata). Sinon premier `[perception]`
-        listé + question générique. Sinon rien. Fail-open total : échec =
-        chaîne vide, la mission continue comme avant.
+        Délègue à `core.alignment.fetch_world_state_snapshot`.
+        Contexte affiché, jamais preuve. Fail-open total.
         """
         try:
-            manifest = getattr(self.runtime_state, "host_manifest", None)
-            cfg = {}
-            if manifest is not None:
-                for holder in (getattr(manifest, "metadata", None), getattr(manifest, "environment", None)):
-                    if isinstance(holder, dict) and isinstance(holder.get("world_snapshot"), dict):
-                        cfg = holder["world_snapshot"]
-                        break
-            source_tool = str((cfg.get("source_tool") or "")).strip()
-            source_args = cfg.get("source_args") or {}
-            if not isinstance(source_args, dict):
-                source_args = {}
-            try:
-                limit = int(cfg.get("max_chars") or max_chars)
-            except Exception:
-                limit = max_chars
-            limit = max(1, min(4000, limit))
-            if not source_tool:
-                tm = getattr(self.runtime_state, "tools_manager", None)
-                names = sorted(tm.perception_tool_names()) if tm is not None and hasattr(tm, "perception_tool_names") else []
-                if not names:
-                    return ""
-                source_tool = names[0]
-            lang = getattr(self.runtime_state, "language", "en") or "en"
-            question = (
-                "Décris brièvement l'état actuel : fenêtre avant-plan, focus, état général."
-                if str(lang).startswith("fr")
-                else "Briefly describe the current state: foreground window, focus, overall state."
-            )
-            from core.discovery.explorers.world_explorer import WorldExplorer
-            explorer = WorldExplorer(self.runtime_state, getattr(self, "llm", None))
-            out = await explorer.execute_tool("sense", {
-                "question": question,
-                "source_tool": source_tool,
-                "source_args": source_args,
-            })
-            if not isinstance(out, dict) or not out.get("result", True):
-                return ""
-            text = out.get("data", "")
-            if not isinstance(text, str):
-                try:
-                    import json as _json
-                    text = _json.dumps(text, ensure_ascii=False)
-                except Exception:
-                    text = str(text)
-            text = text.strip()
-            if len(text) > limit:
-                text = text[:limit] + "…"
-            return text
+            from core.alignment import fetch_world_state_snapshot
+            return await fetch_world_state_snapshot(self.runtime_state, max_chars=max_chars)
         except Exception as e:
             Logger.debug(f"[Solver:{self.id}] Snapshot monde indisponible ({e}).")
             return ""
@@ -1330,6 +1282,12 @@ class Solver(Supervisor, Entity):
                 alignment_note = risk_sentence(plan_risk(_executed_tools, _uncertain, _perception))
             except Exception:
                 alignment_note = ""
+            try:
+                from core.alignment import fetch_world_state_snapshot
+                _final_snapshot = await fetch_world_state_snapshot(
+                    self.runtime_state, max_chars=600)
+            except Exception:
+                _final_snapshot = ""
             prompt = loader.load(
                 "convergence.md",
                 lang=self.runtime_state.language,
@@ -1338,6 +1296,7 @@ class Solver(Supervisor, Entity):
                 actual_result=evidence or _("(aucune preuve textuelle disponible)"),
                 tool_status="OK",
                 alignment_note=alignment_note,
+                world_snapshot=_final_snapshot,
             )
             conv_llm = self.llm
             try:

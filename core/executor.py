@@ -1212,6 +1212,12 @@ class Executor:
             tool_status = "OK"
         else:
             tool_status = "UNKNOWN"
+        try:
+            from core.alignment import fetch_world_state_snapshot
+            _conv_snapshot = await fetch_world_state_snapshot(
+                self.solver.runtime_state, max_chars=600)
+        except Exception:
+            _conv_snapshot = ""
         prompt = loader.load(
             "convergence.md",
             lang=self.solver.runtime_state.language,
@@ -1219,6 +1225,7 @@ class Executor:
             expected_result=step.expected_result,
             actual_result=actual_result,
             tool_status=tool_status,
+            world_snapshot=_conv_snapshot,
         )
         # Juge isolé : clone dédié, PD restreinte (registre + monde). Le juge
         # peut re-percevoir en cas de doute, sans le bruit des autres axes.

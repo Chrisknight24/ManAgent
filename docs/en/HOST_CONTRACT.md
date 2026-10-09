@@ -114,6 +114,15 @@ Cautious defaults: `[action]` = `"uncertain"`, `[perception]` and
 utilities = none. A deterministic host declares `"deterministic"` once
 and pays zero extra verification. Details: `docs/ALIGNMENT.md`.
 
+## 3f. World state (optional, recommended for visual hosts)
+
+So the brain knows "where it is" without guessing:
+- Either declare `world_snapshot: {source_tool, source_args, max_chars}` (manifest metadata or environment): source read on demand, capped text.
+- Or expose a tool named `get_world_state`, kind `[perception]`, with no required params: it is called by default (short text: foreground window, focus, state).
+- Otherwise nothing: the brain continues without a snapshot.
+- Read points: before feasibility, before each plan, before each convergence (never judged as proof, context only).
+- Documented `get_world_state` convention here: plain text return or `{summary_text, full}` (summary in prompt, detail via PD).
+
 ## 4. Supported actions
 
 `runtime.configure`, `host.manifest.register`, `chat.send`,

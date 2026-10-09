@@ -271,8 +271,10 @@ def is_simple_data_condition(expr: str) -> bool:
 
     if not expr or not isinstance(expr, str):
         return True
-    # Masque les variables $@_xxx / @$_xxx par des noms simples.
-    masked = re.sub(r'(?:\$@_|@\$_)([a-zA-Z0-9_]+)', r'VAR_\1', expr)
+    # Masque les variables $@_xxx / @$_xxx par des noms simples
+    # (tirets normalisés : les IDs step_N-XXXXX restent un seul nom).
+    masked = re.sub(r'(?:\$@_|@\$_)([a-zA-Z0-9_-]+)',
+                    lambda m: 'VAR_' + m.group(1).replace('-', '_'), expr)
     try:
         tree = _ast.parse(masked, mode='eval')
     except Exception:

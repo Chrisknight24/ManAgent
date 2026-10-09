@@ -17,6 +17,9 @@ Tu es un module expert chargé de vérifier si le résultat d'une étape (ou sou
 {% if alignment_note %}
 - **Alignment fact (computed, not an opinion)** : {{ alignment_note }}
 {% endif %}
+{% if world_snapshot %}
+- **Current state (fresh context, never proof)** : {{ world_snapshot }}
+{% endif %}
 
 ## RÉPONSE
 Génère une décision structurée au format JSON avec `is_convergent` (booléen) et `reason` (chaîne expliquant la décision).

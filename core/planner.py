@@ -250,6 +250,12 @@ class Planner(Entity):
             else:
                 unsupported_modalities.append(info_dict)
 
+        try:
+            from core.alignment import fetch_world_state_snapshot
+            _plan_snapshot = await fetch_world_state_snapshot(
+                self.runtime_state, max_chars=600)
+        except Exception:
+            _plan_snapshot = ""
         prompt = loader.load(
             "planner.md",
             lang=self.runtime_state.language,
@@ -258,6 +264,7 @@ class Planner(Entity):
             strategy=strategy,
             previous_failures=previous_failures or "",
             world_guidance=show_world_guidance,
+            world_snapshot=_plan_snapshot,
             variable_registry=enriched_registry,
             tools=tools_view,
             skills=skills_text,
@@ -326,7 +333,7 @@ class Planner(Entity):
             used = set()
             for field in fields:
                 if field:
-                    matches = re.findall(r'(?:\$@_|@\$_)([a-zA-Z0-9_]+)', str(field))
+                    matches = re.findall(r'(?:\$@_|@\$_)([a-zA-Z0-9_-]+)', str(field))
                     used.update(matches)
             return used
 

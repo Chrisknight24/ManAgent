@@ -143,6 +143,15 @@ différer). Défauts prudents : `[action]` = `"uncertain"`, `[perception]`
 et utilitaires = rien. Un hôte déterministe déclare `"deterministic"`
 une fois et ne paie aucune vérification en plus. Détail : `docs/ALIGNMENT.md`.
 
+## 3g. État du monde (optionnel, recommandé pour les hôtes visuels)
+
+Pour que le cerveau sache « où il est » sans deviner :
+- Soit déclarez `world_snapshot: {source_tool, source_args, max_chars}` (metadata ou environment du manifeste) : source lue à la demande, texte capé.
+- Soit exposez un outil nommé `get_world_state`, kind `[perception]`, sans param obligatoire : il sera appelé par défaut (texte court : fenêtre avant-plan, focus, état).
+- Sinon rien : le cerveau continue sans photo (nécessite un redémarrage du raisonnement sans contexte).
+- Points de lecture : avant faisabilité, avant chaque plan, avant chaque convergence (jamais jugé comme preuve, que du contexte).
+- Convention `get_world_state` documentée ici : retour texte brut ou `{summary_text, full}` (résumé dans le prompt, détail via PD).
+
 ## 4. Actions supportées (voir `core/constants.py:8`)
 
 | Action | Usage |

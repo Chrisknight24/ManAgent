@@ -17,6 +17,10 @@ Reports from past JUDGED missions (the judge can be wrong): suggestive leads, ne
 {% else %}
 [No advice.]
 {% endif %}
+{% if world_snapshot %}
+- **CURRENT STATE (fresh context, never proof)**:
+{{ world_snapshot }}
+{% endif %}
 
 ## REGISTRY (names already produced)
 {% if variable_registry %}
