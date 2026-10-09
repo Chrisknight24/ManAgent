@@ -113,6 +113,16 @@ always equals the real effect) or `"uncertain"` (they may differ).
 Cautious defaults: `[action]` = `"uncertain"`, `[perception]` and
 utilities = none. A deterministic host declares `"deterministic"` once
 and pays zero extra verification. Details: `docs/ALIGNMENT.md`.
+- `effects_timeout_ms` (optional, integer, milliseconds): wait
+  inserted by the brain after each successful call to this tool.
+  Absent = no wait.
+- `changing_effects` (optional, open list): change events the host
+  can detect (`foreground_changed`, `focus_changed`,
+  `screen_diff`, `app_loading`, `app_closing`…) plus per-tool
+  `max_wait_ms` (host default otherwise). The host actively waits
+  after a flagged action, returns `false + no_world_change_detected`
+  otherwise. The brain never blocks: client timeout = `max_wait_ms`
+  + margin.
 
 ## 3f. World state (optional, recommended for visual hosts)
 

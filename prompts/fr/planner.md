@@ -110,6 +110,7 @@ Pas de `.result`, pas de `IN`/`CONTAINS`, pas de fonctions. Combinaisons avec `a
 Avec `perceive_understand`. Il lit et explique en une étape.
 `source_tool` = recopie exacte d'un outil `[perception]` listé dans OUTILS ci-dessus. N'invente aucun nom d'outil hôte. Sans outil `[perception]` listé : utilise `source_data` (variable existante) ou termine en `direct_answer`. Écris dans `question` tout ce que la réponse doit contenir.
 Si tu utilises des outils à effet incertain sans lecture du monde derrière, une vérification finale par perception sera probablement requise : écris-la ou assume le risque.
+Si l'effet attendu est subtil (élément qui apparaît, texte modifié dans une zone), précise `verify_with` avec l'outil `[perception]` adapté ; sinon `get_world_state` s'appliquera par défaut.
 Le résultat `$@_data_step_N` EST la réponse quand la question la demande : n'ajoute pas d'analyse derrière sans raison. `llm_analyze_data` sert seulement pour des données déjà en variable (fichier, long texte).
 {% endif %}
 

@@ -444,7 +444,13 @@ class ToolsManager(Entity):
             return self.runtime_state.host_manifest
         return None
 
-    def register_tool(self, name: str, role: str, description: str, parameters_schema: dict, source: str = "external", kind: str = "action", returns: Optional[List[Dict]] = None, effects: Optional[str] = None) -> None:
+    def register_tool(self, name: str, role: str, description: str, parameters_schema: dict, source: str = "external", kind: str = "action", returns: Optional[List[Dict]] = None, effects: Optional[str] = None, effects_timeout_ms: Optional[int] = None) -> None:
+        try:
+            timeout_ms = int(effects_timeout_ms) if effects_timeout_ms is not None else None
+            if timeout_ms is not None and timeout_ms <= 0:
+                timeout_ms = None
+        except Exception:
+            timeout_ms = None
         self._tools[name] = {
             "name": name,
             "role": role,
@@ -454,8 +460,20 @@ class ToolsManager(Entity):
             "source": source,
             "returns": list(returns or []),
             "effects": (effects or "").strip().lower() or None,
+            "effects_timeout_ms": timeout_ms,
         }
         Logger.debug(f"[ToolsManager] Outil enregistré : {name} (source={source}, kind={kind})")
+
+    def get_tool_timeout_ms(self, tool_name: str) -> Optional[int]:
+        """Délai d'attente déclaré par l'outil après action (P1, aucun si absent)."""
+        tool = self._tools.get(tool_name) if isinstance(getattr(self, "_tools", None), dict) else None
+        if not isinstance(tool, dict):
+            return None
+        try:
+            value = tool.get("effects_timeout_ms")
+            return int(value) if value is not None and int(value) > 0 else None
+        except Exception:
+            return None
 
     def get_tool_returns(self, tool_name: str) -> List[Dict]:
         """Sorties typées déclarées au manifeste pour un outil (contrat `returns`).
@@ -508,6 +526,7 @@ class ToolsManager(Entity):
                 kind=tool_def.get("kind", "action"),
                 returns=tool_def.get("returns"),
                 effects=tool_def.get("effects"),
+                effects_timeout_ms=tool_def.get("effects_timeout_ms"),
             )
 
     async def get_tools_view(self, goal_query: str = None) -> List[Dict]:

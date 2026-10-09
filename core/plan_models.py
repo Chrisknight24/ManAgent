@@ -131,6 +131,24 @@ class PlanStep(BaseModel):
         description=_("Si is_irreversible=True, explique brièvement en quoi l'effet est irréversible.")
     )
 
+    # --- Changement d'état monde attendu (P2, optionnel, null = inerte) ---
+    should_world_state_change_after_action: Optional[bool] = Field(
+        default=None,
+        description=_(
+            "Le planner déclare-t-il qu'un changement du monde est attendu après "
+            "cette action ? True = oui (ex : clic sur une icône), False = non, "
+            "null (défaut) = indéterminé : l'executor ne change strictement rien."
+        )
+    )
+    verify_with: Optional[str] = Field(
+        default=None,
+        description=_(
+            "Nom d'un outil [perception] du manifeste pour l'arbitrage si le "
+            "changement attendu ne se produit pas. Optionnel ; sinon convention "
+            "get_world_state ; sinon pas d'arbitrage (échec honnête)."
+        )
+    )
+
     @model_validator(mode='after')
     def validate_tool_integrity(self) -> 'PlanStep':
         if self.type == StepType.TOOL_CALL:

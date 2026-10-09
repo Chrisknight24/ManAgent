@@ -317,6 +317,28 @@ class Executor:
 
                         accumulated_context += f"\n[Succès {step.id}] : {execution_output}"
 
+                        # --- P1 effects_timeout_ms : attente déclarée après action.
+                        # L'outil déclare, le cerveau attend (annulable, plafond
+                        # 30s). Sans déclaration : rien ne change.
+                        if step.type == StepType.TOOL_CALL and step.tool_name:
+                            try:
+                                _tm2 = getattr(self.solver.runtime_state, "tools_manager", None)
+                                _wait_ms = _tm2.get_tool_timeout_ms(step.tool_name) if _tm2 is not None and hasattr(_tm2, "get_tool_timeout_ms") else None
+                            except Exception:
+                                _wait_ms = None
+                            if _wait_ms:
+                                _wait_ms = max(0, min(int(_wait_ms), 30000))
+                                if _wait_ms > 0:
+                                    Logger.info(f"[Executor] Attente déclarée après '{step.tool_name}' : {_wait_ms} ms.")
+                                    import asyncio as _asyncio
+                                    _left = _wait_ms / 1000.0
+                                    while _left > 0:
+                                        if getattr(self.solver.runtime_state, "cancel_requested", False):
+                                            break
+                                        _slice = min(0.25, _left)
+                                        await _asyncio.sleep(_slice)
+                                        _left -= _slice
+
                         if step.type in [StepType.DIRECT_ANSWER, StepType.ABSTRACT_TASK]:
                             if execution_output:
                                 user_responses.append(execution_output)
@@ -1032,6 +1054,27 @@ class Executor:
                     "timestamp": datetime.now().isoformat()
                 }
 
+            # --- Arbitrage changement-monde (P2) : l'hôte dit "rien changé".
+            # Borné à 1 arbitrage par step. L'arbitre tranche, la convergence
+            # voit les DEUX faits ordonnés (hôte puis arbitre).
+            if (is_success_flag != "true"
+                    and getattr(step, "should_world_state_change_after_action", None) is True
+                    and "no_world_change_detected" in str(tool_error_reason or error_reason_msg or "").lower()):
+                _arb = await self._arbitrate_no_change(step)
+                if _arb is not None:
+                    _arbi_yes, _arbi_text = _arb
+                    if _arbi_yes:
+                        if node:
+                            node.raw_success_flag = "true"
+                            node.raw_tool_success = True
+                        return True, (
+                            _("Faux négatif hôte : aucun changement signalé mais arbitre OK ({})").format(_arbi_text[:300])
+                        ), error_reason_msg
+                    error_reason_msg = (
+                        f"{error_reason_msg or tool_error_reason} "
+                        + _("Arbitre : {}").format(_arbi_text[:300])
+                    ).strip()
+
             if is_success_flag == "true":
                 if actual_data is not None:
                     if isinstance(actual_data, (dict, list)):
@@ -1048,6 +1091,51 @@ class Executor:
         except json.JSONDecodeError:
             Logger.warning(f"[Executor] Échec de parsing JSON pour l'outil {step.tool_name}. Contenu reçu : {hardware_result_str[:200]}")
             return False, "", "Le retour de l'outil C++ ne respecte pas le format JSON strict."
+
+    # =====================================================
+    # ARBITRAGE CHANGEMENT-MONDE (P2, borné : 1 par step)
+    # =====================================================
+
+    async def _arbitrate_no_change(self, step) -> Optional[Tuple[bool, str]]:
+        """Arbitre orienté après `no_world_change_detected`.
+
+        Source : `verify_with` du step > convention `get_world_state` >
+        rien (None = pas d'arbitrage, échec honnête). Retourne
+        (verdict_bool, texte) ou None. Jamais d'exception.
+        """
+        try:
+            from core.alignment import WORLD_STATE_TOOL
+            from tools.internal_tools import perceive_understand
+            source = (getattr(step, "verify_with", None) or "").strip()
+            if not source:
+                tm = getattr(self.solver.runtime_state, "tools_manager", None)
+                known = set(tm.known_tool_names()) if tm is not None and hasattr(tm, "known_tool_names") else set()
+                if WORLD_STATE_TOOL in known:
+                    source = WORLD_STATE_TOOL
+            if not source:
+                return None
+            question = (
+                f"On vient d'exécuter '{step.description}'. "
+                f"Rien ne semble s'être produit. Est-ce que tout va bien ? Réponds yes or no."
+            )
+            out = await perceive_understand(
+                {"question": question, "source_tool": source,
+                 "source_args": {}, "format_response": "yes or no"},
+                self.solver.runtime_state,
+            )
+            if not isinstance(out, dict):
+                return None
+            if not out.get("result", False):
+                return None
+            answer = str(out.get("data") or "").strip().lower()
+            if answer.startswith("yes") or answer in ("oui", "ok", "true"):
+                return True, str(out.get("data") or "")
+            if answer.startswith("no") or answer in ("non", "false"):
+                return False, str(out.get("data") or "")
+            return None
+        except Exception as e:
+            Logger.debug(f"[Executor] Arbitrage impossible ({e}).")
+            return None
 
     # =====================================================
     # CONVERGENCE ET VALIDATION

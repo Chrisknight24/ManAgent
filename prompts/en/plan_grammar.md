@@ -107,6 +107,10 @@ Les outils sont **stateless (sans mémoire)** et ne peuvent pas définir de vari
    Active `is_crucial: true` pour mettre en avant la donnée dans le Registre Utile de Mission (RUM).
    `is_crucial=true` for the data that ANSWERS the user's question (the result, the value, the final confirmation). Never for intermediate artefacts (captures, logs, transient states) unless the user asks for them.
 
+6. **Expected state change (optional)** :
+   `should_world_state_change_after_action: true` if you expect a visible change after this action (`false` otherwise, absent if undetermined — inert default, nothing changes).
+   `verify_with`: name of a `[perception]` tool to check on doubt (else `get_world_state` by default).
+
 ### Exemple de plan valide (Générique)
 
 Mission : Vérifier la disponibilité d'une ressource ou équipement, et si disponible exécuter une opération, sinon signaler l'indisponibilité.

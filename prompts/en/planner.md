@@ -110,6 +110,7 @@ No `.result`, no `IN`/`CONTAINS`, no functions. Combine with `and` / `or`.
 With `perceive_understand`. It reads and explains in one step.
 `source_tool` = exact copy of a `[perception]` tool listed in TOOLS above. Never invent a host tool name. With no `[perception]` tool listed: use `source_data` (existing variable) or finish with `direct_answer`. Write in `question` everything the answer must contain.
 If you use uncertain-effect tools with no world reading after them, a final perception check will probably be required: write it or own the risk.
+If the expected effect is subtle (appearing element, modified text in an area), set `verify_with` to the matching `[perception]` tool; otherwise `get_world_state` applies by default.
 The `$@_data_step_N` result IS the answer when the question asks for it: add no analysis after it without a reason. `llm_analyze_data` is only for data already in a variable (file, long text).
 {% endif %}
 

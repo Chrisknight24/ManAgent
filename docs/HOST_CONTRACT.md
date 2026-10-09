@@ -142,6 +142,15 @@ annoncé égale toujours l'effet réel) ou `"uncertain"` (les deux peuvent
 différer). Défauts prudents : `[action]` = `"uncertain"`, `[perception]`
 et utilitaires = rien. Un hôte déterministe déclare `"deterministic"`
 une fois et ne paie aucune vérification en plus. Détail : `docs/ALIGNMENT.md`.
+- `effects_timeout_ms` (optionnel, entier, millisecondes) : attente
+  insérée par le cerveau après chaque appel réussi à cet outil. Absent
+  = aucune attente.
+- `changing_effects` (optionnel, liste ouverte) : events de changement
+  que l'hôte sait détecter (`foreground_changed`, `focus_changed`,
+  `screen_diff`, `app_loading`, `app_closing`…) + `max_wait_ms`
+  par outil (défaut hôte sinon). L'hôte attend activement après une
+  action marquée, retourne `false + no_world_change_detected` sinon.
+  Le cerveau ne bloque jamais : timeout client = `max_wait_ms` + marge.
 
 ## 3g. État du monde (optionnel, recommandé pour les hôtes visuels)
 

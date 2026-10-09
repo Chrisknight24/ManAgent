@@ -20,6 +20,8 @@
           "name": { "type": "string" },
           "kind": { "type": "string", "enum": ["perception", "action", "utility"] },
           "effects": { "type": "string", "enum": ["deterministic", "uncertain"], "description": "Optional. Undeclared action = uncertain (cautious). See docs/ALIGNMENT.md." },
+          "effects_timeout_ms": { "type": "integer", "minimum": 1, "description": "Optional wait after action, milliseconds. Absent = no wait." },
+          "max_wait_ms": { "type": "integer", "minimum": 1, "description": "Optional per-tool active-wait ceiling (changing_effects). Absent = host default." },
           "description": { "type": "string" },
           "parameters": { "type": "object" },
           "returns": {

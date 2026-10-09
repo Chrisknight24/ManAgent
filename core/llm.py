@@ -318,7 +318,8 @@ class Llm:
             )
             Logger.debug(
                 f"[LLM] Section PD générée avec {len(data_types_info)} type(s) de données, "
-                f"longueur={len(discovery_section)} caractères."
+                f"longueur={len(discovery_section)} caractères "
+                f"(~{max(1, len(discovery_section) // 4)} tokens estimés, métrique PD)."
             )
             return discovery_section
 
@@ -973,7 +974,11 @@ class Llm:
                 if "input_value=None" in error_str or "input_type=NoneType" in error_str:
                     Logger.error(f"[LLM] Le modèle a renvoyé une réponse vide (potentiel blocage de sécurité). Impossible de continuer.")
                     raise RuntimeError("Le modèle a renvoyé une réponse vide (bloquée par sécurité ou erreur API).")
-                
+                try:
+                    from core.alignment import note_truncation
+                    note_truncation(self.runtime_state, tag, error_str)
+                except Exception:
+                    pass
                 Logger.warning(
                     f"[LLM] Validation Pydantic échouée (tentative {attempt+1}/{max_attempts}) pour "
                     f"le schéma {schema.__name__} : {e}"

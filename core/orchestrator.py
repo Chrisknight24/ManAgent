@@ -240,6 +240,8 @@ class Orchestrator(Supervisor, Entity):
                 mission_id = payload.get("mission_id")
                 store = getattr(self.runtime_state, "llm_usage", None) or {"by_mission": {}, "total": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}}
                 by_mission = store.get("by_mission", {}) or {}
+                trunc = getattr(self.runtime_state, "truncation_count", None)
+                trunc_out = dict(trunc) if isinstance(trunc, dict) else ({"__total__": trunc} if trunc else {})
                 if mission_id:
                     entry = by_mission.get(mission_id)
                     if entry is None:
@@ -252,6 +254,7 @@ class Orchestrator(Supervisor, Entity):
                     })
                 return ResponsePacket(type="response", status="success", payload={
                     "found": True, "total": store.get("total", {}), "by_mission": by_mission,
+                    "truncations": trunc_out,
                 })
             elif packet.action == Actions.RULES_GET:
                 return ResponsePacket(type="response", status="success", payload={

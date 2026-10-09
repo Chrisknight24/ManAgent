@@ -312,3 +312,38 @@ def redelegation_clusters(goals: List[str], threshold: float = 0.60) -> List[Lis
         if not placed:
             clusters.append([idx])
     return [sorted(group) for group in clusters if len(group) > 1]
+
+
+def is_truncation_text(raw_error: str) -> bool:
+    """Réponse LLM coupée (budget sortie) ? Marqueurs stables, pur."""
+    raw = str(raw_error or "")
+    return "EOF while parsing" in raw or "Unterminated string" in raw
+
+
+def note_truncation(runtime_state, tag: str, raw_error: str = "") -> int:
+    """Compteur de troncatures par tag d'appel (métrique de vague).
+
+    Stocké en dict sur `runtime_state.truncation_count`
+    (`{"Plan": 2, ...}`). Volatil session. Retourne le total.
+    Ne lève jamais.
+    """
+    try:
+        if raw_error and not is_truncation_text(raw_error):
+            current = getattr(runtime_state, "truncation_count", None)
+            return sum(current.values()) if isinstance(current, dict) else int(current or 0)
+        current = getattr(runtime_state, "truncation_count", None)
+        if not isinstance(current, dict):
+            try:
+                total = int(current or 0)
+            except Exception:
+                total = 0
+            current = {"__total__": total} if total else {}
+            try:
+                setattr(runtime_state, "truncation_count", current)
+            except Exception:
+                return total
+        key = str(tag or "unknown")
+        current[key] = int(current.get(key) or 0) + 1
+        return sum(v for v in current.values() if isinstance(v, int))
+    except Exception:
+        return 0
