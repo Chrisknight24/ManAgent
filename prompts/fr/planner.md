@@ -18,7 +18,7 @@ Rapports de missions passées JUGÉES (le juge peut se tromper) : pistes suggest
 [Aucun conseil.]
 {% endif %}
 {% if world_snapshot %}
-- **ÉTAT ACTUEL (contexte frais, jamais une preuve)** :
+## ÉTAT ACTUEL DU MONDE (contexte frais, jamais une preuve)
 {{ world_snapshot }}
 {% endif %}
 
@@ -81,6 +81,7 @@ Un `tool_call` exige un `tool_name` recopié de OUTILS. Une action = un `tool_ca
 6. Si aucun outil ne convient : `direct_answer` qui dit ce qui manque.
 7. Si l'objectif se contredit : `direct_answer` qui le signale.
 8. Si l'historique montre un échec, ta nouvelle stratégie doit changer d'approche (pas rejouer pareil).
+9. Tes plans doivent tenir dans la limite de sortie : descriptions brèves (une phrase), pas de répétition des args dans la description, 5 à 10 étapes typiquement. Au-delà : resserre l'objectif ou termine en `direct_answer` partiel honnête.
 
 ## VARIABLES
 

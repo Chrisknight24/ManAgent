@@ -18,7 +18,7 @@ Reports from past JUDGED missions (the judge can be wrong): suggestive leads, ne
 [No advice.]
 {% endif %}
 {% if world_snapshot %}
-- **CURRENT STATE (fresh context, never proof)**:
+## CURRENT WORLD STATE (fresh context, never proof)
 {{ world_snapshot }}
 {% endif %}
 
@@ -81,6 +81,7 @@ A `tool_call` needs a `tool_name` copied from TOOLS. One action = one `tool_call
 6. If no tool fits: `direct_answer` saying what is missing.
 7. If the goal contradicts itself: `direct_answer` saying so.
 8. If history shows a failure, your new strategy must change approach (never replay the same).
+9. Your plans must fit the output limit: brief descriptions (one sentence), no repeating args in the description, typically 5 to 10 steps. Beyond that: narrow the goal or finish with an honest partial `direct_answer`.
 
 ## VARIABLES
 

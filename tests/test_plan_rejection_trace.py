@@ -79,3 +79,11 @@ def test_autre_erreur_garde_dump():
     msg = _pydantic_feedback("missing field 'steps'")
     assert "PLUS COURT" not in msg
     assert "missing field" in msg
+
+
+def test_is_truncation_error():
+    from core.solver import _is_truncation_error
+    assert _is_truncation_error("EOF while parsing a string") is True
+    assert _is_truncation_error("Unterminated string") is True
+    assert _is_truncation_error("missing field 'steps'") is False
+    assert _is_truncation_error("") is False

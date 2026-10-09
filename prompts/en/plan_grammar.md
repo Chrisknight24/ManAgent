@@ -105,6 +105,7 @@ Les outils sont **stateless (sans mémoire)** et ne peuvent pas définir de vari
 
 5. **Variables cruciales (`is_crucial: true`)** :
    Active `is_crucial: true` pour mettre en avant la donnée dans le Registre Utile de Mission (RUM).
+   `is_crucial=true` for the data that ANSWERS the user's question (the result, the value, the final confirmation). Never for intermediate artefacts (captures, logs, transient states) unless the user asks for them.
 
 ### Exemple de plan valide (Générique)
 

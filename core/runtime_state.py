@@ -62,6 +62,9 @@ class RuntimeState:
         self.usage_store = None  # Compteurs tokens persistants (SQLite, survit au redémarrage)
         self.host_skill_executor = None
         self.host_environment = None
+        # Compteur de réponses LLM coupées (troncation sortie) : métrique
+        # de vague (rouvrir le plafond si ça persiste malgré plans courts).
+        self.truncation_count = 0
         
     def reset_execution_markers(self):
         """Réinitialise les marqueurs d'exécution pour une nouvelle mission."""

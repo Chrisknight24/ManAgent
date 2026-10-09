@@ -103,6 +103,12 @@ def _pydantic_feedback(raw_error: str) -> str:
     return f"Erreur de validation Pydantic : {raw}"
 
 
+def _is_truncation_error(raw_error: str) -> bool:
+    """Réponse LLM coupée (budget sortie) ? Compteur de vague (plafond)."""
+    raw = str(raw_error or "")
+    return "EOF while parsing" in raw or "Unterminated string" in raw
+
+
 class Solver(Supervisor, Entity):
     """
     Solver – exécute une mission.
@@ -574,6 +580,11 @@ class Solver(Supervisor, Entity):
                             error_msg = _pydantic_feedback(str(pydantic_error))
                             Logger.warning(f"[Solver:{self.id}] ⚠️ Plan invalide (Pydantic) : {error_msg}")
                             self._record_plan_rejection(error_msg, attempt_counter, store_plan=False)
+                            try:
+                                if _is_truncation_error(str(pydantic_error)):
+                                    self.runtime_state.truncation_count = int(getattr(self.runtime_state, "truncation_count", 0) or 0) + 1
+                            except Exception:
+                                pass
 
                             await self.propagate_event(Events.PLANNER_RETRY, {
                                 "reason": error_msg,

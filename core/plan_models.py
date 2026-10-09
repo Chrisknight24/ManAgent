@@ -113,7 +113,7 @@ class PlanStep(BaseModel):
     # --- NOUVEAU : Variable cruciale pour le RUM ---
     is_crucial: bool = Field(
         False,
-        description=_("Si True, cette variable sera ajoutée au Registre Utile de Mission (RUM) visible par le Présentateur. Utilisez ce flag pour les preuves directes de succès/échec de la mission.")
+        description=_("Si True, cette variable sera ajoutée au Registre Utile de Mission (RUM) visible par le Présentateur. True pour la donnée qui RÉPOND à la question de l'utilisateur (résultat, valeur, confirmation finale). Jamais pour les artefacts intermédiaires sauf demande explicite.")
     )
 
     # --- NOUVEAU : déclaration d'irréversibilité (validation finale Orchestrateur) ---
