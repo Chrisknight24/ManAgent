@@ -60,14 +60,16 @@ def test_root_uses_pd_without_touching_state():
     assert "disabled" not in calls
 
 
-def test_sub_solver_gets_temporary_pd_then_restores():
+def test_clone_impossible_reutilise_llm_sans_mutation():
+    # Design actuel (depuis isolation par clone) : si le clone est impossible,
+    # on réutilise le LLM du solver TEL QUEL, sans muter son état partagé.
     solver, calls = _solver(discovery_enabled=False)
     ex = _executor(solver)
     out = asyncio.run(ex._evaluate_semantic_convergence(_step(), "fini"))
     assert out.is_convergent is True
     assert calls["with_discovery"] is True
-    assert calls.get("enabled") is True
-    assert calls.get("disabled") is True
+    assert "enabled" not in calls
+    assert "disabled" not in calls
 
 
 def test_no_engine_falls_back_gracefully():

@@ -64,29 +64,24 @@ def test_snapshot_vide_sans_perception():
 
 
 def test_snapshot_capé_et_fail_open():
+    # Comportement actuel (convention Q10) : seule la convention
+    # get_world_state (ou manifeste) alimente la photo ; sans elle, "".
+    # Avec elle, texte capé. Jamais de devinette sur un outil au hasard.
+    import json as _json
     from core.solver import Solver
 
     class FakeTM:
-        def perception_tool_names(self):
-            return {"vision"}
-
-    class FakeExplorer:
-        def __init__(self, *a, **k):
-            pass
+        def known_tool_names(self):
+            return {"get_world_state"}
 
         async def execute_tool(self, name, args):
-            return {"result": True, "data": "x" * 5000}
+            assert name == "get_world_state"
+            return _json.dumps({"result": True, "data": "x" * 5000})
 
-    import core.discovery.explorers.world_explorer as we
-    orig = we.WorldExplorer
-    we.WorldExplorer = FakeExplorer
-    try:
-        solver = Solver.__new__(Solver)
-        solver.id = "s"
-        solver.llm = None
-        solver.runtime_state = types.SimpleNamespace(
-            tools_manager=FakeTM(), host_manifest=None, language="en")
-        out = asyncio.run(solver._snapshot_world_default(max_chars=100))
-        assert out != "" and len(out) <= 120
-    finally:
-        we.WorldExplorer = orig
+    solver = Solver.__new__(Solver)
+    solver.id = "s"
+    solver.llm = None
+    solver.runtime_state = types.SimpleNamespace(
+        tools_manager=FakeTM(), host_manifest=None, language="en")
+    out = asyncio.run(solver._snapshot_world_default(max_chars=100))
+    assert out != "" and len(out) <= 120
