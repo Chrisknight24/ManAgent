@@ -1305,7 +1305,13 @@ class Solver(Supervisor, Entity):
                 for name in sorted(rum.keys())[:8]:
                     entry = rum.get(name) or {}
                     val = entry.get("value", entry) if isinstance(entry, dict) else entry
-                    evidence_parts.append(f"[RUM {name}] {str(val)[:200]}")
+                    tag = ""
+                    try:
+                        _att = (entry.get("attempt_no", None) if isinstance(entry, dict) else None)
+                        tag = f" t{_att}" if _att is not None else ""
+                    except Exception:
+                        pass
+                    evidence_parts.append(f"[RUM {name}{tag}] {str(val)[:200]}")
             except Exception:
                 pass
             evidence = "\n".join(p for p in evidence_parts if p)[:1500]

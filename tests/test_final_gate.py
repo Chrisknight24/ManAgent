@@ -96,9 +96,18 @@ def test_preuves_etiquetees_rum():
         from core.plan_models import ConvergenceDecision
         return ConvergenceDecision(is_convergent=True, reason="ok")
 
-    solver = _solver(calls, rum={"data_x": {"value": "46"}})
+    solver = _solver(calls, rum={"data_x": {"value": "46", "attempt_no": 2}})
     solver.llm = types.SimpleNamespace(generate_structured=_ok)
     asyncio.run(solver._verify_mission_convergence(
         types.SimpleNamespace(response="46"), strict=False))
-    assert "[RUM data_x]" in calls["prompt"]
+    assert "[RUM data_x t2]" in calls["prompt"]
     assert "46" in calls["prompt"]
+
+
+def test_tag_attempt_marque_tentative():
+    from core.executor import Executor
+    ex = Executor.__new__(Executor)
+    ex.solver = types.SimpleNamespace(
+        current_attempt=types.SimpleNamespace(attempt_number=3))
+    entry = ex._tag_attempt({"value": "x"})
+    assert entry["attempt_no"] == 3

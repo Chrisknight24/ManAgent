@@ -201,6 +201,8 @@ class Executor:
                             "source": self.solver.id,
                             "timestamp": datetime.now().isoformat()
                         }
+                        self._tag_attempt(bool_entry)
+                        self._tag_attempt(data_entry)
 
                         self.solver.variable_registry[step_bool_id] = bool_entry
                         self.solver.variable_registry[step_data_id] = data_entry
@@ -412,13 +414,24 @@ class Executor:
     # PROPAGATION DES VARIABLES CRUCIALES
     # =====================================================
 
+    def _tag_attempt(self, entry: Any) -> Any:
+        """Taggue une entrée registre/RUM du n° de tentative (versioning
+        léger, zéro purge : l'historique reste, le plus récent prime)."""
+        try:
+            att = getattr(getattr(self.solver, "current_attempt", None), "attempt_number", None)
+            if isinstance(entry, dict) and att is not None:
+                entry["attempt_no"] = int(att)
+        except Exception:
+            pass
+        return entry
+
     def _propagate_crucial_variable(self, base_name: str) -> None:
         rum = self.solver.runtime_state.mission_rum
         clean_root = re.sub(r'^(bool_|data_)+', '', base_name)
         candidates = [base_name, f"bool_{clean_root}", f"data_{clean_root}"]
         for cand in candidates:
             if cand in self.solver.variable_registry:
-                rum[cand] = self.solver.variable_registry[cand]
+                rum[cand] = self._tag_attempt(self.solver.variable_registry[cand])
                 Logger.debug(f"[Executor] Variable cruciale '{cand}' propagée vers le RUM.")
 
     # =====================================================
@@ -787,6 +800,7 @@ class Executor:
                 "source": child_solver.id,
                 "timestamp": datetime.now().isoformat()
             }
+            self._tag_attempt(data_entry)
             for vname in target_data_var_names:
                 self.solver.variable_registry[vname] = data_entry
 
@@ -1004,10 +1018,11 @@ class Executor:
                     "value": tool_asset.get_uri(),
                     "asset": tool_asset,
                     "type": "asset",
-                    "description": data_description + _(" [Encapsulé en DataAsset : {} caractères]").format(data_str_len),
-                    "source": self.solver.id,
+                    "description": data_description + _(" [Encapsulé en DataAsset : {} caractères]").format(len(data_val_str)),
+                    "source": child_solver.id,
                     "timestamp": datetime.now().isoformat()
                 }
+                self._tag_attempt(asset_entry)
                 for vname in target_data_var_names:
                     self.solver.variable_registry[vname] = asset_entry
                 Logger.info(f"[Executor] 📦 Donnée de l'outil '{step.tool_name}' ({data_str_len} car.) encapsulée dans '{tool_asset.get_uri()}' (variables: {target_data_var_names}).")
@@ -1018,6 +1033,7 @@ class Executor:
                     "source": self.solver.id,
                     "timestamp": datetime.now().isoformat()
                 }
+                self._tag_attempt(data_entry)
                 for vname in target_data_var_names:
                     self.solver.variable_registry[vname] = data_entry
 
