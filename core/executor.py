@@ -1142,6 +1142,12 @@ class Executor:
     # =====================================================
 
     async def _check_convergence(self, step: PlanStep, actual_result: str, supplemental_data: Optional[str] = None, node: Optional[ExecutionNode] = None, action_success: Optional[bool] = None) -> ConvergenceDecision:
+        decision = await self._check_convergence_inner(step, actual_result, supplemental_data, node=node, action_success=action_success)
+        if not decision.is_convergent:
+            self._emit_convergence_check("fail", decision.reason, step_id=getattr(step, "id", None))
+        return decision
+
+    async def _check_convergence_inner(self, step: PlanStep, actual_result: str, supplemental_data: Optional[str] = None, node: Optional[ExecutionNode] = None, action_success: Optional[bool] = None) -> ConvergenceDecision:
         if not step.expected_result:
             Logger.info(f"[Executor] Aucun critère défini pour [{step.id}]. Convergence implicite acceptée.")
             return ConvergenceDecision(is_convergent=True, reason=_("Aucun critère d'output spécifié."))
@@ -1295,6 +1301,24 @@ class Executor:
                 pass
 
         return _restore
+
+    def _emit_convergence_check(self, verdict: str, detail: str, step_id: Optional[str] = None) -> None:
+        """Event `convergence.check` pour le front hôte (basse fréquence :
+        échecs en cours ici, verdict mission côté solver). Jamais bloquant."""
+        try:
+            rs = getattr(self.solver, "runtime_state", None)
+            mission_id = rs.execution_context.get("mission_id") if rs is not None else None
+            fields: Dict[str, Any] = {
+                "verdict": verdict,
+                "detail": str(detail or "")[:300],
+            }
+            if mission_id:
+                fields["mission_id"] = mission_id
+            if step_id:
+                fields["step_id"] = step_id
+            Logger.event("convergence.check", **fields)
+        except Exception:
+            pass
 
     @staticmethod
     def _strip_tool_prefix(text: str) -> str:

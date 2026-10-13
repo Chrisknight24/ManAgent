@@ -95,3 +95,49 @@ def test_succes_structure_passe_au_juge():
     assert out.is_convergent is True
     assert len(calls["prompts"]) == 1
     assert "[TOOLS OK]" not in calls["prompts"][0]
+
+
+def _tool_step_convergence():
+    return PlanStep(
+        id="step_3", description="frappe", type=StepType.TOOL_CALL,
+        tool_name="keyboard", tool_args_json="{}",
+        expected_result="true",
+    )
+
+
+def test_echec_emet_convergence_check_une_fois(monkeypatch):
+    from types import SimpleNamespace as _SN
+    from utils.logger import Logger
+    events = []
+    monkeypatch.setattr(Logger, "event",
+                        staticmethod(lambda event_type, **fields: events.append(
+                            {"event": event_type, **fields})))
+    calls = {"prompts": []}
+    solver = _solver(calls)
+    solver.runtime_state.execution_context = _SN(get=lambda k: "m9")
+    ex = _executor(solver)
+    node = _SN(raw_success_flag="false")
+    out = asyncio.run(ex._check_convergence(
+        _tool_step_convergence(), "erreur frappe", "raison outil", node=node))
+    assert out.is_convergent is False
+    checks = [e for e in events if e["event"] == "convergence.check"]
+    assert len(checks) == 1
+    assert checks[0]["verdict"] == "fail"
+    assert checks[0]["step_id"] == "step_3"
+    assert checks[0]["mission_id"] == "m9"
+
+
+def test_succes_n_emet_rien(monkeypatch):
+    from types import SimpleNamespace as _SN
+    from utils.logger import Logger
+    events = []
+    monkeypatch.setattr(Logger, "event",
+                        staticmethod(lambda event_type, **fields: events.append(
+                            {"event": event_type, **fields})))
+    calls = {"prompts": []}
+    ex = _executor(_solver(calls))
+    node = _SN(raw_success_flag="true")
+    out = asyncio.run(ex._check_convergence(
+        _tool_step_convergence(), "frappe ok", "", node=node))
+    assert out.is_convergent is True
+    assert [e for e in events if e["event"] == "convergence.check"] == []

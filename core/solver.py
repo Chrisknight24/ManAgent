@@ -836,6 +836,17 @@ class Solver(Supervisor, Entity):
                 if success and final_result is not None:
                     self.execution_tree.status = "success"
 
+                    if getattr(self, "depth", 0) == 0:
+                        try:
+                            Logger.event(
+                                "convergence.check",
+                                verdict="pass",
+                                detail=_("Mission accomplie."),
+                                mission_id=self.id,
+                            )
+                        except Exception:
+                            pass
+
                     if self.signatures:
                         is_novel = self.runtime_state.execution_markers.get("is_novel", False)
                         should_store = False
@@ -867,6 +878,16 @@ class Solver(Supervisor, Entity):
                 await self._handle_skill_lifecycle_post_execution(is_success=False)
 
                 error_msg = self.current_attempt.failure_reason if self.current_attempt else _("Échec inconnu")
+                if getattr(self, "depth", 0) == 0:
+                    try:
+                        Logger.event(
+                            "convergence.check",
+                            verdict="fail",
+                            detail=str(error_msg)[:300],
+                            mission_id=self.id,
+                        )
+                    except Exception:
+                        pass
                 result = SolverResult(
                     status=ExecutionStatus.FAILED,
                     final_context=self.context,
