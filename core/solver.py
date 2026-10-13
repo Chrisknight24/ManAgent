@@ -463,8 +463,7 @@ class Solver(Supervisor, Entity):
                 strategy_refreshed_key: Optional[str] = None
                 # Anti faux-succès (Alerte 1) : cumul inter-tentatives.
                 seen_tool_steps_total = 0
-                material_success_total = 0
-                # Santé outils : même outil en échec N fois (toutes signatures)
+                material_success_total = 0                # Santé outils : même outil en échec N fois (toutes signatures)
                 # = les outils sont en cause, pas le plan. On résigne au lieu
                 # de brûler le budget. Remis à zéro dès qu'un outil réussit.
                 tool_fail_streak: Dict[str, int] = {}
@@ -746,7 +745,7 @@ class Solver(Supervisor, Entity):
                         except Exception:
                             pass
                         if result.status == ExecutionStatus.SUCCESS:
-                            from core.plan_models import is_mission_success
+                            from core.plan_models import is_mission_success, is_suspect_final_answer
                             _ok, _why = is_mission_success(
                                 seen_tool_steps_total > 0, material_success_total
                             )
@@ -759,7 +758,10 @@ class Solver(Supervisor, Entity):
                                 self._record_failure(fail_history, FailureClass.EXECUTION_FAILURE, _why, result)
                                 continue
                             if getattr(self, "depth", 0) == 0:
-                                _fok, _fwhy = await self._verify_mission_convergence(result)
+                                _suspect = is_suspect_final_answer(proposed_plan, fail_history)
+                                if _suspect:
+                                    Logger.warning(f"[Solver:{self.id}] ⚠️ Réponse finale sans outil après échecs : vérification STRICTE (monde frais exigé).")
+                                _fok, _fwhy = await self._verify_mission_convergence(result, strict=_suspect)
                                 if not _fok:
                                     Logger.error(f"[Solver:{self.id}] ❌ Vérification finale (tour {execution_attempt}) : {_fwhy} — nouvel essai.")
                                     self.current_attempt.outcome = "failed"
@@ -823,7 +825,11 @@ class Solver(Supervisor, Entity):
                     # on ne revérifie que si ce n'est pas fait (ex : sortie
                     # de boucle sur annulation partielle).
                     if getattr(self, "depth", 0) == 0 and not final_verified_in_loop:
-                        _ok, _why = await self._verify_mission_convergence(final_result)
+                        from core.plan_models import is_suspect_final_answer as _suspect_fn
+                        _ok, _why = await self._verify_mission_convergence(
+                            final_result,
+                            strict=_suspect_fn(proposed_plan, fail_history),
+                        )
                         if not _ok:
                             Logger.error(f"[Solver:{self.id}] ❌ Vérification finale : {_why}")
                             success = False
@@ -1274,27 +1280,32 @@ class Solver(Supervisor, Entity):
             Logger.info(f"[Solver:{self.id}] ➕ Rallonge accordée : tentative {max_allowed + 1}.")
         return bool(granted)
 
-    async def _verify_mission_convergence(self, final_result) -> tuple:
+    async def _verify_mission_convergence(self, final_result, strict: bool = False) -> tuple:
         """Vérification finale ROOT : le but est-il VRAIMENT atteint ?
 
-        Preuves compactes (texte final + variables cruciales, capées), jamais
+        Preuves ÉTIQUETÉES ([RÉPONSE]/[RUM nom]/[MONDE], capées), jamais
         de dump de registre : le juge voyait des métadonnées au lieu de la
         preuve et échouait sur du "tronqué". Juge isolé, PD restreinte
         (registre + monde) pour un éventuel contrôle visuel.
-        Échec infra -> on ne tue PAS la mission (fail-open + warning).
+        `strict` (réponse finale sans outil après échecs) : monde frais
+        EXIGÉ — snapshot vide/muet = refus (fail-closed, dernière porte
+        anti faux-succès). `tool_status` UNKNOWN : aucune étape outil ne
+        tourne ici, on ne fabrique pas de OK.
+        Échec infra -> on ne tue PAS la mission (fail-open + warning),
+        sauf en strict où le silence du monde vaut refus.
         Retour (ok, raison).
         """
         try:
             from core.plan_models import ConvergenceDecision
             loader = get_prompt_loader()
             response_text = str(getattr(final_result, "response", "") or "")
-            evidence_parts = [response_text[:1200]] if response_text.strip() else []
+            evidence_parts = [f"[RÉPONSE] {response_text[:1200]}"] if response_text.strip() else []
             try:
                 rum = getattr(self.runtime_state, "mission_rum", None) or {}
                 for name in sorted(rum.keys())[:8]:
                     entry = rum.get(name) or {}
                     val = entry.get("value", entry) if isinstance(entry, dict) else entry
-                    evidence_parts.append(f"{name} = {str(val)[:200]}")
+                    evidence_parts.append(f"[RUM {name}] {str(val)[:200]}")
             except Exception:
                 pass
             evidence = "\n".join(p for p in evidence_parts if p)[:1500]
@@ -1320,13 +1331,15 @@ class Solver(Supervisor, Entity):
                     self.runtime_state, max_chars=600)
             except Exception:
                 _final_snapshot = ""
+            if strict and not _final_snapshot.strip():
+                return False, _("Vérification STRICTE : monde frais muet après échecs — réponse finale refusée.")
             prompt = loader.load(
                 "convergence.md",
                 lang=self.runtime_state.language,
                 step_description=self.goal,
                 expected_result=self.goal,
                 actual_result=evidence or _("(aucune preuve textuelle disponible)"),
-                tool_status="OK",
+                tool_status="UNKNOWN",
                 alignment_note=alignment_note,
                 world_snapshot=_final_snapshot,
             )

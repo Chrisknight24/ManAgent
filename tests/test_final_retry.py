@@ -67,7 +67,7 @@ def _solver(verify_answers):
             execution_tree=None,
         )
 
-    async def fake_verify(final_result):
+    async def fake_verify(final_result, strict=False):
         calls["verify"] += 1
         ok = verify_answers[min(calls["verify"] - 1, len(verify_answers) - 1)]
         return (ok, "" if ok else "but non atteint")

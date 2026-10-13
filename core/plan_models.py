@@ -272,6 +272,27 @@ def is_mission_success(has_tool_steps: bool, material_successes: int) -> tuple:
     )
 
 
+def is_suspect_final_answer(plan: Any, fail_history: Any) -> bool:
+    """Plan final sans outil après des échecs d'exécution : suspect (R1).
+
+    Un `direct_answer` pur est légitime en première intention (refus
+    honnête) mais suspect après des échecs : il doit passer la vérification
+    finale STRICTE (monde frais exigé, corroboration explicite).
+    Fonction pure, testable vite.
+    """
+    try:
+        steps = list(getattr(plan, "steps", []) or [])
+        has_tool = any(
+            getattr(getattr(s, "type", None), "value", getattr(s, "type", None)) == "tool_call"
+            for s in steps
+        )
+        if has_tool:
+            return False
+        return bool(fail_history)
+    except Exception:
+        return False
+
+
 import re
 import hashlib
 from typing import List, Optional, Dict, Any

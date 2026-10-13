@@ -95,7 +95,7 @@ def _solver(error_reasons, materials=None, judge_answers=None):
         assert "Budget standard" in summary
         return judge_answers[min(calls["judge"] - 1, len(judge_answers) - 1)]
 
-    async def fake_verify(final_result):
+    async def fake_verify(final_result, strict=False):
         return (True, "")
 
     async def fake_validate(*a, **k):

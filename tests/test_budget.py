@@ -72,7 +72,7 @@ def _solver(plan_behavior, verify_answers=None, verify_reasons=None):
             execution_tree=None,
         )
 
-    async def fake_verify(final_result):
+    async def fake_verify(final_result, strict=False):
         calls["verify"] += 1
         n = min(calls["verify"] - 1, len(verify_answers) - 1)
         ok = verify_answers[n]
