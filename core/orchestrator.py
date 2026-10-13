@@ -2047,6 +2047,7 @@ class Orchestrator(Supervisor, Entity):
             perception_tools=_perception_tools,
             tool_returns=_tool_returns,
             availability_summary=_availability_summary,
+            tools_manager=getattr(self.runtime_state, "tools_manager", None),
         )
         # État monde frais pour le juge (contexte non-preuve, cap dur,
         # fail-open : "" si l'hôte ne déclare pas get_world_state).

@@ -132,6 +132,60 @@ def _ref_step(sid, args_json):
     )
 
 
+def _tm_step(sid, args_json):
+    return PlanStep(
+        id=sid, description="d", type=StepType.TOOL_CALL,
+        tool_name="tool_manager", tool_args_json=args_json,
+        expected_result="true",
+    )
+
+
+def _fake_mgr_enum():
+    import types
+
+    def _validate(name, args):
+        schema = {"mode": True}
+        for req in ["mode"]:
+            if req not in args:
+                raise ValueError(f"Paramètre requis '{req}' manquant pour l'outil '{name}'")
+
+    return types.SimpleNamespace(
+        _tools={"vision": {"name": "vision",
+                           "parameters": {"type": "object",
+                                          "properties": {"mode": {"type": "string", "enum": ["image"]}},
+                                          "required": ["mode"]}}},
+        validate_tool_call=staticmethod(_validate),
+    )
+
+
+def test_gate_delegation_sans_subargs_refusee():
+    from core.plan_validator import find_incomplete_delegated_args
+    plan = _plan(_tm_step("step_1", '{"request": "voir", "source_tool": "vision"}'))
+    hits = find_incomplete_delegated_args(plan, None)
+    assert len(hits) == 1 and "source_args" in hits[0]
+
+
+def test_gate_delegation_nl_pure_passe():
+    from core.plan_validator import find_incomplete_delegated_args
+    plan = _plan(_tm_step("step_1", '{"request": "extrais la clé x"}'))
+    assert find_incomplete_delegated_args(plan, None) == []
+
+
+def test_gate_delegation_enum_viole_refusee():
+    from core.plan_validator import find_incomplete_delegated_args
+    plan = _plan(_tm_step(
+        "step_1", '{"request": "voir", "source_tool": "vision", "source_args": {"mode": "find"}}'))
+    hits = find_incomplete_delegated_args(plan, _fake_mgr_enum())
+    assert len(hits) == 1 and "image" in hits[0]
+
+
+def test_gate_delegation_complete_passe():
+    from core.plan_validator import find_incomplete_delegated_args
+    plan = _plan(_tm_step(
+        "step_1", '{"request": "voir", "source_tool": "vision", "source_args": {"mode": "image"}}'))
+    assert find_incomplete_delegated_args(plan, _fake_mgr_enum()) == []
+
+
 def test_gate_signale_sortie_declaree_inutilisee_sans_refuser():
     from core.plan_validator import find_declared_unused_outputs
     producer = _ref_step("step_1", "{}")

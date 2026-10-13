@@ -482,6 +482,59 @@ def repair_direct_perception_calls(plan: Any, perception_tool_names=None, tool_r
     return repaired
 
 
+def find_incomplete_delegated_args(plan: Any, tools_mgr: Any = None) -> List[str]:
+    """Délégation tool_manager incomplète (doctrine une-seule-couche-compose).
+
+    Une requête qui délègue au monde (`source_tool` présent) DOIT pré-remplir
+    `source_args` explicites : la composition des args hôte appartient au
+    planner (visible, validable statiquement), pas à un 2e LLM en langage
+    naturel (invisible, invalide — cf. M5 `fournis: []`). Requête NL pure
+    (sans `source_tool`) : routage seul, on laisse passer.
+    Avec `source_args` + schémas dispos : requis + `enum` vérifiés comme la
+    prévalidation d'exécution. Fonction pure.
+    Retourne ["step_id: motif", ...].
+    """
+    hits: List[str] = []
+    for step in getattr(plan, "steps", []) or []:
+        stype = getattr(getattr(step, "type", None), "value", getattr(step, "type", None))
+        if stype != "tool_call":
+            continue
+        if (getattr(step, "tool_name", None) or "").strip() != "tool_manager":
+            continue
+        sid = str(getattr(step, "id", "?"))
+        args = _parse_step_args(getattr(step, "tool_args_json", "{}"))
+        source_tool = (args.get("source_tool", "") or "")
+        source_tool = str(source_tool).strip() if isinstance(source_tool, str) else ""
+        if not source_tool:
+            continue
+        source_args = args.get("source_args")
+        if not isinstance(source_args, dict) or not source_args:
+            hits.append(
+                f"{sid} : délégation `{source_tool}` sans `source_args` — "
+                f"pré-remplissez source_args explicites d'après les schémas TOOLS"
+            )
+            continue
+        if tools_mgr is None:
+            continue
+        try:
+            known = getattr(tools_mgr, "_tools", None) or {}
+            tool_def = known.get(source_tool)
+            if not isinstance(tool_def, dict):
+                continue
+            try:
+                tools_mgr.validate_tool_call(source_tool, dict(source_args))
+            except ValueError as e:
+                hits.append(f"{sid} : sous-appel `{source_tool}` mal formé : {e}")
+                continue
+            from core.alignment import invalid_enum_value
+            bad_value = invalid_enum_value(tool_def, source_args)
+            if bad_value:
+                hits.append(f"{sid} : sous-appel `{source_tool}` : {bad_value}")
+        except Exception:
+            continue
+    return hits
+
+
 class PlanValidationOutcome:
     """
     Résultat riche de la validation. Remplace le simple bool historique de
@@ -534,6 +587,7 @@ class PlanValidator:
         perception_tools: Optional[Set[str]] = None,
         tool_returns: Optional[Dict[str, Any]] = None,
         availability_summary: Optional[str] = None,
+        tools_manager: Any = None,
     ):
         self._llm = llm
         self._prompt_loader = prompt_loader
@@ -547,6 +601,7 @@ class PlanValidator:
         self._perception_tools = set(perception_tools) if perception_tools else None
         self._tool_returns = dict(tool_returns) if tool_returns else {}
         self._availability_summary = availability_summary or ""
+        self._tools_manager = tools_manager
 
     def _summarize_human_validation_history(self) -> str:
         """Synthétise l'historique des arbitrages humains survenus durant la mission courante."""
@@ -978,6 +1033,7 @@ class PlanValidator:
         direct_perception = find_direct_perception_calls(plan, self._perception_tools, self._tool_returns)
         unresolved = find_unresolved_plan_refs(plan)
         bad_sources = find_invalid_perceive_sources(plan, self._available_tools)
+        incomplete_delegation = find_incomplete_delegated_args(plan, self._tools_manager)
         problems = [f"inconnu:{u}" for u in unknown]
         problems += [f"args illisibles étape:{s}" for s in malformed]
         problems += [f"outil réservé au validateur étape:{s}" for s in reserved]
@@ -991,6 +1047,7 @@ class PlanValidator:
             f"source inconnue {u} (source_tool doit être un outil listé ou utilisez source_data)"
             for u in bad_sources
         ]
+        problems += [f"délégation incomplète {u}" for u in incomplete_delegation]
         if problems:
             details = ", ".join(problems[:8])
             return PlanValidationOutcome(
