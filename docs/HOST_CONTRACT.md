@@ -129,7 +129,11 @@ pas mauvaise volonté. Règles absolues pour chaque outil déclaré :
 4. **Exemple d'usage si ambigu** : si un paramètre se comprend mal
    (format d'ID, guillemets, casse), ajoutez un exemple d'appel complet
    dans la description.
-5. **Garde-fous d'adaptation** : vos outils doivent tolérer les données
+5. **Enum obligatoire sur vocabulaire fermé** : tout paramètre qui n'accepte
+   qu'une liste finie de valeurs (ex : `mode`, `action`) DOIT déclarer
+   `"enum": [...]` dans son schéma. Sans `enum`, la prévalidation cerveau
+   est aveugle et vos propres refus deviennent la seule garde.
+6. **Garde-fous d'adaptation** : vos outils doivent tolérer les données
    du cerveau (espaces, guillemets parasites, casse) et adapter en
    silence quand c'est sans risque, ou refuser avec le motif exact sinon.
    Le cerveau suit les descriptions au mieux ; si rien n'est clair, il

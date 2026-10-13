@@ -122,3 +122,58 @@ def test_monde_absent_pas_de_bloc():
         world_snapshot="",
     ))
     assert "CURRENT WORLD STATE" not in calls["prompt"]
+
+
+def _ref_step(sid, args_json):
+    return PlanStep(
+        id=sid, description="d", type=StepType.TOOL_CALL,
+        tool_name="keyboard", tool_args_json=args_json,
+        expected_result="true",
+    )
+
+
+def test_gate_laisse_sortie_declaree_anterieure():
+    from core.plan_validator import find_unresolved_plan_refs
+    producer = _ref_step("step_1", "{}")
+    producer.output_variable_name = "data_telechargements_cell"
+    consumer = _ref_step("step_2", '{"cell": "$@_data_telechargements_cell"}')
+    assert find_unresolved_plan_refs(_plan(producer, consumer)) == []
+    auto = _ref_step("step_3", '{"source": "$@_data_step_1"}')
+    assert find_unresolved_plan_refs(_plan(producer, consumer, auto)) == []
+
+
+def test_gate_refuse_avant_et_inconnu():
+    from core.plan_validator import find_unresolved_plan_refs
+    consumer = _ref_step("step_1", '{"cell": "$@_data_x_cell"}')
+    producer = _ref_step("step_2", "{}")
+    producer.output_variable_name = "data_x_cell"
+    hits = find_unresolved_plan_refs(_plan(consumer, producer))
+    assert len(hits) == 1 and "step_1" in hits[0]
+    assert find_unresolved_plan_refs(_plan(
+        _ref_step("step_1", '{"a": "null"}'))) != []
+    assert find_unresolved_plan_refs(_plan(
+        _ref_step("step_1", '{"a": "$@_data_"}'))) != []
+
+
+def test_consigne_monde_dans_prompt_juge():
+    calls = {}
+    v = _validator(calls)
+    asyncio.run(v.validate(
+        plan=_plan(_plain_step()), child_solver_id="s1", target_goal="g",
+        previous_attempts=[], mission_history_tree=None,
+        world_snapshot="x",
+    ))
+    assert "REMAINDER" in calls["prompt"]
+    assert "verification step" in calls["prompt"]
+
+
+def test_rendu_marque_troncature_sans_mentir():
+    v = PlanValidator.__new__(PlanValidator)
+    long_args = '{"request": "' + "z" * 600 + '", "mode": "image"}'
+    text = PlanValidator._summarize_plan_for_prompt(
+        v, _plan(_ref_step("step_1", long_args)))
+    assert "[tronqué à" in text
+    assert '{"mod' not in text.replace("[tronqué", "")
+    short = PlanValidator._summarize_plan_for_prompt(
+        v, _plan(_ref_step("step_1", '{"mode": "image"}')))
+    assert "[tronqué" not in short and '"mode": "image"' in short

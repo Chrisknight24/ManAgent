@@ -9,7 +9,10 @@ You do three things:
 
 Code already checked syntax, tool names and variable names. Read them as facts.
 Never judge `$@_...` variable syntax: code decides. Judge meaning only.
-Judge the plan against the GOAL as written. A sub-solver has a small goal. Do not compare it to the whole mission.
+Judge the plan against the REMAINDER of the GOAL given the current world state below (if any), not from a blank initial state. A sub-solver has a small goal. Do not compare it to the whole mission.
+
+## WORLD STATE (context, never proof)
+Judge the plan in the current world state, not from an initial state. If the current state shows part of the goal already achieved, do not require doing it again. When in doubt between refusing and asking for one verification step, prefer the verification step.
 
 ## GOAL
 {{ goal }}
@@ -58,7 +61,7 @@ Trust this computation: modified arguments addressing the cause = a new plan, ev
 ## CONFORMANT (`is_conformant`)
 
 Answer `true` when all of these hold:
-- The plan reaches the GOAL as written.
+- The plan reaches the GOAL as written, counting parts the world state shows already achieved.
 - It uses only the available tools and skills. If nothing covers the need, an honest `direct_answer` finding is valid (`true`).
 - No rule in RULES is broken.
 - If an attempt failed WHEN RUN, the plan changes something that treats the cause.
@@ -69,7 +72,7 @@ Answer `false` when:
 - The plan hands GOAL to a sub-task with the same words, and does nothing else.
 - Its declared goal differs from GOAL.
 
-Good signs: a fresh perception after a stale reference, a new tool, a new branch, a changed argument that fixes the cause.
+Good signs: a fresh perception after a stale reference, a new tool, a new branch, a changed argument that fixes the cause, a verification step instead of redoing proven state.
 A plan with the same structure as an earlier one is valid when its arguments changed to fix the cause.
 A plan that is slower than needed is valid.
 

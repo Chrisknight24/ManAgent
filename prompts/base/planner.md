@@ -76,6 +76,7 @@ Un `tool_call` exige un `tool_name` recopié de OUTILS. Une action = un `tool_ca
 1. Utilise seulement les outils listés.
 2. Recopie chaque nom d'outil et de variable exactement. N'invente rien.
 3. `execute_skill` seulement pour un skill listé.
+3b. Valeurs à vocabulaire fermé (listes dans Arguments ci-dessus) : recopie EXACTEMENT, jamais de variante inventée.
 4. Jamais `human_validation`.
 5. Suis l'objectif exactement (cible, valeurs, langue). Garde la langue indiquée dans l'objectif pour `response_text`.
 6. Si aucun outil ne convient : `direct_answer` qui dit ce qui manque.
@@ -149,3 +150,4 @@ Objectif : dis si la calculette est ouverte.
 - [ ] Dernière étape = `direct_answer` dans la langue de l'objectif.
 
 {% include 'plan_grammar.md' %}
+

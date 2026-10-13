@@ -89,3 +89,8 @@ directement ou indirectement, correspond à l'un des cas suivants :
   avec une récursion dégénérée (le même sous-objectif réessayé sans rien
   changer après un échec déjà constaté). L'historique compact fourni plus
   bas donne les faits pour trancher — pas une similarité de surface.
+- **Ne pas traiter un retry cadré sur le reste du but comme une divergence.**
+  Si le contexte monde fourni prouve qu'une partie de l'objectif est déjà
+  accomplie, un plan qui ne refait pas cette partie n'est PAS divergent de
+  `{{ goal }}` : jugez s'il atteint le RESTE. Valable au niveau root comme
+  en sous-solver.

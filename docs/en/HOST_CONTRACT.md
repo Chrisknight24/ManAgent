@@ -100,7 +100,11 @@ not bad will. Absolute rules for every declared tool:
    read as an authorization to invent.
 4. **Usage example if ambiguous**: if a param reads poorly
    (ID format, quotes, case), add a full call example in the description.
-5. **Adaptation guardrails**: your tools must tolerate brain data
+5. **Mandatory enum on closed vocabulary**: any parameter accepting only a
+   finite value list (e.g. `mode`, `action`) MUST declare `"enum": [...]`
+   in its schema. Without `enum`, brain prevalidation is blind and your
+   own refusals become the only guard.
+6. **Adaptation guardrails**: your tools must tolerate brain data
    (spaces, stray quotes, case) and adapt silently when risk-free,
    or refuse with the exact reason otherwise.
    The brain follows descriptions as best it can; if nothing is clear,

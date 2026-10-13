@@ -212,6 +212,31 @@ def find_reserved_plan_tools(plan: Any) -> List[str]:
     return bad
 
 
+def _plan_declared_ref_names(steps: Any, upto_index: int) -> set:
+    """Noms `$@_...` résolubles à l'exécution au step d'index donné.
+
+    L'executor résout séquentiellement : une référence est légitime si elle
+    vise la sortie auto d'un step (`$@_bool_<id>` / `$@_data_<id>`) ou une
+    `output_variable_name` déclarée par un step ANTÉRIEUR (même règle de
+    préfixes que le registre : `bool_`/`data_` + nom nu + nom brut).
+    Fonction pure.
+    """
+    names: set = set()
+    for s in list(steps or [])[:max(0, upto_index)]:
+        sid = str(getattr(s, "id", "") or "").strip()
+        if sid:
+            names.add(f"$@_bool_{sid}")
+            names.add(f"$@_data_{sid}")
+        raw = getattr(s, "output_variable_name", None)
+        if raw and str(raw).strip():
+            r = str(raw).strip()
+            clean = re.sub(r"^(bool_|data_)+", "", r)
+            names.add(f"$@_bool_{clean}")
+            names.add(f"$@_data_{clean}")
+            names.add(f"$@_{r}")
+    return names
+
+
 def find_unresolved_plan_refs(plan: Any) -> List[str]:
     """Références devinées dans les args (gate anti-devinettes, 100% générique).
 
@@ -219,34 +244,48 @@ def find_unresolved_plan_refs(plan: Any) -> List[str]:
     - la valeur littérale "null" (toute casse, valeur entière) : aucun hôte
       ne peut agir sur "null", c'est toujours une devinette ;
     - les refs avec joker (`*`) ou nom vide (`$@_data_`, `$@__`) : syntaxe
-      invalide, jamais résoluble à l'exécution.
+      invalide, jamais résoluble à l'exécution ;
+    - les refs bien formées vers un nom inconnu : ni sortie auto d'un step
+      (`$@_bool_<id>` / `$@_data_<id>`), ni `output_variable_name` déclarée
+      par un step ANTÉRIEUR du même plan (résolution séquentielle : une
+      sortie n'existe qu'après l'exécution de son step).
     Chaînes vides "" restent autorisées (défauts légitimes). Fonction pure.
     Retourne ["step_id: chemin.argument=valeur", ...].
     """
     hits: List[str] = []
+    steps = list(getattr(plan, "steps", []) or [])
 
-    def _scan(value: Any, path: str, step_id: str) -> None:
+    def _scan(value: Any, path: str, step_id: str, allowed: set) -> None:
         if isinstance(value, dict):
             for key, sub in value.items():
-                _scan(sub, f"{path}.{key}" if path else str(key), step_id)
+                _scan(sub, f"{path}.{key}" if path else str(key), step_id, allowed)
         elif isinstance(value, list):
             for idx, sub in enumerate(value):
-                _scan(sub, f"{path}[{idx}]", step_id)
+                _scan(sub, f"{path}[{idx}]", step_id, allowed)
         elif isinstance(value, str):
             stripped = value.strip()
             if stripped.lower() == "null":
                 hits.append(f"{step_id}: {path}=null")
             elif "*" in stripped and ("$@_" in stripped or "@$_" in stripped):
                 hits.append(f"{step_id}: {path}={_short_value(stripped)}")
-            elif re.fullmatch(r"\$@_[a-z_]*|@\$_[a-z_]*", stripped):
-                hits.append(f"{step_id}: {path}={_short_value(stripped)}")
+            elif stripped.startswith("$@_") or stripped.startswith("@$_"):
+                core = stripped[3:] if stripped.startswith("$@_") else stripped[3:]
+                if not core.strip("_"):
+                    hits.append(f"{step_id}: {path}={_short_value(stripped)}")
+                elif f"$@_{core}" in allowed:
+                    pass
+                else:
+                    hits.append(
+                        f"{step_id}: {path}={_short_value(stripped)} "
+                        f"(inconnu : déclarez via output_variable_name d'un step antérieur)"
+                    )
 
-    for step in getattr(plan, "steps", []) or []:
+    for idx, step in enumerate(steps):
         stype = getattr(getattr(step, "type", None), "value", getattr(step, "type", None))
         if stype != "tool_call":
             continue
         args = _parse_step_args(getattr(step, "tool_args_json", "{}"))
-        _scan(args, "", str(getattr(step, "id", "?")))
+        _scan(args, "", str(getattr(step, "id", "?")), _plan_declared_ref_names(steps, idx))
     return hits
 
 
@@ -778,7 +817,11 @@ class PlanValidator:
             if args:
                 try:
                     import json as _json2
-                    args_str = f" args={_json2.dumps(args, ensure_ascii=False)[:150]}"
+                    _dumped = _json2.dumps(args, ensure_ascii=False)
+                    if len(_dumped) > 500:
+                        args_str = f" args={_dumped[:500]}…[tronqué à {len(_dumped)} chars]"
+                    else:
+                        args_str = f" args={_dumped}"
                 except Exception:
                     args_str = ""
             cond = f" [SI {step.execute_if}]" if getattr(step, "execute_if", None) else ""

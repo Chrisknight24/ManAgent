@@ -56,6 +56,21 @@ def test_prevalidate_refuse_valeur_hors_enum():
     assert bad is not None and "image" in bad and "annotated" in bad
 
 
+def test_perceive_action_refuse_mode_invente_avant_hote():
+    tm = _mgr()
+
+    async def _boom(name, args):
+        raise AssertionError("l'hôte ne doit pas être appelé")
+
+    tm.execute_tool = _boom
+    out = asyncio.run(perceive_action(
+        {"question": "où est l'icône ?", "source_tool": "vision",
+         "source_args": {"mode": "find", "query": "icône"},
+         "action_tool": "mouse", "action_args": {"action": "click"}}, _rs(tm)))
+    assert out["result"] is False
+    assert "non permis" in (out.get("error_reason") or "")
+
+
 def test_perceive_action_refuse_avant_appel_hote():
     tm = _mgr()
 

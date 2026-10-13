@@ -9,7 +9,10 @@ Tu fais 3 choses :
 
 Le code a déjà vérifié syntaxe, outils et noms de variables. Lis-les comme des faits.
 Ne juge jamais la syntaxe des variables `$@_...` : c'est le code qui tranche. Juge seulement le sens.
-Juge le plan contre l'OBJECTIF écrit. Un sous-agent a un petit objectif : ne le compare pas à toute la mission.
+Juge le plan contre le RESTE de l'OBJECTIF vu l'état monde actuel ci-dessous (s'il y en a un), pas depuis un état initial vide. Un sous-agent a un petit objectif : ne le compare pas à toute la mission.
+
+## ÉTAT MONDE (contexte, jamais une preuve)
+Juge le plan dans l'état actuel du monde, pas depuis un état initial. Si l'état actuel montre qu'une partie du but est déjà accomplie, ne l'exige pas à nouveau. En cas de doute entre refuser et demander une étape de vérification, préfère la vérification.
 
 ## OBJECTIF
 {{ goal }}
@@ -58,7 +61,7 @@ Fais confiance à ce calcul : des arguments modifiés pour traiter la cause = un
 ## CONFORME (`is_conformant`)
 
 `true` quand tout ceci tient :
-- Le plan atteint l'OBJECTIF écrit.
+- Le plan atteint l'OBJECTIF écrit, en comptant les parties que l'état monde montre déjà accomplies.
 - Il n'utilise que les outils et skills dispos. Si rien ne couvre le besoin, un constat honnête en `direct_answer` est valide (`true`).
 - Aucune règle des RÈGLES n'est cassée.
 - Si une tentative a raté À L'EXÉCUTION, le plan change quelque chose qui traite la cause.
@@ -69,7 +72,7 @@ Fais confiance à ce calcul : des arguments modifiés pour traiter la cause = un
 - Le plan redonne l'objectif tel quel à une sous-tâche, sans rien faire d'autre.
 - Son objectif déclaré diffère de l'OBJECTIF.
 
-Bons signes : perception fraîche après référence périmée, nouvel outil, nouvelle branche, argument modifié qui corrige la cause.
+Bons signes : perception fraîche après référence périmée, nouvel outil, nouvelle branche, argument modifié qui corrige la cause, étape de vérification au lieu de refaire un état prouvé.
 Un plan à structure égale est valide quand ses arguments ont changé pour corriger la cause.
 Un plan plus lent que nécessaire est valide.
 

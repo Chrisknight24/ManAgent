@@ -76,6 +76,7 @@ A `tool_call` needs a `tool_name` copied from TOOLS. One action = one `tool_call
 1. Use only the listed tools.
 2. Copy every tool and variable name exactly. Never invent one.
 3. `execute_skill` only for a listed skill.
+3b. Closed-vocabulary values (lists in Arguments above): copy EXACTLY, never invent a variant.
 4. Never `human_validation`.
 5. Follow the goal exactly (target, values, language). Keep the goal's language in `response_text`.
 6. If no tool fits: `direct_answer` saying what is missing.
