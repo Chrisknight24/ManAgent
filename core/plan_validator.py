@@ -331,6 +331,48 @@ def find_skill_missing_params(plan: Any, skill_required_params: Optional[Dict[st
     return missing
 
 
+def find_declared_unused_outputs(plan: Any) -> List[str]:
+    """Sorties déclarées jamais réutilisées (signal de confusion, JAMAIS un refus).
+
+    Une `output_variable_name` déclarée mais jamais référencée par un step
+    postérieur (args, réponse, contexte, condition) sent la confusion du
+    planner (deux schémas de nommage mélangés, cf. M5 `data_address_bar_cell`
+    vs auto). On signale (event), on ne bloque pas : la mission peut réussir
+    sans réutiliser une sortie. Fonction pure.
+    Retourne ["step_id: nom", ...].
+    """
+    try:
+        steps = list(getattr(plan, "steps", []) or [])
+        declared: List[tuple] = []
+        for idx, step in enumerate(steps):
+            raw = getattr(step, "output_variable_name", None)
+            if raw and str(raw).strip():
+                declared.append((idx, str(getattr(step, "id", "?")), str(raw).strip()))
+        if not declared:
+            return []
+        unused: List[str] = []
+        for idx, sid, name in declared:
+            clean = re.sub(r"^(bool_|data_)+", "", name)
+            needles = {f"$@_bool_{clean}", f"$@_data_{clean}", f"$@_{name}", clean}
+            used = False
+            for later in steps[idx + 1:]:
+                hay = " ".join([
+                    str(getattr(later, "tool_args_json", "") or ""),
+                    str(getattr(later, "response_text", "") or ""),
+                    str(getattr(later, "step_context", "") or ""),
+                    str(getattr(later, "execute_if", "") or ""),
+                    str(getattr(later, "description", "") or ""),
+                ])
+                if any(n in hay for n in needles):
+                    used = True
+                    break
+            if not used:
+                unused.append(f"{sid}: {name}")
+        return unused
+    except Exception:
+        return []
+
+
 def _tool_declares_media(tool_name: str, tool_returns: Any) -> bool:
     """L'outil déclare-t-il des charges médias (le validateur le sait) ?"""
     if not tool_returns or not isinstance(tool_returns, dict):
@@ -964,6 +1006,19 @@ class PlanValidator:
 
         mission_history_summary = self.summarize_mission_history(mission_history_tree)
         declared_irreversible = [s.id for s in plan.steps if getattr(s, "is_irreversible", False)]
+
+        # Signal confusion (jamais un refus) : sorties déclarées jamais
+        # réutilisées = le planner mélange deux schémas de nommage.
+        try:
+            _unused_outs = find_declared_unused_outputs(plan)
+            if _unused_outs:
+                Logger.event(
+                    "unused_declared_output",
+                    child_solver_id=child_solver_id,
+                    unused=_unused_outs[:5],
+                )
+        except Exception:
+            pass
 
         prompt = self._prompt_loader.load(
             "plan_validation.md",

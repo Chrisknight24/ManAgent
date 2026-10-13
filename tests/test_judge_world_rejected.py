@@ -132,6 +132,17 @@ def _ref_step(sid, args_json):
     )
 
 
+def test_gate_signale_sortie_declaree_inutilisee_sans_refuser():
+    from core.plan_validator import find_declared_unused_outputs
+    producer = _ref_step("step_1", "{}")
+    producer.output_variable_name = "data_address_bar_cell"
+    consumer = _ref_step("step_2", '{"cell": "$@_data_step_1"}')
+    assert find_declared_unused_outputs(_plan(producer, consumer)) == [
+        "step_1: data_address_bar_cell"]
+    user = _ref_step("step_2", '{"cell": "$@_data_address_bar_cell"}')
+    assert find_declared_unused_outputs(_plan(producer, user)) == []
+
+
 def test_gate_laisse_sortie_declaree_anterieure():
     from core.plan_validator import find_unresolved_plan_refs
     producer = _ref_step("step_1", "{}")
