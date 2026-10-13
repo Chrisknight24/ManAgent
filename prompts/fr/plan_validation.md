@@ -15,8 +15,13 @@ Juge le plan contre l'OBJECTIF écrit. Un sous-agent a un petit objectif : ne le
 {{ goal }}
 
 ## PLAN
-Chaque étape montre : id, type, outil, arguments complets, sorties, `execute_if`, `expected_result`, `is_irreversible`.
+Chaque étape montre : id, type, outil, arguments complets, sorties, `execute_if`, `expected_result`, `is_irreversible`, contexte (`ctx`), effet monde attendu (`monde=oui/non` : le monde visible doit-il changer après l'action ?), outil de vérification (`verif`).
 {{ plan_summary }}
+
+{% if judge_world_snapshot %}
+## ÉTAT MONDE ACTUEL (contexte frais, jamais une preuve)
+{{ judge_world_snapshot }}
+{% endif %}
 
 ## FAITS DU CODE
 - Outils dispos : {{ availability_summary }}
@@ -35,7 +40,7 @@ Chaque étape montre : id, type, outil, arguments complets, sorties, `execute_if
 Fais confiance à ce calcul : des arguments modifiés pour traiter la cause = un plan nouveau, même à structure égale.
 {% endif %}
 
-## HISTORIQUE (tentatives exécutées seulement)
+## HISTORIQUE (`[failed]` = exécutée et échouée, `[rejected]` = refusée avant exécution, jamais exécutée)
 {{ mission_history_summary }}
 
 ## RÈGLES

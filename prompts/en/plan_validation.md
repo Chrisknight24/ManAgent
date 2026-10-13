@@ -15,8 +15,13 @@ Judge the plan against the GOAL as written. A sub-solver has a small goal. Do no
 {{ goal }}
 
 ## PLAN
-Each step shows: id, type, tool, full arguments, outputs, `execute_if`, `expected_result`, `is_irreversible`.
+Each step shows: id, type, tool, full arguments, outputs, `execute_if`, `expected_result`, `is_irreversible`, context (`ctx`), expected world effect (`monde=oui/non`: whether the visible world should change after the action), verification tool (`verif`).
 {{ plan_summary }}
+
+{% if judge_world_snapshot %}
+## CURRENT WORLD STATE (fresh context, never proof)
+{{ judge_world_snapshot }}
+{% endif %}
 
 ## FACTS FROM CODE
 - Available tools: {{ availability_summary }}
@@ -35,7 +40,7 @@ Each step shows: id, type, tool, full arguments, outputs, `execute_if`, `expecte
 Trust this computation: modified arguments addressing the cause = a new plan, even with equal structure.
 {% endif %}
 
-## HISTORY (executed attempts only)
+## HISTORY (`[failed]` = ran and failed, `[rejected]` = refused before running and never ran)
 {{ mission_history_summary }}
 
 ## RULES

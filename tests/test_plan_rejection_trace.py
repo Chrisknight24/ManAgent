@@ -52,7 +52,7 @@ def test_value_error_path_emits_event_and_stores_plan(monkeypatch):
     ev = next(e for e in events if e["event"] == "plan_rejected_validation")
     assert ev["attempt"] == 1 and "variable inconnue" in ev["reason"]
     att = solver.current_attempt
-    assert att.outcome == "failed"
+    assert att.outcome == "rejected"
     assert att.failure_class == FailureClass.PLAN_REJECTED_VALIDATION
     assert att.failure_reason == "variable inconnue 'x'"
     assert att.target_entity == "Planner"
@@ -66,7 +66,7 @@ def test_pydantic_path_emits_event_without_stale_plan(monkeypatch):
     assert any(e["event"] == "plan_rejected_validation" and e["attempt"] == 2
                for e in events)
     assert solver.current_attempt.proposed_plan is None
-    assert solver.current_attempt.outcome == "failed"
+    assert solver.current_attempt.outcome == "rejected"
 
 
 def test_troncation_dit_plus_court():

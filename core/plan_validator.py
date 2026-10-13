@@ -78,7 +78,7 @@ def compare_plan_novelty(plan: Any, previous_attempts: Optional[List[Any]] = Non
     Retourne un bloc texte injecté dans le prompt, ou None (premier plan).
     """
     failed = [a for a in (previous_attempts or [])
-              if getattr(a, "outcome", None) == "failed"
+              if getattr(a, "outcome", None) in ("failed", "rejected")
               and getattr(a, "proposed_plan", None)]
     if not failed:
         return None
@@ -715,7 +715,10 @@ class PlanValidator:
                 if outcome in ("in_progress", "pending") and len(attempts) > 1:
                     continue
                 failure_reason = getattr(attempt, "failure_reason", None)
-                suffix = f" -> ÉCHEC : {failure_reason}" if outcome == "failed" and failure_reason else ""
+                if outcome == "rejected":
+                    suffix = f" -> REFUSÉ (plan non exécuté) : {failure_reason}" if failure_reason else " -> REFUSÉ (plan non exécuté)"
+                else:
+                    suffix = f" -> ÉCHEC : {failure_reason}" if outcome == "failed" and failure_reason else ""
                 lines.append(f"{prefix}   ↳ Tentative {getattr(attempt, 'attempt_number', 1)} [{outcome}]{suffix}")
 
                 nodes = getattr(attempt, "nodes", None) or []
@@ -756,9 +759,13 @@ class PlanValidator:
     def _summarize_plan_for_prompt(self, plan: Plan) -> str:
         """
         Résumé du plan : objectif, type d'étape, outil appelé, description,
-        ARGUMENTS (tronqués) et condition. Le juge ne peut pas voir un correctif
+        ARGUMENTS (tronqués), condition, contexte, effet monde attendu et
+        outil de vérification. Le juge ne peut pas voir un correctif
         (ex : touche `lwin` → `WIN`) si on lui cache les arguments : sans eux,
-        tout replan ressemble à une redite et se fait refuser à tort.
+        tout replan ressemble à une redite et se fait refuser à tort. De même,
+        il ne peut pas juger P2 (`should_world`/`verify_with`) ni le contexte
+        (`step_context`) si on les lui ampute : libellés humains courts pour
+        aider le modèle (`monde=oui/non`, `verif=outil`).
         """
         lines = [f"Objectif déclaré du plan : {plan.goal}"]
         for step in plan.steps:
@@ -775,9 +782,19 @@ class PlanValidator:
                 except Exception:
                     args_str = ""
             cond = f" [SI {step.execute_if}]" if getattr(step, "execute_if", None) else ""
+            ctx = getattr(step, "step_context", None)
+            ctx_str = f" ctx=\"{_short_value(ctx, 80)}\"" if ctx and str(ctx).strip() else ""
+            world = getattr(step, "should_world_state_change_after_action", None)
+            world_str = ""
+            if world is True:
+                world_str = " monde=oui (changement du monde attendu après cette action)"
+            elif world is False:
+                world_str = " monde=non (aucun changement attendu)"
+            verify = getattr(step, "verify_with", None)
+            verify_str = f" verif={str(verify).strip()}" if verify and str(verify).strip() else ""
             out_var = f" -> {step.output_variable_name}" if getattr(step, "output_variable_name", None) else ""
             exp = f" attend={step.expected_result}" if getattr(step, "expected_result", None) else ""
-            lines.append(f"- {step.id} [{step_type_str}]{tool} : {step.description}{args_str}{cond}{out_var}{exp}{marker}{reason}")
+            lines.append(f"- {step.id} [{step_type_str}]{tool} : {step.description}{args_str}{cond}{ctx_str}{world_str}{verify_str}{out_var}{exp}{marker}{reason}")
         return "\n".join(lines)
 
     @staticmethod
@@ -789,7 +806,7 @@ class PlanValidator:
         ne doit pas traiter un rejet de syntaxe comme une preuve d'échec.
         Fonction pure, testée vite.
         """
-        failed = [a for a in (previous_attempts or []) if getattr(a, "outcome", None) == "failed"]
+        failed = [a for a in (previous_attempts or []) if getattr(a, "outcome", None) in ("failed", "rejected")]
         if not failed:
             return None
         current_sig = PlanValidator._plan_step_signature(list(getattr(plan, "steps", []) or []))
@@ -833,6 +850,7 @@ class PlanValidator:
         target_goal: str,
         previous_attempts: Optional[List[PlanAttempt]] = None,
         mission_history_tree: Optional[Any] = None,
+        world_snapshot: Optional[str] = None,
     ) -> PlanValidationOutcome:
         # Collecter les signaux déterministes
         repeated_warning = self.detect_repeated_plan_pattern(plan, previous_attempts or [])
@@ -922,6 +940,7 @@ class PlanValidator:
             availability_summary=self._availability_summary or _(
                 "(disponibilités non transmises — jugez sur le plan seul)"
             ),
+            judge_world_snapshot=world_snapshot or None,
         )
 
         try:

@@ -1,19 +1,18 @@
-# ÉVALUATION DE LA CONVERGENCE SÉMANTIQUE
+# SEMANTIC CONVERGENCE EVALUATION
 
-Tu es un module expert chargé de vérifier si le résultat d'une étape (ou sous‑tâche) converge vers l'objectif attendu.
+You are an expert module checking whether a step (or sub-task) result converges toward the expected goal.
 
-## RÈGLES D'ÉVALUATION
-1. **Preuve texte d'abord** : même si les outils disent `true` ou `[TOOLS OK]`, vérifie le texte. Si le texte dit absence ("aucun", "aucune", "pas visible", "not visible", "not found", "not present", "0 élément", "aucune recherche"), refuse la convergence.
-2. **Indicateur `[TOOLS OK]`** : nécessaire mais pas suffisant. Il prouve que l'appel a marché, pas que le but est atteint. Accepte seulement si le texte prouve aussi le but.
-3. **Indicateur `[TOOLS FAILED]`** : si le résultat commence par `[TOOLS FAILED]`, la convergence est rejetée.
-4. **Absence d'indicateur** : évalue la réponse textuelle normalement. Une réponse cohérente avec l'attendu est convergente.
-5. **Ne sois pas trop strict sur la formulation** : si l'essentiel de l'objectif est atteint, accepte la convergence. Mais jamais si l'élément cherché est absent.
+## EVALUATION RULES
+1. **Text proof first**: even if tools say `true`, check the text. If the text reports absence ("aucun", "aucune", "pas visible", "not visible", "not found", "not present", "0 élément", "aucune recherche"), refuse convergence.
+2. **Tool status = technical pre-requisite, never a proof of success**: `FAILED` → refuse without further analysis. `OK` / `UNKNOWN` → ignore it and judge ONLY the text content and world evidence. If the text proves nothing, refuse.
+3. **No indicator**: evaluate the text answer normally. An answer consistent with the expected result is convergent.
+4. **Do not be too strict on wording**: if the essence of the goal is reached, accept convergence. But never if the sought element is absent.
 
-## ENTRÉE
-- **Description de l'étape** : {{ step_description }}
-- **Résultat attendu** : {{ expected_result }}
-- **Statut outil** : {{ tool_status }} (`OK` = l'appel a marché, `FAILED` = raté, `UNKNOWN` = on ne sait pas — fie-toi au texte dans ce cas)
-- **Résultat réel (preuves, pas des métadonnées)** : {{ actual_result }}
+## INPUT
+- **Step description**: {{ step_description }}
+- **Expected result**: {{ expected_result }}
+- **Tool status**: {{ tool_status }} (`OK` = the call worked, `FAILED` = failed, `UNKNOWN` = unknown — rely on the text in that case)
+- **Actual result (evidence, not metadata)**: {{ actual_result }}
 {% if alignment_note %}
 - **Alignment fact (computed, not an opinion)** : {{ alignment_note }}
 {% endif %}
@@ -21,5 +20,5 @@ Tu es un module expert chargé de vérifier si le résultat d'une étape (ou sou
 - **Current state (fresh context, never proof)** : {{ world_snapshot }}
 {% endif %}
 
-## RÉPONSE
-Génère une décision structurée au format JSON avec `is_convergent` (booléen) et `reason` (chaîne expliquant la décision).
+## ANSWER
+Generate a structured decision as JSON with `is_convergent` (boolean) and `reason` (string explaining the decision).

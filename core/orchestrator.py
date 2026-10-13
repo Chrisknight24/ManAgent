@@ -2048,12 +2048,21 @@ class Orchestrator(Supervisor, Entity):
             tool_returns=_tool_returns,
             availability_summary=_availability_summary,
         )
+        # État monde frais pour le juge (contexte non-preuve, cap dur,
+        # fail-open : "" si l'hôte ne déclare pas get_world_state).
+        _judge_world = ""
+        try:
+            from core.alignment import fetch_world_state_snapshot
+            _judge_world = await fetch_world_state_snapshot(self.runtime_state, max_chars=600)
+        except Exception:
+            _judge_world = ""
         outcome = await validator.validate(
             plan=plan,
             child_solver_id=child_solver_id,
             target_goal=target_goal,
             previous_attempts=previous_attempts,
             mission_history_tree=mission_history_tree,
+            world_snapshot=_judge_world,
         )
 
         # Réparation auto (pas de refus en boucle) : si le SEUL grief est de
@@ -2088,6 +2097,7 @@ class Orchestrator(Supervisor, Entity):
                         target_goal=target_goal,
                         previous_attempts=previous_attempts,
                         mission_history_tree=mission_history_tree,
+                        world_snapshot=_judge_world,
                     )
 
         # Garde paramètres skills (avertissement, jamais rejet) : un execute_skill

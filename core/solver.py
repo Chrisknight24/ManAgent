@@ -554,7 +554,7 @@ class Solver(Supervisor, Entity):
                                 _past_failures = []
                                 try:
                                     for _att in (getattr(getattr(self, "execution_tree", None), "attempts", None) or []):
-                                        if getattr(_att, "outcome", None) == "failed" and getattr(_att, "failure_reason", None):
+                                        if getattr(_att, "outcome", None) in ("failed", "rejected") and getattr(_att, "failure_reason", None):
                                             _past_failures.append(
                                                 f"- tentative {getattr(_att, 'attempt_number', '?')} : {str(_att.failure_reason)[:300]}"
                                             )
@@ -673,7 +673,7 @@ class Solver(Supervisor, Entity):
                                     reason=rejection_reason
                                 )
                                 self.current_attempt.ended_at = time.time()
-                                self.current_attempt.outcome = "failed"
+                                self.current_attempt.outcome = "rejected"
                                 self.current_attempt.failure_class = FailureClass.PLAN_REJECTED_SUPERVISOR
                                 self.current_attempt.failure_reason = rejection_reason
                                 self.current_attempt.target_entity = "Planner"
@@ -922,7 +922,7 @@ class Solver(Supervisor, Entity):
             failure_class="PLAN_REJECTED_VALIDATION"
         )
         self.current_attempt.ended_at = time.time()
-        self.current_attempt.outcome = "failed"
+        self.current_attempt.outcome = "rejected"
         self.current_attempt.failure_class = FailureClass.PLAN_REJECTED_VALIDATION
         self.current_attempt.failure_reason = error_msg
         self.current_attempt.planner_feedback = error_msg

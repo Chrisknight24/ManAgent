@@ -123,7 +123,7 @@ class PlanAttempt(BaseModel):
     )
 
     # Résultat global
-    outcome: str = Field(default="in_progress", description=_("Résultat global de la tentative (in_progress, success, failed)"))
+    outcome: str = Field(default="in_progress", description=_("Résultat global de la tentative (in_progress, success, failed, rejected : refusée avant exécution, jamais exécutée)"))
     failure_class: FailureClass = Field(
         default=FailureClass.NONE,
         description=_("Catégorie d'échec si outcome == failed")

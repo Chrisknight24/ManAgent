@@ -275,7 +275,7 @@ class Executor:
                             breakout_report=getattr(node, "breakout_report", None)
                         )
 
-                    convergence = await self._check_convergence(step, execution_output, supplemental_data, node=node)
+                    convergence = await self._check_convergence(step, execution_output, supplemental_data, node=node, action_success=success)
 
                     if self.solver.runtime_state.cancel_requested:
                         Logger.warning(f"[Executor] 🛑 Interruption après convergence de l'étape [{step.id}].")
@@ -1141,7 +1141,7 @@ class Executor:
     # CONVERGENCE ET VALIDATION
     # =====================================================
 
-    async def _check_convergence(self, step: PlanStep, actual_result: str, supplemental_data: Optional[str] = None, node: Optional[ExecutionNode] = None) -> ConvergenceDecision:
+    async def _check_convergence(self, step: PlanStep, actual_result: str, supplemental_data: Optional[str] = None, node: Optional[ExecutionNode] = None, action_success: Optional[bool] = None) -> ConvergenceDecision:
         if not step.expected_result:
             Logger.info(f"[Executor] Aucun critère défini pour [{step.id}]. Convergence implicite acceptée.")
             return ConvergenceDecision(is_convergent=True, reason=_("Aucun critère d'output spécifié."))
@@ -1155,8 +1155,17 @@ class Executor:
             is_valid, rigid_reason = self._verify_rigid_outcome(step.expected_result, actual_result, supplemental_data, raw_success_flag=raw_flag)
             return ConvergenceDecision(is_convergent=is_valid, reason=rigid_reason)
 
+        # Tâche abstraite dont l'action a échoué : refus déterministe, pas
+        # d'appel LLM (le statut structuré fait foi, pas le texte).
+        if action_success is False:
+            Logger.info(f"[Executor] [Convergence] Sous-tâche [{step.id}] en échec : refus sans appel LLM.")
+            return ConvergenceDecision(
+                is_convergent=False,
+                reason=_("Sous-tâche en échec (statut d'exécution) : convergence refusée sans analyse."),
+            )
         Logger.info(f"[Executor] [Analyse Sémantique] Invocation du LLM pour l'étape abstraite [{step.id}]...")
-        return await self._evaluate_semantic_convergence(step, actual_result)
+        structured_status = "OK" if action_success is True else None
+        return await self._evaluate_semantic_convergence(step, actual_result, tool_status=structured_status)
 
     def _text_reports_absence(self, text: Optional[str]) -> bool:
         """Détecte un constat d'absence (rien trouvé / pas visible).
@@ -1287,19 +1296,34 @@ class Executor:
 
         return _restore
 
-    async def _evaluate_semantic_convergence(self, step: PlanStep, actual_result: str) -> ConvergenceDecision:
+    @staticmethod
+    def _strip_tool_prefix(text: str) -> str:
+        """Retire le préfixe `[TOOLS OK]` / `[TOOLS FAILED]` du texte soumis
+        au juge (le statut reste fourni séparément, traçabilité gardée)."""
+        stripped = str(text or "")
+        for prefix in ("[TOOLS FAILED]", "[TOOLS OK]"):
+            if stripped.startswith(prefix):
+                stripped = stripped[len(prefix):].lstrip()
+                break
+        return stripped
+
+    async def _evaluate_semantic_convergence(self, step: PlanStep, actual_result: str, tool_status: Optional[str] = None) -> ConvergenceDecision:
         mission_id = None
         if hasattr(self.solver, 'runtime_state') and self.solver.runtime_state:
             mission_id = self.solver.runtime_state.execution_context.get("mission_id")
 
         loader = get_prompt_loader()
         text = str(actual_result or "")
-        if "[TOOLS FAILED]" in text:
-            tool_status = "FAILED"
-        elif "[TOOLS OK]" in text:
-            tool_status = "OK"
-        else:
-            tool_status = "UNKNOWN"
+        if tool_status is None:
+            # Repli historique : statut deviné du préfixe (appelants sans
+            # statut structuré). Le prompt reçoit quand même le texte dépouillé.
+            if "[TOOLS FAILED]" in text:
+                tool_status = "FAILED"
+            elif "[TOOLS OK]" in text:
+                tool_status = "OK"
+            else:
+                tool_status = "UNKNOWN"
+        clean_text = self._strip_tool_prefix(text)
         try:
             from core.alignment import fetch_world_state_snapshot
             _conv_snapshot = await fetch_world_state_snapshot(
@@ -1311,7 +1335,7 @@ class Executor:
             lang=self.solver.runtime_state.language,
             step_description=step.description,
             expected_result=step.expected_result,
-            actual_result=actual_result,
+            actual_result=clean_text,
             tool_status=tool_status,
             world_snapshot=_conv_snapshot,
         )
