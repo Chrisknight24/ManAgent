@@ -161,6 +161,27 @@ Pour que le cerveau sache « où il est » sans deviner :
 - Points de lecture : avant faisabilité, avant chaque plan, avant chaque convergence (jamais jugé comme preuve, que du contexte).
 - Convention `get_world_state` documentée ici : retour texte brut ou `{summary_text, full}` (résumé dans le prompt, détail via PD).
 
+## 3h. Attente active par appel (optionnel)
+
+Pour les gestes dont l'effet met du temps (lancer une appli puis taper
+dedans) : `await_change` (optionnel, booléen) par appel `mouse`/`keyboard`.
+Après ce geste, l'hôte vérifie activement que le monde a bougé. Absent ou
+`false` = chemin rapide actuel, strictement rien ne change.
+- Signaux autorisés (pas chers) : fenêtre avant-plan, focus, pixels (moteur
+  `vision wait` existant), curseur sablier. Interdits : CPU, RAM, processus
+  (coûteux, faux positifs).
+- Non bloquant : scrutation 100-150 ms, sortie précoce (100-300 ms typique),
+  plafond `max_wait_ms` par outil (défaut hôte sinon). Le cerveau ne bloque
+  jamais : timeout client = `max_wait_ms` + marge.
+- Phase 1 (actuelle) : le constat est rapporté dans `data` (ex :
+  `{"awaited": true, "signal": "foreground_changed"}`), `result` inchangé.
+  Phase 2 : `false` si rien n'a bougé — seulement quand le cerveau prouve
+  digérer les signaux (retest commun).
+- Correspondance : un step plan `monde=oui` peut poser `await_change=true`
+  sur l'appel hôte (couplage auto côté cerveau, à venir). Le planner ne
+  l'écrit jamais lui-même.
+- Exemple : `{"action": "text", "text": "12+34=", "await_change": true}`.
+
 ## 4. Actions supportées (voir `core/constants.py:8`)
 
 | Action | Usage |

@@ -133,6 +133,27 @@ So the brain knows "where it is" without guessing:
 - Read points: before feasibility, before each plan, before each convergence (never judged as proof, context only).
 - Documented `get_world_state` convention here: plain text return or `{summary_text, full}` (summary in prompt, detail via PD).
 
+## 3g. Active wait per call (optional)
+
+For gestures whose effect takes time (launch an app, then type into it):
+`await_change` (optional, boolean) per `mouse`/`keyboard` call. After the
+gesture, the host actively verifies the world moved. Absent or `false` =
+current fast path, strictly nothing changes.
+- Allowed signals (cheap): foreground window, focus, pixels (existing
+  `vision wait` engine), hourglass cursor. Forbidden: CPU, RAM, processes
+  (costly, false positives).
+- Non-blocking: 100-150 ms polling, early exit (typically 100-300 ms),
+  per-tool `max_wait_ms` ceiling (host default otherwise). The brain never
+  blocks: client timeout = `max_wait_ms` + margin.
+- Phase 1 (current): the finding is reported in `data` (e.g.
+  `{"awaited": true, "signal": "foreground_changed"}`), `result` unchanged.
+  Phase 2: `false` when nothing moved — only once the brain proves it
+  digests the signals (joint retest).
+- Mapping: a plan step with expected world change may set
+  `await_change=true` on the host call (brain-side auto-coupling, upcoming).
+  The planner never writes it itself.
+- Example: `{"action": "text", "text": "12+34=", "await_change": true}`.
+
 ## 4. Supported actions
 
 `runtime.configure`, `host.manifest.register`, `chat.send`,
