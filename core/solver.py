@@ -868,6 +868,8 @@ class Solver(Supervisor, Entity):
                     await self._handle_skill_lifecycle_post_execution(is_success=True)
 
                     final_result.execution_tree = self.execution_tree
+                    if getattr(self, "depth", 0) == 0:
+                        self._emit_stats_snapshot()
                     return final_result
 
                 self.execution_tree.status = "failed"
@@ -900,6 +902,8 @@ class Solver(Supervisor, Entity):
                     error_reason=error_msg,
                     execution_tree=self.execution_tree
                 )
+                if getattr(self, "depth", 0) == 0:
+                    self._emit_stats_snapshot()
                 return result
 
             except Exception as general_error:
@@ -1217,6 +1221,26 @@ class Solver(Supervisor, Entity):
 
     async def report_critical_failure(self, error_context: str, child_solver_id: str):
         await self.parent.report_critical_failure(error_context, child_solver_id)
+
+    def _emit_stats_snapshot(self) -> None:
+        """Photo compteurs en fin de mission (3b) : même contenu que
+        `stats.get` global (tokens + troncatures), collée au log par
+        construction. Zéro comportement, jamais bloquant."""
+        try:
+            store = getattr(self.runtime_state, "llm_usage", None) or {}
+            total = (store.get("total", {}) or {}) if isinstance(store, dict) else {}
+            by_mission = (store.get("by_mission", {}) or {}) if isinstance(store, dict) else {}
+            trunc = getattr(self.runtime_state, "truncation_count", None)
+            trunc_out = dict(trunc) if isinstance(trunc, dict) else ({"__total__": trunc} if trunc else {})
+            Logger.event(
+                "stats.snapshot",
+                mission_id=self.id,
+                total=total,
+                by_mission=by_mission,
+                truncations=trunc_out,
+            )
+        except Exception:
+            pass
 
     async def execute_tool(self, tool_name: str, arguments: dict) -> str:
         return await self.runtime_state.tools_manager.execute_tool(

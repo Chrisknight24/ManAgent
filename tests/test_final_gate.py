@@ -104,6 +104,26 @@ def test_preuves_etiquetees_rum():
     assert "46" in calls["prompt"]
 
 
+def test_stats_snapshot_emis_fin_mission(monkeypatch):
+    from utils.logger import Logger
+    events = []
+    monkeypatch.setattr(Logger, "event",
+                        staticmethod(lambda event_type, **fields: events.append(
+                            {"event": event_type, **fields})))
+    solver = Solver.__new__(Solver)
+    solver.id = "m-stats"
+    solver.runtime_state = types.SimpleNamespace(
+        llm_usage={"total": {"total_tokens": 10, "calls": 2}, "by_mission": {}},
+        truncation_count={"Plan": 1},
+    )
+    solver._emit_stats_snapshot()
+    snaps = [e for e in events if e["event"] == "stats.snapshot"]
+    assert len(snaps) == 1
+    assert snaps[0]["mission_id"] == "m-stats"
+    assert snaps[0]["total"]["total_tokens"] == 10
+    assert snaps[0]["truncations"] == {"Plan": 1}
+
+
 def test_tag_attempt_marque_tentative():
     from core.executor import Executor
     ex = Executor.__new__(Executor)
