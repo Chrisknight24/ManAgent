@@ -1018,8 +1018,8 @@ class Executor:
                     "value": tool_asset.get_uri(),
                     "asset": tool_asset,
                     "type": "asset",
-                    "description": data_description + _(" [Encapsulé en DataAsset : {} caractères]").format(len(data_val_str)),
-                    "source": child_solver.id,
+                    "description": data_description + _(" [Encapsulé en DataAsset : {} caractères]").format(data_str_len),
+                    "source": self.solver.id,
                     "timestamp": datetime.now().isoformat()
                 }
                 self._tag_attempt(asset_entry)

@@ -111,3 +111,33 @@ def test_tag_attempt_marque_tentative():
         current_attempt=types.SimpleNamespace(attempt_number=3))
     entry = ex._tag_attempt({"value": "x"})
     assert entry["attempt_no"] == 3
+
+
+def test_grosse_donnee_outil_encapsulee_sans_crash():
+    import json as _json
+    from core.executor import Executor
+    from core.plan_models import PlanStep, StepType
+
+    async def _fake_exec(name, args):
+        return _json.dumps({"result": True, "data": "x" * 5000})
+
+    solver = types.SimpleNamespace(
+        id="s-big",
+        variable_registry={},
+        current_attempt=types.SimpleNamespace(attempt_number=1),
+        runtime_state=types.SimpleNamespace(
+            session_id="sess", discovery_engine=None,
+            tools_manager=types.SimpleNamespace()),
+        execute_tool=_fake_exec,
+    )
+    ex = Executor.__new__(Executor)
+    ex.solver = solver
+    step = PlanStep(id="step_1", description="gros", type=StepType.TOOL_CALL,
+                    tool_name="keyboard", tool_args_json="{}",
+                    expected_result="true")
+    ok, out, _ = asyncio.run(ex._handle_tool_call(
+        step, node=types.SimpleNamespace()))
+    assert ok is True
+    entry = solver.variable_registry.get("data_step_1")
+    assert entry is not None and entry.get("type") == "asset"
+    assert entry.get("attempt_no") == 1
