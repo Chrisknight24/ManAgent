@@ -156,6 +156,9 @@ Skills : `checkpoint.reached`, `breakout.occurred`, `execution.completed`, `skil
 Embeddings : `embedding.download_started/finished/error/cancelled`, `embedding.active_changed`, `host.manifest_updated`.
 Séquence : l'hôte appelle `embeddings.catalog` juste après `runtime.configured` (attendre `runtime.ready` sinon).
 Apprentissage : `learner.analyze_started/finished`, `discovery.session_start/step/session_end`.
+Validation : `plan_validation_decision` (chaque validation : `solver_id`, `is_valid`, `reason`, `risk_level`, confirmations — portail + juge, stable).
+Convergence : `convergence.check` basse fréquence (fin de mission + échec : `verdict`, `detail` 1 phrase, `mission_id` + `step_id` si échec en cours).
+Compteurs : `stats.snapshot` en fin de mission (même contenu que `stats.get` global : tokens + troncatures).
 
 ## 9. Règles du jeu
 

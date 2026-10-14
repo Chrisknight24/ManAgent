@@ -155,6 +155,9 @@ Tools: `tool.requested`, `tools_manager.decision/execution/result`.
 Skills: `checkpoint.reached`, `breakout.occurred`, `skill.state_changed`.
 Embeddings: `embedding.download_started/finished/error/cancelled`, `embedding.active_changed`.
 Learning: `learner.analyze_started/finished`.
+Validation: `plan_validation_decision` (every validation: `solver_id`, `is_valid`, `reason`, `risk_level`, confirmations — deterministic gate + LLM judge, stable).
+Convergence: `convergence.check`, low frequency (mission end + failure: `verdict`, 1-phrase `detail`, `mission_id` + `step_id` on in-progress failure).
+Counters: `stats.snapshot` at mission end (same content as global `stats.get`: tokens + truncations).
 Sequence: call `embeddings.catalog` right after `runtime.configured`.
 
 ## 9. Rules of the game
