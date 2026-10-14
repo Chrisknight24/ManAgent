@@ -172,3 +172,10 @@ def test_source_data_texte_libre_refuse_nom_adresse_ok():
         _rs(tm)))
     assert out["result"] is False
     assert "jamais du texte libre" in (out.get("error_reason") or "")
+
+
+def test_vue_tool_manager_borne_agit_jamais():
+    tm = _mgr()
+    view = tm._get_internal_tools_view()
+    descs = " ".join(v.get("description", "") for v in view)
+    assert "JAMAIS directement sur le monde" in descs

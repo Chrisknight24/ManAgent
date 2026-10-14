@@ -286,6 +286,8 @@ class ToolsManager(Entity):
         description = _(
             "Outil de délégation et chef d'orchestre d'analyse de données. "
             "Il permet d'exécuter des traitements et des analyses avancées via ses sous-outils internes gérés.\n"
+            "N'agit JAMAIS directement sur le monde : analyse, route et compose ; "
+            "pour transformer le monde, passez par un outil hôte [action] ou une requête complète explicite.\n"
             "Capacités dynamiques supportées : {caps}.\n"
             "Sous-outils actuellement gérés :\n{tools}\n"
             "Formulez simplement le besoin dans le paramètre 'request'."
