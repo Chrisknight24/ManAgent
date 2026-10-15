@@ -22,6 +22,11 @@ EFFECT_UNCERTAIN = "uncertain"
 # du protocole), jamais deviné : un seul endroit, pas de fallback créatif.
 WORLD_STATE_TOOL = "get_world_state"
 
+# Troncature snapshot : entrées gardées entières par collection (jamais
+# coupées au milieu), ordre reçu respecté (c'est l'hôte qui trie).
+# Agnostique : toute liste, quelle que soit sa nature ou sa clé.
+WORLD_SNAPSHOT_MAX_ITEMS = 10
+
 
 async def fetch_world_state_snapshot(runtime_state, max_chars: int = 800) -> str:
     """Photo d'état du monde : manifeste déclaré > convention > rien.
@@ -76,8 +81,17 @@ async def fetch_world_state_snapshot(runtime_state, max_chars: int = 800) -> str
             data = parsed
         if data is None:
             return ""
+        omitted: List[str] = []
+        if isinstance(data, dict):
+            for key in list(data.keys()):
+                val = data[key]
+                if isinstance(val, list) and len(val) > WORLD_SNAPSHOT_MAX_ITEMS:
+                    data[key] = val[:WORLD_SNAPSHOT_MAX_ITEMS]
+                    omitted.append(f"+{len(val) - WORLD_SNAPSHOT_MAX_ITEMS} entrées '{key}' non listées")
         text = data if isinstance(data, str) else _json.dumps(data, ensure_ascii=False)
         text = str(text).strip()
+        if omitted:
+            text += "\n(" + ", ".join(omitted) + ", query PD pour le détail)"
         if len(text) > limit:
             text = text[:limit] + "…"
         return text

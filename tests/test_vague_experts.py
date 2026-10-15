@@ -90,6 +90,44 @@ def test_snapshot_capé():
     assert out != "" and len(out) <= 120
 
 
+def test_snapshot_liste_longue_entrees_completes_plus_compteur():
+    import json as _json
+    from core.alignment import fetch_world_state_snapshot, WORLD_SNAPSHOT_MAX_ITEMS
+
+    wins = [{"title": f"w{i}"} for i in range(25)]
+
+    class FakeTM3:
+        def known_tool_names(self):
+            return {"get_world_state"}
+
+        async def execute_tool(self, name, args):
+            return _json.dumps({"result": True, "data": {"windows": wins, "focus": "x"}})
+
+    rs = types.SimpleNamespace(tools_manager=FakeTM3(), host_manifest=None)
+    out = asyncio.run(fetch_world_state_snapshot(rs, max_chars=10000))
+    assert '"title": "w0"' in out and '"title": "w9"' in out
+    assert '"title": "w10"' not in out
+    assert f"+{25 - WORLD_SNAPSHOT_MAX_ITEMS} entrées 'windows' non listées" in out
+    assert '"focus": "x"' in out
+
+
+def test_snapshot_liste_courte_inchangee_et_ordre_recu():
+    import json as _json
+    from core.alignment import fetch_world_state_snapshot
+
+    class FakeTM4:
+        def known_tool_names(self):
+            return {"get_world_state"}
+
+        async def execute_tool(self, name, args):
+            return _json.dumps({"result": True, "data": {"cibles": ["b", "a"]}})
+
+    rs = types.SimpleNamespace(tools_manager=FakeTM4(), host_manifest=None)
+    out = asyncio.run(fetch_world_state_snapshot(rs, max_chars=10000))
+    assert out.find('"b"') < out.find('"a"')
+    assert "non listées" not in out
+
+
 def test_templates_snapshot_rendus():
     from core.prompt_loader import get_prompt_loader
     for name, kwargs in (
