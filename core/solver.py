@@ -843,7 +843,9 @@ class Solver(Supervisor, Entity):
                     self.execution_tree.status = "success"
 
                     if getattr(self, "depth", 0) == 0:
-                        await self._emit_mission_convergence("pass", _("Mission accomplie."))
+                        await self._emit_mission_convergence(
+                            "pass", _("Mission accomplie."),
+                            full=str(getattr(final_result, "response", "") or ""))
 
                     if self.signatures:
                         is_novel = self.runtime_state.execution_markers.get("is_novel", False)
@@ -1203,16 +1205,18 @@ class Solver(Supervisor, Entity):
             lines.append(f"  - Hint : {meta.get('value_hint', '')}")
         return "\n".join(lines)
 
-    async def _emit_mission_convergence(self, verdict: str, detail: str) -> None:
+    async def _emit_mission_convergence(self, verdict: str, detail: str, full: str = "") -> None:
         """Verdict mission : journal + paquet transport (le front ne lit
-        que les paquets). `detail` = 1 phrase, `full` = texte complet pour
-        popup Détails (jamais jugé). Jamais bloquant."""
+        que les paquets). `detail` = 1 phrase, `full` = vrai contenu
+        (rapport final en succès, motif en échec) pour popup Détails,
+        jamais jugé. Jamais bloquant."""
+        _full = str(full or detail or "")
         try:
             Logger.event(
                 "convergence.check",
                 verdict=verdict,
                 detail=str(detail or "")[:300],
-                full=str(detail or ""),
+                full=_full,
                 mission_id=self.id,
             )
         except Exception:
@@ -1221,7 +1225,7 @@ class Solver(Supervisor, Entity):
             await self.propagate_event("convergence.check", {
                 "verdict": verdict,
                 "detail": str(detail or "")[:300],
-                "full": str(detail or ""),
+                "full": _full,
                 "mission_id": self.id,
             })
         except Exception:

@@ -201,6 +201,8 @@ class Executor:
                         if child_result and child_result.execution_tree:
                             node.child_execution_tree = child_result.execution_tree
                     else:
+                        if step.type == StepType.TOOL_CALL and step.tool_name:
+                            await self._apply_step_wait(step, "before")
                         success, execution_output, supplemental_data = await self._execute_step_action(step, accumulated_context, node=node)
 
                     if step.type == StepType.TOOL_CALL and success and execution_output is not None:
@@ -341,62 +343,10 @@ class Executor:
 
                         accumulated_context += f"\n[Succès {step.id}] : {execution_output}"
 
-                        # --- D3 waiting_ms : attente explicite après action.
-                        # Ordre des sources : planner explicite (même 0) >
-                        # hôte déclaré (effects_timeout_ms) > défaut ManAgent.
-                        # Pause tracée (log + events + compteur), annulable.
+                        # --- D3 waiting_ms : APRÈS si action (laisse retomber).
+                        # L'AVANT-lecture est appliqué avant exécution (voir plus haut).
                         if step.type == StepType.TOOL_CALL and step.tool_name:
-                            try:
-                                _tm2 = getattr(self.solver.runtime_state, "tools_manager", None)
-                                _host_ms = (_tm2.get_tool_timeout_ms(step.tool_name)
-                                            if _tm2 is not None and hasattr(_tm2, "get_tool_timeout_ms") else None)
-                            except Exception:
-                                _host_ms = None
-                            try:
-                                from core.constants import DEFAULT_WAITING_MS as _DEFAULT_WAIT
-                            except Exception:
-                                _DEFAULT_WAIT = 3000
-                            _wait_ms, _wait_src = resolve_wait_ms(
-                                getattr(step, "waiting_ms", None), _host_ms, _DEFAULT_WAIT)
-                            if _wait_ms > 0:
-                                Logger.info(
-                                    f"[Executor] Attente {_wait_ms} ms (source {_wait_src}) après '{step.tool_name}' [{step.id}].")
-                                try:
-                                    _att_no = getattr(getattr(self.solver, "current_attempt", None), "attempt_number", None)
-                                except Exception:
-                                    _att_no = None
-                                _pause_fields = {
-                                    "step_id": step.id, "ms": _wait_ms, "source": _wait_src,
-                                    "solver_id": getattr(self.solver, "id", None),
-                                    "attempt_number": _att_no,
-                                }
-                                try:
-                                    await self.solver.propagate_event("pause.started", dict(_pause_fields))
-                                except Exception:
-                                    pass
-                                import asyncio as _asyncio
-                                _left = _wait_ms / 1000.0
-                                while _left > 0:
-                                    if getattr(self.solver.runtime_state, "cancel_requested", False):
-                                        break
-                                    _slice = min(0.25, _left)
-                                    await _asyncio.sleep(_slice)
-                                    _left -= _slice
-                                try:
-                                    await self.solver.propagate_event("pause.finished", dict(_pause_fields))
-                                except Exception:
-                                    pass
-                                try:
-                                    _ws = getattr(self.solver.runtime_state, "waiting_stats", None)
-                                    if not isinstance(_ws, dict):
-                                        _ws = {}
-                                        self.solver.runtime_state.waiting_stats = _ws
-                                    _ws[_wait_src] = int(_ws.get(_wait_src) or 0) + 1
-                                    _applied = getattr(self, "_applied_waits", None)
-                                    if isinstance(_applied, list):
-                                        _applied.append({"step_id": step.id, "ms": _wait_ms, "source": _wait_src})
-                                except Exception:
-                                    pass
+                            await self._apply_step_wait(step, "after")
 
                         if step.type in [StepType.DIRECT_ANSWER, StepType.ABSTRACT_TASK]:
                             if execution_output:
@@ -493,6 +443,85 @@ class Executor:
         except Exception:
             pass
         return entry
+
+    def _wait_placement(self, tool_name: Any) -> str:
+        """Où l'attente D3 s'applique : AVANT si lecture (laisser arriver),
+        APRÈS si action (laisser retomber). Pur (hors lecture manifeste)."""
+        try:
+            tm = getattr(self.solver.runtime_state, "tools_manager", None)
+            perc = set(tm.perception_tool_names()) if tm is not None and hasattr(tm, "perception_tool_names") else set()
+        except Exception:
+            perc = set()
+        name = str(tool_name or "")
+        if name in perc or name == "perceive_understand":
+            return "before"
+        return "after"
+
+    async def _apply_step_wait(self, step: Any, when: str) -> int:
+        """Applique l'attente D3 si c'est son tour (before/after).
+        Ordre : planner explicite (même 0) > hôte > défaut. Log + paquets
+        + compteur. Retourne les ms appliquées."""
+        try:
+            if self._wait_placement(getattr(step, "tool_name", None)) != when:
+                return 0
+            try:
+                tm = getattr(self.solver.runtime_state, "tools_manager", None)
+                host_ms = (tm.get_tool_timeout_ms(step.tool_name)
+                           if tm is not None and hasattr(tm, "get_tool_timeout_ms") else None)
+            except Exception:
+                host_ms = None
+            try:
+                from core.constants import DEFAULT_WAITING_MS as _DEFAULT_WAIT
+            except Exception:
+                _DEFAULT_WAIT = 3000
+            wait_ms, wait_src = resolve_wait_ms(
+                getattr(step, "waiting_ms", None), host_ms, _DEFAULT_WAIT)
+            if wait_ms <= 0:
+                return 0
+            moment = _("avant") if when == "before" else _("après")
+            Logger.info(
+                f"[Executor] Attente {wait_ms} ms (source {wait_src}) {moment} '{step.tool_name}' [{step.id}].")
+            try:
+                att_no = getattr(getattr(self.solver, "current_attempt", None), "attempt_number", None)
+            except Exception:
+                att_no = None
+            fields = {
+                "step_id": step.id, "ms": wait_ms, "source": wait_src, "moment": when,
+                "solver_id": getattr(self.solver, "id", None),
+                "attempt_number": att_no,
+            }
+            Logger.event("pause.started", **fields)
+            try:
+                await self.solver.propagate_event("pause.started", dict(fields))
+            except Exception:
+                pass
+            import asyncio as _asyncio
+            left = wait_ms / 1000.0
+            while left > 0:
+                if getattr(self.solver.runtime_state, "cancel_requested", False):
+                    break
+                sl = min(0.25, left)
+                await _asyncio.sleep(sl)
+                left -= sl
+            Logger.event("pause.finished", **fields)
+            try:
+                await self.solver.propagate_event("pause.finished", dict(fields))
+            except Exception:
+                pass
+            try:
+                ws = getattr(self.solver.runtime_state, "waiting_stats", None)
+                if not isinstance(ws, dict):
+                    ws = {}
+                    self.solver.runtime_state.waiting_stats = ws
+                ws[wait_src] = int(ws.get(wait_src) or 0) + 1
+                applied = getattr(self, "_applied_waits", None)
+                if isinstance(applied, list):
+                    applied.append({"step_id": step.id, "ms": wait_ms, "source": wait_src})
+            except Exception:
+                pass
+            return wait_ms
+        except Exception:
+            return 0
 
     def _propagate_crucial_variable(self, base_name: str) -> None:
         rum = self.solver.runtime_state.mission_rum

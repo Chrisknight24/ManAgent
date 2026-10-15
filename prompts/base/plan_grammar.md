@@ -112,8 +112,8 @@ Les outils sont **stateless (sans mémoire)** et ne peuvent pas définir de vari
    `verify_with` : nom d'un outil `[perception]` pour vérifier en cas de doute (sinon `get_world_state` par défaut).
    `is_crucial=true` pour la donnée qui RÉPOND à la question de l'utilisateur (le résultat, la valeur, la confirmation finale). Jamais pour les artefacts intermédiaires (captures, logs, états transitoires) sauf si l'utilisateur les demande.
 
-7. **Attente après action (`waiting_ms`, optionnel)** :
-   millisecondes d'attente fixe APRÈS l'action (0..30000). Absent = non réfléchi : défaut appliqué (hôte déclaré, sinon 3000 ms ManAgent — assumé, visible en logs). 0 explicite = aucune attente (décision assumée). > 0 = ta consigne, prime sur le défaut hôte. Si l'effet met du temps (lancement, chargement, page web) : mets une valeur, n'espère pas.
+7. **Attente autour de l'étape (`waiting_ms`, optionnel)** :
+   millisecondes (0..30000). Absent = non réfléchi : défaut appliqué (hôte déclaré, sinon 3000 ms ManAgent — assumé, visible en logs). 0 explicite = aucune attente (décision assumée). > 0 = ta consigne, prime sur le défaut hôte. Sens : AVANT si lecture (laisser arriver : perception), APRÈS si action (laisser retomber). Si l'effet met du temps (lancement, chargement, page web) : mets une valeur, n'espère pas.
 
 ### Exemple de plan valide (Générique)
 
