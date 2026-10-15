@@ -843,15 +843,7 @@ class Solver(Supervisor, Entity):
                     self.execution_tree.status = "success"
 
                     if getattr(self, "depth", 0) == 0:
-                        try:
-                            Logger.event(
-                                "convergence.check",
-                                verdict="pass",
-                                detail=_("Mission accomplie."),
-                                mission_id=self.id,
-                            )
-                        except Exception:
-                            pass
+                        await self._emit_mission_convergence("pass", _("Mission accomplie."))
 
                     if self.signatures:
                         is_novel = self.runtime_state.execution_markers.get("is_novel", False)
@@ -869,7 +861,7 @@ class Solver(Supervisor, Entity):
 
                     final_result.execution_tree = self.execution_tree
                     if getattr(self, "depth", 0) == 0:
-                        self._emit_stats_snapshot()
+                        await self._emit_stats_snapshot()
                     return final_result
 
                 self.execution_tree.status = "failed"
@@ -887,15 +879,7 @@ class Solver(Supervisor, Entity):
 
                 error_msg = self.current_attempt.failure_reason if self.current_attempt else _("Échec inconnu")
                 if getattr(self, "depth", 0) == 0:
-                    try:
-                        Logger.event(
-                            "convergence.check",
-                            verdict="fail",
-                            detail=str(error_msg)[:300],
-                            mission_id=self.id,
-                        )
-                    except Exception:
-                        pass
+                    await self._emit_mission_convergence("fail", error_msg)
                 result = SolverResult(
                     status=ExecutionStatus.FAILED,
                     final_context=self.context,
@@ -903,7 +887,7 @@ class Solver(Supervisor, Entity):
                     execution_tree=self.execution_tree
                 )
                 if getattr(self, "depth", 0) == 0:
-                    self._emit_stats_snapshot()
+                    await self._emit_stats_snapshot()
                 return result
 
             except Exception as general_error:
@@ -1219,26 +1203,51 @@ class Solver(Supervisor, Entity):
             lines.append(f"  - Hint : {meta.get('value_hint', '')}")
         return "\n".join(lines)
 
+    async def _emit_mission_convergence(self, verdict: str, detail: str) -> None:
+        """Verdict mission : journal + paquet transport (le front ne lit
+        que les paquets). Jamais bloquant."""
+        try:
+            Logger.event(
+                "convergence.check",
+                verdict=verdict,
+                detail=str(detail or "")[:300],
+                mission_id=self.id,
+            )
+        except Exception:
+            pass
+        try:
+            await self.propagate_event("convergence.check", {
+                "verdict": verdict,
+                "detail": str(detail or "")[:300],
+                "mission_id": self.id,
+            })
+        except Exception:
+            pass
+
     async def report_critical_failure(self, error_context: str, child_solver_id: str):
         await self.parent.report_critical_failure(error_context, child_solver_id)
 
-    def _emit_stats_snapshot(self) -> None:
+    async def _emit_stats_snapshot(self) -> None:
         """Photo compteurs en fin de mission (3b) : même contenu que
-        `stats.get` global (tokens + troncatures), collée au log par
-        construction. Zéro comportement, jamais bloquant."""
+        `stats.get` global (tokens + troncatures). Journal + paquet
+        transport. Zéro comportement, jamais bloquant."""
         try:
             store = getattr(self.runtime_state, "llm_usage", None) or {}
             total = (store.get("total", {}) or {}) if isinstance(store, dict) else {}
             by_mission = (store.get("by_mission", {}) or {}) if isinstance(store, dict) else {}
             trunc = getattr(self.runtime_state, "truncation_count", None)
             trunc_out = dict(trunc) if isinstance(trunc, dict) else ({"__total__": trunc} if trunc else {})
-            Logger.event(
-                "stats.snapshot",
-                mission_id=self.id,
-                total=total,
-                by_mission=by_mission,
-                truncations=trunc_out,
-            )
+            fields = {
+                "mission_id": self.id,
+                "total": total,
+                "by_mission": by_mission,
+                "truncations": trunc_out,
+            }
+            Logger.event("stats.snapshot", **fields)
+            try:
+                await self.propagate_event("stats.snapshot", dict(fields))
+            except Exception:
+                pass
         except Exception:
             pass
 

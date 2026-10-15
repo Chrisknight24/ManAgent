@@ -2155,6 +2155,19 @@ class Orchestrator(Supervisor, Entity):
             human_confirmed=outcome.human_confirmed,
             irreversibility_flags=outcome.irreversibility_flags,
         )
+        # Relais paquet (le front ne lit que les paquets) : même contenu.
+        try:
+            await self.propagate_event("plan_validation_decision", {
+                "solver_id": child_solver_id,
+                "is_valid": outcome.is_valid,
+                "reason": outcome.reason,
+                "risk_level": outcome.risk_level.value,
+                "requires_human_confirmation": outcome.requires_human_confirmation,
+                "human_confirmed": outcome.human_confirmed,
+                "irreversibility_flags": outcome.irreversibility_flags,
+            })
+        except Exception:
+            pass
 
         if outcome.is_valid:
             Logger.info(f"[Orchestrator] ✅ Plan de '{child_solver_id}' accepté ({outcome.risk_level.value}). {outcome.reason}")

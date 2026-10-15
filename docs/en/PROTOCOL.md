@@ -158,6 +158,8 @@ Learning: `learner.analyze_started/finished`.
 Validation: `plan_validation_decision` (every validation: `solver_id`, `is_valid`, `reason`, `risk_level`, confirmations — deterministic gate + LLM judge, stable).
 Convergence: `convergence.check`, low frequency (mission end + failure: `verdict`, 1-phrase `detail`, `mission_id` + `step_id` on in-progress failure).
 Counters: `stats.snapshot` at mission end (same content as global `stats.get`: tokens + truncations).
+
+All events above arrive as JSON packets on stdout (`{"type":"event","event":...,"payload":{...}}`), not just in logs: the frontend reads packets only. `convergence.check` frequency: every convergence failure + mission-end verdict (not after each successful task — the final `pass` covers the Verification item).
 Sequence: call `embeddings.catalog` right after `runtime.configured`.
 
 ## 9. Rules of the game

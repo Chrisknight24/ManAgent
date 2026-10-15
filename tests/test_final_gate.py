@@ -116,12 +116,19 @@ def test_stats_snapshot_emis_fin_mission(monkeypatch):
         llm_usage={"total": {"total_tokens": 10, "calls": 2}, "by_mission": {}},
         truncation_count={"Plan": 1},
     )
-    solver._emit_stats_snapshot()
+
+    async def _fake_propagate(name, payload):
+        events.append({"event": name, "packet": True, **payload})
+
+    solver.propagate_event = _fake_propagate
+    asyncio.run(solver._emit_stats_snapshot())
     snaps = [e for e in events if e["event"] == "stats.snapshot"]
-    assert len(snaps) == 1
-    assert snaps[0]["mission_id"] == "m-stats"
-    assert snaps[0]["total"]["total_tokens"] == 10
-    assert snaps[0]["truncations"] == {"Plan": 1}
+    assert len(snaps) == 2
+    assert sum(1 for e in snaps if not e.get("packet")) == 1
+    pkt = next(e for e in snaps if e.get("packet"))
+    assert pkt["mission_id"] == "m-stats"
+    assert pkt["total"]["total_tokens"] == 10
+    assert pkt["truncations"] == {"Plan": 1}
 
 
 def test_tag_attempt_marque_tentative():
@@ -161,3 +168,29 @@ def test_grosse_donnee_outil_encapsulee_sans_crash():
     entry = solver.variable_registry.get("data_step_1")
     assert entry is not None and entry.get("type") == "asset"
     assert entry.get("attempt_no") == 1
+
+
+def test_convergence_check_relaye_paquet(monkeypatch):
+    from utils.logger import Logger
+    from core.executor import Executor
+    logs = []
+    packets = []
+    monkeypatch.setattr(Logger, "event",
+                        staticmethod(lambda event_type, **fields: logs.append(event_type)))
+
+    async def _fake_propagate(name, payload):
+        packets.append((name, payload))
+
+    solver = types.SimpleNamespace(
+        current_attempt=types.SimpleNamespace(attempt_number=1),
+        runtime_state=types.SimpleNamespace(
+            execution_context=types.SimpleNamespace(get=lambda k: "m-pkt")),
+        propagate_event=_fake_propagate,
+    )
+    ex = Executor.__new__(Executor)
+    ex.solver = solver
+    asyncio.run(ex._emit_convergence_check("fail", "r", step_id="step_9"))
+    assert logs.count("convergence.check") == 1
+    assert packets == [("convergence.check", {
+        "verdict": "fail", "detail": "r",
+        "mission_id": "m-pkt", "step_id": "step_9"})]

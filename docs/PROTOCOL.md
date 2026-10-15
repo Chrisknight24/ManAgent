@@ -160,6 +160,8 @@ Validation : `plan_validation_decision` (chaque validation : `solver_id`, `is_va
 Convergence : `convergence.check` basse fréquence (fin de mission + échec : `verdict`, `detail` 1 phrase, `mission_id` + `step_id` si échec en cours).
 Compteurs : `stats.snapshot` en fin de mission (même contenu que `stats.get` global : tokens + troncatures).
 
+Tous les events ci-dessus arrivent en paquets JSON sur stdout (`{"type":"event","event":...,"payload":{...}}`), pas seulement dans les logs : le front ne lit que les paquets. Fréquence `convergence.check` : chaque échec de convergence + verdict fin de mission (pas après chaque tâche en succès — le `pass` final couvre l'item Vérification).
+
 ## 9. Règles du jeu
 
 1. Une ligne = un JSON. Le reste (logs `[INFO]`) s'ignore.

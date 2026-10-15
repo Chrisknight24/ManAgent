@@ -1160,7 +1160,7 @@ class Executor:
     async def _check_convergence(self, step: PlanStep, actual_result: str, supplemental_data: Optional[str] = None, node: Optional[ExecutionNode] = None, action_success: Optional[bool] = None) -> ConvergenceDecision:
         decision = await self._check_convergence_inner(step, actual_result, supplemental_data, node=node, action_success=action_success)
         if not decision.is_convergent:
-            self._emit_convergence_check("fail", decision.reason, step_id=getattr(step, "id", None))
+            await self._emit_convergence_check("fail", decision.reason, step_id=getattr(step, "id", None))
         return decision
 
     async def _check_convergence_inner(self, step: PlanStep, actual_result: str, supplemental_data: Optional[str] = None, node: Optional[ExecutionNode] = None, action_success: Optional[bool] = None) -> ConvergenceDecision:
@@ -1281,9 +1281,10 @@ class Executor:
 
         return False, reason
 
-    def _emit_convergence_check(self, verdict: str, detail: str, step_id: Optional[str] = None) -> None:
+    async def _emit_convergence_check(self, verdict: str, detail: str, step_id: Optional[str] = None) -> None:
         """Event `convergence.check` pour le front hôte (basse fréquence :
-        échecs en cours ici, verdict mission côté solver). Jamais bloquant."""
+        échecs en cours ici, verdict mission côté solver). Journal + paquet
+        transport (EventBus) : le front ne lit que les paquets. Jamais bloquant."""
         try:
             rs = getattr(self.solver, "runtime_state", None)
             mission_id = rs.execution_context.get("mission_id") if rs is not None else None
@@ -1296,6 +1297,10 @@ class Executor:
             if step_id:
                 fields["step_id"] = step_id
             Logger.event("convergence.check", **fields)
+            try:
+                await self.solver.propagate_event("convergence.check", dict(fields))
+            except Exception:
+                pass
         except Exception:
             pass
 
