@@ -194,3 +194,36 @@ def test_convergence_check_relaye_paquet(monkeypatch):
     assert packets == [("convergence.check", {
         "verdict": "fail", "detail": "r", "full": "r",
         "mission_id": "m-pkt", "step_id": "step_9"})]
+
+
+def test_prompt_final_hypothese_et_verite_hote():
+    calls = {"llm": 0}
+
+    async def _ok(prompt, schema, tag=None, mission_id=None, **kw):
+        calls["prompt"] = prompt
+        from core.plan_models import ConvergenceDecision
+        return ConvergenceDecision(is_convergent=True, reason="ok")
+
+    solver = _solver(calls)
+    solver.llm = types.SimpleNamespace(generate_structured=_ok)
+    asyncio.run(solver._verify_mission_convergence(
+        types.SimpleNamespace(response="fini"), strict=False))
+    assert "hypothèse" in calls["prompt"] or "hypothesis" in calls["prompt"]
+    assert "NEVER PROOF" not in calls["prompt"]
+    assert "jamais une preuve" not in calls["prompt"]
+
+
+def test_preuves_finales_epurees_prefixes():
+    calls = {"llm": 0}
+
+    async def _ok(prompt, schema, tag=None, mission_id=None, **kw):
+        calls["prompt"] = prompt
+        from core.plan_models import ConvergenceDecision
+        return ConvergenceDecision(is_convergent=True, reason="ok")
+
+    solver = _solver(calls, rum={"data_x": {"value": "[TOOLS OK] [TOOLS OK] 46"}})
+    solver.llm = types.SimpleNamespace(generate_structured=_ok)
+    asyncio.run(solver._verify_mission_convergence(
+        types.SimpleNamespace(response="[TOOLS OK] fini"), strict=False))
+    assert "[TOOLS OK]" not in calls["prompt"]
+    assert "46" in calls["prompt"] and "fini" in calls["prompt"]

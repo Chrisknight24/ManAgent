@@ -1307,13 +1307,18 @@ class Executor:
 
     @staticmethod
     def _strip_tool_prefix(text: str) -> str:
-        """Retire le préfixe `[TOOLS OK]` / `[TOOLS FAILED]` du texte soumis
-        au juge (le statut reste fourni séparément, traçabilité gardée)."""
+        """Retire les préfixes `[TOOLS OK]` / `[TOOLS FAILED]` empilés en tête
+        du texte soumis au juge (le statut reste fourni séparément,
+        traçabilité gardée)."""
         stripped = str(text or "")
-        for prefix in ("[TOOLS FAILED]", "[TOOLS OK]"):
-            if stripped.startswith(prefix):
-                stripped = stripped[len(prefix):].lstrip()
-                break
+        changed = True
+        while changed:
+            changed = False
+            for prefix in ("[TOOLS FAILED]", "[TOOLS OK]"):
+                if stripped.startswith(prefix):
+                    stripped = stripped[len(prefix):].lstrip()
+                    changed = True
+                    break
         return stripped
 
     async def _evaluate_semantic_convergence(self, step: PlanStep, actual_result: str, tool_status: Optional[str] = None) -> ConvergenceDecision:

@@ -1335,12 +1335,20 @@ class Solver(Supervisor, Entity):
             from core.plan_models import ConvergenceDecision
             loader = get_prompt_loader()
             response_text = str(getattr(final_result, "response", "") or "")
+            try:
+                from core.executor import Executor as _Executor
+                _strip = _Executor._strip_tool_prefix
+            except Exception:
+                def _strip(x):
+                    return str(x or "")
+            response_text = _strip(response_text)
             evidence_parts = [f"[RÉPONSE] {response_text[:1200]}"] if response_text.strip() else []
             try:
                 rum = getattr(self.runtime_state, "mission_rum", None) or {}
                 for name in sorted(rum.keys())[:8]:
                     entry = rum.get(name) or {}
                     val = entry.get("value", entry) if isinstance(entry, dict) else entry
+                    val = _strip(val)
                     tag = ""
                     try:
                         _att = (entry.get("attempt_no", None) if isinstance(entry, dict) else None)
