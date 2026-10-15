@@ -230,7 +230,10 @@ Stable events to log host-side: `plan.generated`, `tools_manager.decision/execut
 
 Token usage: every `llm_call` carries `usage = {prompt_tokens, completion_tokens, total_tokens, source}`
 with `source` = `real` (provider figure) or `estimated` (local ~4 chars = 1 token). Never invented.
-Query: `stats.get {"mission_id":"m123"}` → totals, or `{}` → total + by_mission. Unknown mission → `found:false` + zeros.
+Two shapes, do not mix:
+- Per mission (flat keys): `stats.get {"mission_id":"m123"}` → `{"mission_id":"m123","found":true,"prompt_tokens":1200,"completion_tokens":800,"total_tokens":2000,"calls":5,"real_calls":4,"estimated_calls":1}`.
+- Global (nested: read `total.*`): `stats.get {}` → `{"found":true,"total":{"prompt_tokens":...,"completion_tokens":...,"total_tokens":...,"calls":...},"by_mission":{"m123":{...}},"truncations":{"Plan":1}}`.
+Unknown mission → `found:false` + zeros, no error.
 
 Rules: file `rules.md` for dev (edit + restart). Prod (exe): `runtime.configure {"rules_text":"..."}` once,
 or `rules.set` live + `rules.get` to read back. Memory override wins over file.

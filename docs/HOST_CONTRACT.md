@@ -285,12 +285,16 @@ Dev (fichier) : éditez `rules.md` + relancez. Prod (exe, sans fichier) : envoye
 
 Chaque `llm_call` porte `usage = {prompt_tokens, completion_tokens, total_tokens, source}` où `source` vaut `real` (chiffre fournisseur), `estimated` (calcul local ~4 caractères = 1 token) ou absent. Jamais inventé : si le fournisseur ne dit rien, on estime et on l'écrit.
 
-Query hôte :
+Query hôte — deux formes, ne pas confondre :
+- Par mission (clés à plat) :
 ```json
 {"type":"request","action":"stats.get","payload":{"mission_id":"m123"}}
 → {"mission_id":"m123","found":true,"prompt_tokens":1200,"completion_tokens":800,"total_tokens":2000,"calls":5,"real_calls":4,"estimated_calls":1}
+```
+- Globale (imbriquée : en global, lisez `total.*`) :
+```json
 {"type":"request","action":"stats.get","payload":{}}
-→ {"total":{...},"by_mission":{...}}
+→ {"found":true,"total":{"prompt_tokens":1200,"completion_tokens":800,"total_tokens":2000,"calls":5},"by_mission":{"m123":{...}},"truncations":{"Plan":1}}
 ```
 Mission inconnue → `found:false` + zéros, pas d'erreur.
 
