@@ -157,7 +157,7 @@ Embeddings : `embedding.download_started/finished/error/cancelled`, `embedding.a
 Séquence : l'hôte appelle `embeddings.catalog` juste après `runtime.configured` (attendre `runtime.ready` sinon).
 Apprentissage : `learner.analyze_started/finished`, `discovery.session_start/step/session_end`.
 Validation : `plan_validation_decision` (chaque validation : `solver_id`, `is_valid`, `reason`, `risk_level`, confirmations — portail + juge, stable).
-Convergence : `convergence.check` basse fréquence (fin de mission + échec : `verdict`, `detail` 1 phrase, `mission_id` + `step_id` si échec en cours).
+Convergence : `convergence.check` basse fréquence (fin de mission + échec : `verdict`, `detail` 1 phrase, `full` texte complet pour popup Détails, `mission_id` + `step_id` si échec en cours).
 Compteurs : `stats.snapshot` en fin de mission (même contenu que `stats.get` global : tokens + troncatures).
 
 Tous les events ci-dessus arrivent en paquets JSON sur stdout (`{"type":"event","event":...,"payload":{...}}`), pas seulement dans les logs : le front ne lit que les paquets. Fréquence `convergence.check` : chaque échec de convergence + verdict fin de mission (pas après chaque tâche en succès — le `pass` final couvre l'item Vérification).

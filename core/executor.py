@@ -1291,6 +1291,7 @@ class Executor:
             fields: Dict[str, Any] = {
                 "verdict": verdict,
                 "detail": str(detail or "")[:300],
+                "full": str(detail or ""),
             }
             if mission_id:
                 fields["mission_id"] = mission_id

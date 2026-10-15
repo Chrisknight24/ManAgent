@@ -1205,12 +1205,14 @@ class Solver(Supervisor, Entity):
 
     async def _emit_mission_convergence(self, verdict: str, detail: str) -> None:
         """Verdict mission : journal + paquet transport (le front ne lit
-        que les paquets). Jamais bloquant."""
+        que les paquets). `detail` = 1 phrase, `full` = texte complet pour
+        popup Détails (jamais jugé). Jamais bloquant."""
         try:
             Logger.event(
                 "convergence.check",
                 verdict=verdict,
                 detail=str(detail or "")[:300],
+                full=str(detail or ""),
                 mission_id=self.id,
             )
         except Exception:
@@ -1219,6 +1221,7 @@ class Solver(Supervisor, Entity):
             await self.propagate_event("convergence.check", {
                 "verdict": verdict,
                 "detail": str(detail or "")[:300],
+                "full": str(detail or ""),
                 "mission_id": self.id,
             })
         except Exception:

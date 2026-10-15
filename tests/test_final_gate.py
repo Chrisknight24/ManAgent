@@ -192,5 +192,5 @@ def test_convergence_check_relaye_paquet(monkeypatch):
     asyncio.run(ex._emit_convergence_check("fail", "r", step_id="step_9"))
     assert logs.count("convergence.check") == 1
     assert packets == [("convergence.check", {
-        "verdict": "fail", "detail": "r",
+        "verdict": "fail", "detail": "r", "full": "r",
         "mission_id": "m-pkt", "step_id": "step_9"})]
