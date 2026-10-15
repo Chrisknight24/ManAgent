@@ -1365,6 +1365,23 @@ class Solver(Supervisor, Entity):
                     evidence_parts.append(f"[RUM {name}{tag}] {str(val)[:200]}")
             except Exception:
                 pass
+            try:
+                _trail = list(getattr(getattr(self, "executor", None), "_perception_trail", None) or [])
+                _reg = getattr(self, "variable_registry", None) or {}
+                _budget = 800
+                for _vname in reversed(_trail):
+                    if _budget <= 0:
+                        break
+                    _entry = _reg.get(_vname) if isinstance(_reg, dict) else None
+                    _v = (_entry.get("value", "") if isinstance(_entry, dict) else "")
+                    _v = _strip(_v)
+                    if not str(_v).strip():
+                        continue
+                    _line = f"[PERCEPTION {_vname}] {str(_v)[:200]}"
+                    evidence_parts.append(_line)
+                    _budget -= len(_line)
+            except Exception:
+                pass
             evidence = "\n".join(p for p in evidence_parts if p)[:1500]
             try:
                 from core.alignment import plan_risk, risk_sentence

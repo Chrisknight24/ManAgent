@@ -242,3 +242,36 @@ def test_rendu_marque_troncature_sans_mentir():
     short = PlanValidator._summarize_plan_for_prompt(
         v, _plan(_ref_step("step_1", '{"mode": "image"}')))
     assert "[tronqué" not in short and '"mode": "image"' in short
+
+
+def _perc_step(sid, args_json, out=None):
+    import json as _json
+    args = _json.loads(args_json)
+    args.setdefault("source_tool", "vision")
+    args.setdefault("source_args", {"mode": "image"})
+    s = PlanStep(
+        id=sid, description="lire", type=StepType.TOOL_CALL,
+        tool_name="perceive_understand", tool_args_json=_json.dumps(args),
+        expected_result="any", output_variable_name=out,
+    )
+    return s
+
+
+def test_gate_perception_non_consommee_refusee():
+    from core.plan_validator import find_unconsumed_perception_outputs
+    perc = _perc_step("step_4", '{"question": "YouTube ?"}')
+    ans = PlanStep(
+        id="step_5", description="dire", type=StepType.DIRECT_ANSWER,
+        expected_result="ok", response_text="YouTube affiché.",
+    )
+    hits = find_unconsumed_perception_outputs(_plan(perc, ans), {"vision"})
+    assert len(hits) == 1 and "step_4" in hits[0]
+
+
+def test_gate_perception_consommee_ou_attente_passe():
+    from core.plan_validator import find_unconsumed_perception_outputs
+    perc = _perc_step("step_4", '{"question": "YouTube ?"}')
+    use = _ref_step("step_5", '{"source": "$@_data_step_4"}')
+    assert find_unconsumed_perception_outputs(_plan(perc, use), {"vision"}) == []
+    wait = _ref_step("step_5", '{"mode": "wait", "wait_mode": "screen_change"}')
+    assert find_unconsumed_perception_outputs(_plan(perc, wait), {"vision"}) == []

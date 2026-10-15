@@ -227,3 +227,26 @@ def test_preuves_finales_epurees_prefixes():
         types.SimpleNamespace(response="[TOOLS OK] fini"), strict=False))
     assert "[TOOLS OK]" not in calls["prompt"]
     assert "46" in calls["prompt"] and "fini" in calls["prompt"]
+
+
+def test_evidence_finale_inclut_perceptions_recentes_budget():
+    calls = {"llm": 0}
+
+    async def _ok(prompt, schema, tag=None, mission_id=None, **kw):
+        calls["prompt"] = prompt
+        from core.plan_models import ConvergenceDecision
+        return ConvergenceDecision(is_convergent=True, reason="ok")
+
+    solver = _solver(calls)
+    solver.llm = types.SimpleNamespace(generate_structured=_ok)
+    solver.executor = types.SimpleNamespace(
+        _perception_trail=["data_old", "data_new"])
+    solver.variable_registry = {
+        "data_old": {"value": "NON"},
+        "data_new": {"value": "oui"},
+    }
+    asyncio.run(solver._verify_mission_convergence(
+        types.SimpleNamespace(response="fini"), strict=False))
+    assert "[PERCEPTION data_new]" in calls["prompt"]
+    assert "[PERCEPTION data_old]" in calls["prompt"]
+    assert calls["prompt"].find("data_new") < calls["prompt"].find("data_old")

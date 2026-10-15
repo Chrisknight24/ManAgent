@@ -373,6 +373,59 @@ def find_declared_unused_outputs(plan: Any) -> List[str]:
         return []
 
 
+def find_unconsumed_perception_outputs(plan: Any, perception_tools: Any = None) -> List[str]:
+    """Perception produite, jamais consommée (gate M2 : refuse, pas heal).
+
+    Un step de perception (kind `[perception]` hôte ou méta-outils
+    `perceive_*` cerveau) dont AUCUNE sortie (auto `$@_bool/data_<id>` ou
+    nommée) n'est référencée par un step postérieur (args, réponse,
+    contexte, condition) est incohérent : s'il perçoit, il utilise ;
+    sinon il ne perçoit pas. Exemptions objectives (pas de déclaration
+    planner) : un step `wait`/refresh postérieur (mode ou nom contenant
+    `wait`, vocabulaire contrat) — la perception servait à stabiliser.
+    Fonction pure. Retourne ["step_id: motif", ...].
+    """
+    try:
+        perc = set(perception_tools or []) | {"perceive_understand", "perceive_action"}
+        steps = list(getattr(plan, "steps", []) or [])
+        hits: List[str] = []
+        for idx, step in enumerate(steps):
+            stype = getattr(getattr(step, "type", None), "value", getattr(step, "type", None))
+            if stype != "tool_call":
+                continue
+            tname = (getattr(step, "tool_name", None) or "").strip()
+            if tname not in perc:
+                continue
+            sid = str(getattr(step, "id", "?"))
+            needles = {f"$@_bool_{sid}", f"$@_data_{sid}"}
+            raw = getattr(step, "output_variable_name", None)
+            if raw and str(raw).strip():
+                r = str(raw).strip()
+                clean = re.sub(r"^(bool_|data_)+", "", r)
+                needles.update({f"$@_bool_{clean}", f"$@_data_{clean}", f"$@_{r}"})
+            later_text = " ".join(
+                " ".join([
+                    str(getattr(later, "tool_args_json", "") or ""),
+                    str(getattr(later, "response_text", "") or ""),
+                    str(getattr(later, "step_context", "") or ""),
+                    str(getattr(later, "execute_if", "") or ""),
+                    str(getattr(later, "description", "") or ""),
+                ])
+                for later in steps[idx + 1:]
+            )
+            if any(n in later_text for n in needles):
+                continue
+            if re.search(r'"wait"|wait_mode|WAIT', later_text):
+                continue
+            hits.append(
+                f"{sid} : sortie de perception non consommée — aucune étape "
+                f"postérieure ne lit {sorted(needles)[0]}. Branchez dessus ou supprimez cette perception."
+            )
+        return hits
+    except Exception:
+        return []
+
+
 def _tool_declares_media(tool_name: str, tool_returns: Any) -> bool:
     """L'outil déclare-t-il des charges médias (le validateur le sait) ?"""
     if not tool_returns or not isinstance(tool_returns, dict):
@@ -1034,6 +1087,7 @@ class PlanValidator:
         unresolved = find_unresolved_plan_refs(plan)
         bad_sources = find_invalid_perceive_sources(plan, self._available_tools)
         incomplete_delegation = find_incomplete_delegated_args(plan, self._tools_manager)
+        unconsumed = find_unconsumed_perception_outputs(plan, self._perception_tools)
         problems = [f"inconnu:{u}" for u in unknown]
         problems += [f"args illisibles étape:{s}" for s in malformed]
         problems += [f"outil réservé au validateur étape:{s}" for s in reserved]
@@ -1048,6 +1102,7 @@ class PlanValidator:
             for u in bad_sources
         ]
         problems += [f"délégation incomplète {u}" for u in incomplete_delegation]
+        problems += [f"perception non consommée {u}" for u in unconsumed]
         if problems:
             details = ", ".join(problems[:8])
             return PlanValidationOutcome(

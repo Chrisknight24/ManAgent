@@ -93,6 +93,7 @@ class Executor:
         # pas une mauvaise commande).
         micro_retried_ids: set = set()
         self._applied_waits: List[Dict[str, Any]] = []
+        self._perception_trail: List[str] = []
         _NO_RETRY_MARKERS = (
             "unknown", "inconnu", "invalid", "invalide", "missing", "manquant",
             "required", "requis", "schema", "illegal", "interdit", "parse",
@@ -443,6 +444,26 @@ class Executor:
         except Exception:
             pass
         return entry
+
+    def _note_perception_output(self, step: Any, var_names: Any) -> None:
+        """Mémorise les sorties des steps de perception (kind hôte ou
+        méta-outils `perceive_*`) pour la preuve finale : les plus
+        récentes d'abord, budget capé côté solver. Jamais bloquant."""
+        try:
+            tname = str(getattr(step, "tool_name", "") or "")
+            tm = getattr(self.solver.runtime_state, "tools_manager", None)
+            perc = set(tm.perception_tool_names()) if tm is not None and hasattr(tm, "perception_tool_names") else set()
+            if tname not in perc and tname not in ("perceive_understand", "perceive_action"):
+                return
+            trail = getattr(self, "_perception_trail", None)
+            if not isinstance(trail, list):
+                trail = []
+                self._perception_trail = trail
+            for vname in list(var_names or []):
+                if vname and vname not in trail:
+                    trail.append(str(vname))
+        except Exception:
+            pass
 
     def _wait_placement(self, tool_name: Any) -> str:
         """Où l'attente D3 s'applique : AVANT si lecture (laisser arriver),
@@ -1123,6 +1144,7 @@ class Executor:
                 self._tag_attempt(asset_entry)
                 for vname in target_data_var_names:
                     self.solver.variable_registry[vname] = asset_entry
+                self._note_perception_output(step, target_data_var_names)
                 Logger.info(f"[Executor] 📦 Donnée de l'outil '{step.tool_name}' ({data_str_len} car.) encapsulée dans '{tool_asset.get_uri()}' (variables: {target_data_var_names}).")
             else:
                 data_entry = {
@@ -1134,6 +1156,7 @@ class Executor:
                 self._tag_attempt(data_entry)
                 for vname in target_data_var_names:
                     self.solver.variable_registry[vname] = data_entry
+                self._note_perception_output(step, target_data_var_names)
 
             if step.is_crucial:
                 crucial_target = step.output_variable_name or step_bool_id
