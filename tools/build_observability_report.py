@@ -535,6 +535,20 @@ def attach_llm_calls_by_mission(episodes, llm_calls, events):
                         node.setdefault("_tools_manager_events", []).append(ev)
                         break
 
+    # Rattachement des pauses D3 (wait-after-action) aux étapes.
+    pause_events = [e for e in events if str(e.get("event", "") or "") in ("pause.started", "pause.finished")]
+    for ev in pause_events:
+        step_id = ev.get("step_id")
+        solver_id = ev.get("solver_id")
+        attempt_num = ev.get("attempt_number")
+        if step_id and solver_id is not None and attempt_num is not None:
+            attempt = attempt_index_global.get((solver_id, attempt_num))
+            if attempt:
+                for node in attempt.get("nodes", []):
+                    if node.get("step_id") == step_id:
+                        node.setdefault("_pause_events", []).append(ev)
+                        break
+
     # Appels sans mission ni session connue : bac orphelins (jamais jetés).
     unattached = []
 
@@ -3071,6 +3085,14 @@ function renderSolverNodeModern(ep, treeNode, depth) {
                     </button>
                  `;
               }).join('')}
+            </div>
+          ` : ''}
+
+          ${(node._pause_events || []).length > 0 ? `
+            <div style="margin-top:6px; display:flex; align-items:center; gap:6px;" onclick="event.stopPropagation();">
+              ${node._pause_events.map((p) => `
+                <span class="badge badge--pending" style="font-size:10.5px; font-weight:700;">⏳ Pause ${esc(String(p.ms || 0))} ms (${esc(p.source || '?')})</span>
+              `).join('')}
             </div>
           ` : ''}
 

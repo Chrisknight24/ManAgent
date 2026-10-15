@@ -78,6 +78,7 @@ Un `tool_call` exige un `tool_name` recopié de OUTILS. Une action = un `tool_ca
 3. `execute_skill` seulement pour un skill listé.
 3b. Valeurs à vocabulaire fermé (listes dans Arguments ci-dessus) : recopie EXACTEMENT, jamais de variante inventée.
 3c. Requêtes `tool_manager` qui délèguent au monde (`source_tool`) : pré-remplis TOUJOURS `source_args` explicites d'après les schémas ci-dessus ; jamais de composition déléguée aveugle.
+3d. `waiting_ms` absent = défaut 3000 ms appliqué sans te demander : si l'effet met du temps, mets une valeur explicite.
 4. Jamais `human_validation`.
 5. Suis l'objectif exactement (cible, valeurs, langue). Garde la langue indiquée dans l'objectif pour `response_text`.
 6. Si aucun outil ne convient : `direct_answer` qui dit ce qui manque.

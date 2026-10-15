@@ -148,6 +148,17 @@ class PlanStep(BaseModel):
             "get_world_state ; sinon pas d'arbitrage (échec honnête)."
         )
     )
+    waiting_ms: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=30000,
+        description=_(
+            "Attente fixe APRÈS l'action du step, en millisecondes. None "
+            "(défaut) = non réfléchi : défaut appliqué (hôte déclaré, sinon "
+            "ManAgent). 0 explicite = aucune attente (décision assumée). "
+            "> 0 = consigne planner, prime sur le défaut hôte."
+        )
+    )
 
     @model_validator(mode='after')
     def validate_tool_integrity(self) -> 'PlanStep':

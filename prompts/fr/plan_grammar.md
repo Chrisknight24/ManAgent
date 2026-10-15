@@ -111,6 +111,9 @@ Les outils sont **stateless (sans mémoire)** et ne peuvent pas définir de vari
    `should_world_state_change_after_action: true` si tu attends un changement visible après cette action (sinon `false`, ou absent si indéterminé — défaut inerte, rien ne change).
    `verify_with` : nom d'un outil `[perception]` pour vérifier en cas de doute (sinon `get_world_state` par défaut).
 
+7. **Attente après action (`waiting_ms`, optionnel)** :
+   millisecondes d'attente fixe APRÈS l'action (0..30000). Absent = non réfléchi : défaut appliqué (hôte déclaré, sinon 3000 ms ManAgent — assumé, visible en logs). 0 explicite = aucune attente (décision assumée). > 0 = ta consigne, prime sur le défaut hôte. Si l'effet met du temps (lancement, chargement, page web) : mets une valeur, n'espère pas.
+
 ### Exemple de plan valide (Générique)
 
 Mission : Vérifier la disponibilité d'une ressource ou équipement, et si disponible exécuter une opération, sinon signaler l'indisponibilité.

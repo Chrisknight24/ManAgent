@@ -111,6 +111,9 @@ Les outils sont **stateless (sans mémoire)** et ne peuvent pas définir de vari
    `should_world_state_change_after_action: true` if you expect a visible change after this action (`false` otherwise, absent if undetermined — inert default, nothing changes).
    `verify_with`: name of a `[perception]` tool to check on doubt (else `get_world_state` by default).
 
+7. **Post-action wait (`waiting_ms`, optional)** :
+   fixed wait AFTER the step action, in milliseconds (0..30000). Absent = unconsidered: default applied (declared host, else 3000 ms ManAgent — assumed, visible in logs). Explicit 0 = no wait (assumed decision). > 0 = your instruction, wins over the host default. If the effect takes time (launch, load, web page): set a value, don't hope.
+
 ### Exemple de plan valide (Générique)
 
 Mission : Vérifier la disponibilité d'une ressource ou équipement, et si disponible exécuter une opération, sinon signaler l'indisponibilité.

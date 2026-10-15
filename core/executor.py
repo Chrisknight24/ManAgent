@@ -34,6 +34,27 @@ class _ConditionError(Exception):
 _REFERENCE_FIELDS = frozenset({"source_data", "source", "sources"})
 
 
+def resolve_wait_ms(planner_ms: Any, host_ms: Any, default_ms: Any) -> Tuple[int, str]:
+    """Attente effective D3 : planner explicite (même 0) > hôte déclaré >
+    défaut ManAgent. Retourne (ms >= 0 plafonné 30 s, source parmi
+    plan/hote/defaut/aucune). Fonction pure, testée vite."""
+    try:
+        if planner_ms is not None:
+            return max(0, min(int(planner_ms), 30000)), "plan"
+        if host_ms is not None:
+            _h = int(host_ms)
+            if _h > 0:
+                return max(0, min(_h, 30000)), "hote"
+            return 0, "aucune"
+        if default_ms is not None:
+            _d = int(default_ms)
+            if _d > 0:
+                return max(0, min(_d, 30000)), "defaut"
+    except Exception:
+        pass
+    return 0, "aucune"
+
+
 class Executor:
     def __init__(self, solver_node):
         self.solver = solver_node
@@ -71,6 +92,7 @@ class Executor:
         # chargement en cours). Jamais sur args invalides (attendre ne répare
         # pas une mauvaise commande).
         micro_retried_ids: set = set()
+        self._applied_waits: List[Dict[str, Any]] = []
         _NO_RETRY_MARKERS = (
             "unknown", "inconnu", "invalid", "invalide", "missing", "manquant",
             "required", "requis", "schema", "illegal", "interdit", "parse",
@@ -319,27 +341,62 @@ class Executor:
 
                         accumulated_context += f"\n[Succès {step.id}] : {execution_output}"
 
-                        # --- P1 effects_timeout_ms : attente déclarée après action.
-                        # L'outil déclare, le cerveau attend (annulable, plafond
-                        # 30s). Sans déclaration : rien ne change.
+                        # --- D3 waiting_ms : attente explicite après action.
+                        # Ordre des sources : planner explicite (même 0) >
+                        # hôte déclaré (effects_timeout_ms) > défaut ManAgent.
+                        # Pause tracée (log + events + compteur), annulable.
                         if step.type == StepType.TOOL_CALL and step.tool_name:
                             try:
                                 _tm2 = getattr(self.solver.runtime_state, "tools_manager", None)
-                                _wait_ms = _tm2.get_tool_timeout_ms(step.tool_name) if _tm2 is not None and hasattr(_tm2, "get_tool_timeout_ms") else None
+                                _host_ms = (_tm2.get_tool_timeout_ms(step.tool_name)
+                                            if _tm2 is not None and hasattr(_tm2, "get_tool_timeout_ms") else None)
                             except Exception:
-                                _wait_ms = None
-                            if _wait_ms:
-                                _wait_ms = max(0, min(int(_wait_ms), 30000))
-                                if _wait_ms > 0:
-                                    Logger.info(f"[Executor] Attente déclarée après '{step.tool_name}' : {_wait_ms} ms.")
-                                    import asyncio as _asyncio
-                                    _left = _wait_ms / 1000.0
-                                    while _left > 0:
-                                        if getattr(self.solver.runtime_state, "cancel_requested", False):
-                                            break
-                                        _slice = min(0.25, _left)
-                                        await _asyncio.sleep(_slice)
-                                        _left -= _slice
+                                _host_ms = None
+                            try:
+                                from core.constants import DEFAULT_WAITING_MS as _DEFAULT_WAIT
+                            except Exception:
+                                _DEFAULT_WAIT = 3000
+                            _wait_ms, _wait_src = resolve_wait_ms(
+                                getattr(step, "waiting_ms", None), _host_ms, _DEFAULT_WAIT)
+                            if _wait_ms > 0:
+                                Logger.info(
+                                    f"[Executor] Attente {_wait_ms} ms (source {_wait_src}) après '{step.tool_name}' [{step.id}].")
+                                try:
+                                    _att_no = getattr(getattr(self.solver, "current_attempt", None), "attempt_number", None)
+                                except Exception:
+                                    _att_no = None
+                                _pause_fields = {
+                                    "step_id": step.id, "ms": _wait_ms, "source": _wait_src,
+                                    "solver_id": getattr(self.solver, "id", None),
+                                    "attempt_number": _att_no,
+                                }
+                                try:
+                                    await self.solver.propagate_event("pause.started", dict(_pause_fields))
+                                except Exception:
+                                    pass
+                                import asyncio as _asyncio
+                                _left = _wait_ms / 1000.0
+                                while _left > 0:
+                                    if getattr(self.solver.runtime_state, "cancel_requested", False):
+                                        break
+                                    _slice = min(0.25, _left)
+                                    await _asyncio.sleep(_slice)
+                                    _left -= _slice
+                                try:
+                                    await self.solver.propagate_event("pause.finished", dict(_pause_fields))
+                                except Exception:
+                                    pass
+                                try:
+                                    _ws = getattr(self.solver.runtime_state, "waiting_stats", None)
+                                    if not isinstance(_ws, dict):
+                                        _ws = {}
+                                        self.solver.runtime_state.waiting_stats = _ws
+                                    _ws[_wait_src] = int(_ws.get(_wait_src) or 0) + 1
+                                    _applied = getattr(self, "_applied_waits", None)
+                                    if isinstance(_applied, list):
+                                        _applied.append({"step_id": step.id, "ms": _wait_ms, "source": _wait_src})
+                                except Exception:
+                                    pass
 
                         if step.type in [StepType.DIRECT_ANSWER, StepType.ABSTRACT_TASK]:
                             if execution_output:
@@ -356,6 +413,18 @@ class Executor:
                         node.actual_result = execution_output
                         node.error_reason = convergence.reason
                         node.ended_at = time.time()
+                        # Tag wait-timeout : les attentes appliquées cette tentative
+                        # distinguent "trop court ?" d'un vrai problème d'action.
+                        try:
+                            _waits = getattr(self, "_applied_waits", None) or []
+                            if _waits:
+                                _wdesc = ", ".join(
+                                    f"{w.get('step_id')}:{w.get('ms')}ms({w.get('source')})" for w in _waits)
+                                _tag = _(" [attentes appliquées cette tentative : {}]").format(_wdesc)
+                                step.result_context += _tag
+                                node.error_reason = f"{convergence.reason}{_tag}"
+                        except Exception:
+                            pass
 
                         await self.solver.propagate_event(Events.STEP_STATUS_CHANGED, {
                             "step_id": step.id,

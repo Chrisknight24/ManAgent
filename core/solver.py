@@ -1240,11 +1240,14 @@ class Solver(Supervisor, Entity):
             by_mission = (store.get("by_mission", {}) or {}) if isinstance(store, dict) else {}
             trunc = getattr(self.runtime_state, "truncation_count", None)
             trunc_out = dict(trunc) if isinstance(trunc, dict) else ({"__total__": trunc} if trunc else {})
+            _wstats = getattr(self.runtime_state, "waiting_stats", None)
+            waiting_out = dict(_wstats) if isinstance(_wstats, dict) else {}
             fields = {
                 "mission_id": self.id,
                 "total": total,
                 "by_mission": by_mission,
                 "truncations": trunc_out,
+                "waiting": waiting_out,
             }
             Logger.event("stats.snapshot", **fields)
             try:

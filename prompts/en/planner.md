@@ -78,6 +78,7 @@ A `tool_call` needs a `tool_name` copied from TOOLS. One action = one `tool_call
 3. `execute_skill` only for a listed skill.
 3b. Closed-vocabulary values (lists in Arguments above): copy EXACTLY, never invent a variant.
 3c. `tool_manager` requests delegating to the world (`source_tool`): ALWAYS prefill explicit `source_args` from the schemas above; never blind delegated composition.
+3d. Missing `waiting_ms` = 3000 ms default applied without asking: if the effect takes time, set an explicit value.
 4. Never `human_validation`.
 5. Follow the goal exactly (target, values, language). Keep the goal's language in `response_text`.
 6. If no tool fits: `direct_answer` saying what is missing.

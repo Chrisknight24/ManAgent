@@ -162,6 +162,7 @@ SOLVER_MAX_PREEXECUTION_FAILURES = 3 # Nombre maximal d'échecs de validation de
 MAX_RETRY_EXTENSIONS = 2             # Rallonges d'exécution accordables par mission (juge, jamais sans progrès)
 MAX_DEPTH_EXTENSIONS = 5             # Plafond d'extensions de profondeur accordées par mission (arbitrées par le Superviseur)
 MAX_INSIGHTS_PER_TARGET = 5          # Nombre max d'insights mémorisés par cible
+DEFAULT_WAITING_MS = 3000            # Défaut ManAgent si ni plan (waiting_ms) ni hôte (effects_timeout_ms) ne parlent (D3)
 
 # =====================================================
 # SKILL ENGINE
