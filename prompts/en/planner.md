@@ -146,7 +146,7 @@ Goal: say if the Calculator window is open.
 - [ ] Every variable comes from an earlier step.
 - [ ] Every `execute_if` follows one of the two forms.
 - [ ] The world is read only with `perceive_understand`.
-- [ ] Every `perceive_understand` output is read by a later `execute_if` ($@_data_step_N == "yes"/"no") or passed as an argument to a later step — unread perception = rejected by the gate.
+- [ ] Every `perceive_understand` output is read by a later `execute_if` ($@_data_step_N == "yes"/"no") or passed as an argument to a later step — otherwise warning in final convergence, never a refusal.
 - [ ] No analysis after `perceive_understand` without a reason.
 - [ ] No `abstract_task` for one action or to inspect a variable.
 - [ ] No `output_variable_name` inside `tool_args_json`.

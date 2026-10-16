@@ -6,7 +6,8 @@ Chaque outil produit **deux sorties** :
 
 ### Utilisation
 
-- **Conditions (`execute_if`)** : utilisent exclusivement le signal booléen (`$@_bool_xxx` ou `$@_bool_step_X`).  
+- **Conditions (`execute_if`)** : two forms only.
+  `$@_bool_xxx == True/False` = step ran. `$@_data_name == "exact text"` = what it returned (world fact via perceive `yes/no`).  
   Exemple valide : `execute_if = "$@_bool_target_ready == True"` ou `execute_if = "$@_bool_step_1 == True"`  
   ✅ **RECETTE GARANTIE** : chaque étape N produit automatiquement `$@_bool_step_N` (True/False). Pour brancher sur l'étape N, écris TOUJOURS `$@_bool_step_N == True` (ou `== False`) — rien d'autre.  
   ✅ **Comparaison de contenu autorisée** : `$@_data_nom == "texte exact"` (ou `!=`), combinable par `and`/`or`. Exemple : `$@_data_fenetre == "cmd"`.  

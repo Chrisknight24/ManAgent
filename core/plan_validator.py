@@ -374,15 +374,15 @@ def find_declared_unused_outputs(plan: Any) -> List[str]:
 
 
 def find_unconsumed_perception_outputs(plan: Any, perception_tools: Any = None) -> List[str]:
-    """Perception produite, jamais consommée (gate M2 : refuse, pas heal).
+    """Perception produite, jamais consommée (signal pour convergence, plus un refus).
 
     Un step de perception (kind `[perception]` hôte ou méta-outils
     `perceive_*` cerveau) dont AUCUNE sortie (auto `$@_bool/data_<id>` ou
     nommée) n'est référencée par un step postérieur (args, réponse,
-    contexte, condition) est incohérent : s'il perçoit, il utilise ;
-    sinon il ne perçoit pas. Exemptions objectives (pas de déclaration
-    planner) : un step `wait`/refresh postérieur (mode ou nom contenant
-    `wait`, vocabulaire contrat) — la perception servait à stabiliser.
+    contexte, condition, result_context) est signalée : la gate laisse
+    passer, la convergence finale tranche avec prudence.
+    Exemptions objectives : step `wait`/settling lui-même (vision wait,
+    rien à consommer) ou step `wait`/refresh postérieur.
     Fonction pure. Retourne ["step_id: motif", ...].
     """
     try:
@@ -395,6 +395,13 @@ def find_unconsumed_perception_outputs(plan: Any, perception_tools: Any = None) 
                 continue
             tname = (getattr(step, "tool_name", None) or "").strip()
             if tname not in perc:
+                continue
+            # P3 bug1 : un wait/settling ne produit rien à consommer.
+            try:
+                _args_txt = str(getattr(step, "tool_args_json", "") or "")
+            except Exception:
+                _args_txt = ""
+            if re.search(r'"mode"\s*:\s*"wait"|wait_mode|"wait"', _args_txt):
                 continue
             sid = str(getattr(step, "id", "?"))
             needles = {f"$@_bool_{sid}", f"$@_data_{sid}"}
@@ -410,6 +417,7 @@ def find_unconsumed_perception_outputs(plan: Any, perception_tools: Any = None) 
                     str(getattr(later, "step_context", "") or ""),
                     str(getattr(later, "execute_if", "") or ""),
                     str(getattr(later, "description", "") or ""),
+                    str(getattr(later, "result_context", "") or ""),
                 ])
                 for later in steps[idx + 1:]
             )
@@ -1103,7 +1111,22 @@ class PlanValidator:
             for u in bad_sources
         ]
         problems += [f"délégation incomplète {u}" for u in incomplete_delegation]
-        problems += [f"perception non consommée : {u}" for u in unconsumed]
+        # P2 doctrine : la non-consommation ne refuse plus. Signal
+        # pour la convergence finale (garde-fou déplacé début→fin).
+        if unconsumed:
+            try:
+                from utils.logger import Logger as _Logger
+                _Logger.event(
+                    "perception_unconsumed_warning",
+                    child_solver_id=child_solver_id,
+                    unconsumed=unconsumed[:8],
+                )
+            except Exception:
+                pass
+            try:
+                self._last_unconsumed_warnings = list(unconsumed[:8])
+            except Exception:
+                pass
         if problems:
             details = ", ".join(problems[:8])
             return PlanValidationOutcome(

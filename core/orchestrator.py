@@ -2103,6 +2103,21 @@ class Orchestrator(Supervisor, Entity):
             mission_history_tree=mission_history_tree,
             world_snapshot=_judge_world,
         )
+        # P2 : garde-fou déplacé. La non-consommation ne bloque plus,
+        # elle est stockée pour la convergence finale (juge prudent).
+        try:
+            _warns = list(getattr(validator, "_last_unconsumed_warnings", None) or [])
+            if _warns:
+                try:
+                    _store = getattr(self.runtime_state, "perception_warnings_by_solver", None)
+                    if not isinstance(_store, dict):
+                        _store = {}
+                        self.runtime_state.perception_warnings_by_solver = _store
+                    _store[child_solver_id] = _warns
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         # Réparation auto (pas de refus en boucle) : si le SEUL grief est de
         # la perception directe, on réécrit en perceive_understand et on

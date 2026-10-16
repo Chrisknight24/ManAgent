@@ -571,8 +571,10 @@ class Solver(Supervisor, Entity):
                                 try:
                                     for _att in (getattr(getattr(self, "execution_tree", None), "attempts", None) or []):
                                         if getattr(_att, "outcome", None) in ("failed", "rejected") and getattr(_att, "failure_reason", None):
+                                            _full = str(_att.failure_reason)
+                                            _txt = _full if len(_full) <= 600 else (_full[:600] + " …[tronqué]")
                                             _past_failures.append(
-                                                f"- tentative {getattr(_att, 'attempt_number', '?')} : {str(_att.failure_reason)[:300]}"
+                                                f"- tentative {getattr(_att, 'attempt_number', '?')} : {_txt}"
                                             )
                                 except Exception:
                                     _past_failures = []
@@ -1367,6 +1369,20 @@ class Solver(Supervisor, Entity):
                     _line = f"[PERCEPTION {_vname}] {str(_v)[:200]}"
                     evidence_parts.append(_line)
                     _budget -= len(_line)
+            except Exception:
+                pass
+            try:
+                _warns = []
+                try:
+                    _store = getattr(self.runtime_state, "perception_warnings_by_solver", None)
+                    if isinstance(_store, dict):
+                        _warns = list(_store.get(self.id, None) or [])
+                except Exception:
+                    _warns = []
+                for _w in _warns[:5]:
+                    evidence_parts.append(
+                        f"[AVERTISSEMENT] Attention, l'executor n'a pas pris en compte cet état du monde : {_w}. Soyez vigilant."
+                    )
             except Exception:
                 pass
             evidence = "\n".join(p for p in evidence_parts if p)[:1500]

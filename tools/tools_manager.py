@@ -278,7 +278,7 @@ class ToolsManager(Entity):
                 if c not in all_caps:
                     all_caps.append(c)
             caps_str = f" [{', '.join(caps)}]" if caps else ""
-            tool_summaries.append(f"  • {tool_name}{caps_str} : {desc}")
+            tool_summaries.append(f"  • {tool_name}{caps_str}")
 
         compiled_tools_str = "\n".join(tool_summaries) if tool_summaries else "  • Aucun sous-outil"
         compiled_caps_str = ", ".join(all_caps) if all_caps else _("traitement et analyse de données")
