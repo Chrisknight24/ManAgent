@@ -146,6 +146,7 @@ Objectif : dis si la calculette est ouverte.
 - [ ] Chaque variable vient d'une étape antérieure.
 - [ ] Chaque `execute_if` suit une des deux formes.
 - [ ] Le monde est lu seulement avec `perceive_understand`.
+- [ ] Toute sortie de `perceive_understand` est lue par un `execute_if` postérieur ($@_data_step_N == "yes"/"no") ou passée en argument d'un step suivant — perception jamais lue = refusée par la gate.
 - [ ] Pas d'analyse derrière `perceive_understand` sans raison.
 - [ ] Pas d'`abstract_task` pour une action seule ni pour inspecter une variable.
 - [ ] Pas d'`output_variable_name` dans `tool_args_json`.
