@@ -33,7 +33,7 @@ from .supervisor import Supervisor
 from .plan_models import Plan, ExecutionStatus, OrchestratorDecision, PlanValidationDecision, DepthEscalationDecision, AssetInjection, drop_unknown_injected_assets
 from .plan_validator import PlanValidator, PlanValidationOutcome, review_depth_escalation, DepthEscalationOutcome, review_retry_extension, RetryExtensionOutcome
 from core.execution_models import PlanAttempt
-from .solver import Solver
+from .solver import Solver, build_mission_convergence_payload
 from core.entity import Entity
 from core.llm import Llm
 from pydantic import ValidationError
@@ -656,6 +656,12 @@ class Orchestrator(Supervisor, Entity):
                             results["usage_cleared"] = True
                     except Exception as e_usage:
                         Logger.warning(f"[Orchestrator] Erreur lors de la purge des compteurs tokens: {e_usage}")
+                    # La RAM doit suivre SQLite sinon stats.get ressuscite
+                    # les missions effacées jusqu'au prochain redémarrage.
+                    resetter = getattr(self.runtime_state, "reset_usage_counters", None)
+                    if callable(resetter):
+                        resetter()
+                        results["usage_ram_cleared"] = True
 
                 Logger.info(f"[Orchestrator] Réinitialisation/Purge de données exécutée (action: {packet.action}, cible: {target}) : {results}")
                 return ResponsePacket(type="response", status="success", payload={
@@ -1672,6 +1678,14 @@ class Orchestrator(Supervisor, Entity):
                             "mission_id": mission_cache.mission_id,
                             "session_id": session_id
                         })
+                        try:
+                            _cc_cancel = build_mission_convergence_payload(
+                                "fail", _("Mission annulée par l'utilisateur"),
+                                _("Mission annulée par l'utilisateur"), mission_cache.mission_id)
+                            Logger.event("convergence.check", **_cc_cancel)
+                            await self.propagate_event("convergence.check", dict(_cc_cancel))
+                        except Exception:
+                            pass
 
                     await self.propagate_event(Events.THINKING_FINISHED, {})
                     return ResponsePacket(type="response", status="success",
@@ -1736,6 +1750,15 @@ class Orchestrator(Supervisor, Entity):
                     "mission_id": mission_cache.mission_id,
                     "session_id": session_id
                 })
+                try:
+                    _cc_err = build_mission_convergence_payload(
+                        "fail", self._sanitize_technical_error(e),
+                        mission_cache.summary or self._sanitize_technical_error(e),
+                        mission_cache.mission_id)
+                    Logger.event("convergence.check", **_cc_err)
+                    await self.propagate_event("convergence.check", dict(_cc_err))
+                except Exception:
+                    pass
             raise
 
         # ============================================================
@@ -1923,6 +1946,21 @@ class Orchestrator(Supervisor, Entity):
             _done_success = bool(mission_cache and mission_cache.status == "success")
         except Exception:
             _done_success = False
+        # convergence.check de fin de mission : émis APRÈS le présentateur
+        # pour que `full` contienne le vrai rapport (jamais jugé, popup hôte).
+        try:
+            _cc_detail = _("Mission accomplie.") if _done_success else (
+                mission_cache.summary if mission_cache and mission_cache.summary else _("Mission échouée"))
+            _cc_payload = build_mission_convergence_payload(
+                "pass" if _done_success else "fail", _cc_detail, final_response, mission_id)
+            Logger.event("convergence.check", **_cc_payload)
+        except Exception:
+            _cc_payload = None
+        try:
+            if _cc_payload is not None:
+                await self.propagate_event("convergence.check", dict(_cc_payload))
+        except Exception:
+            pass
         await self.propagate_event(Events.EXECUTION_COMPLETED, {
             "mission_id": mission_id,
             "session_id": session_id,

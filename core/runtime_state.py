@@ -75,6 +75,26 @@ class RuntimeState:
             "is_novel": False,
         }
 
+    def reset_usage_counters(self) -> None:
+        """Remet à zéro les compteurs RAM (tokens, troncatures, attentes).
+
+        Appelé par la purge totale : SQLite est vidé séparément, mais sans
+        ça `stats.get` ressusciterait les missions effacées jusqu'au
+        prochain redémarrage. Ne touche à rien d'autre. Jamais d'exception.
+        """
+        try:
+            self.llm_usage = {"by_mission": {}, "total": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}}
+        except Exception:
+            pass
+        try:
+            self.truncation_count = 0
+        except Exception:
+            pass
+        try:
+            self.waiting_stats = {}
+        except Exception:
+            pass
+
     def update_marker(self, key: str, value, mode='set'):
         """
         Met à jour un marqueur de manière cumulative.

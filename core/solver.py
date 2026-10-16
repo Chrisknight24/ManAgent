@@ -50,6 +50,23 @@ MAX_EXECUTION_TRIES = SOLVER_MAX_EXECUTION_TRIES
 MAX_PREEXECUTION_FAILURES = SOLVER_MAX_PREEXECUTION_FAILURES
 
 
+def build_mission_convergence_payload(verdict: str, detail: str, full_report: str, mission_id: str) -> Dict[str, Any]:
+    """Payload `convergence.check` de fin de mission (pur, testé vite).
+
+    `detail` = 1 phrase (capée 300, jamais de dump) ; `full` = rapport
+    réel VERBATIM (présentateur en succès, motif en échec), sans plafond :
+    la sortie LLM est déjà bornée en amont (8k tokens), et l'hôte affiche
+    en connaissance de cause. Jamais de placeholder ici : un `full` vide
+    est un bug d'appelant, pas un défaut toléré.
+    """
+    return {
+        "verdict": verdict,
+        "detail": str(detail or "")[:300],
+        "full": str(full_report or detail or ""),
+        "mission_id": mission_id,
+    }
+
+
 def _update_tool_health(streak: Dict[str, int], attempts: List[Any]) -> List[str]:
     """Santé outils : même outil en échec 3 tentatives DE SUITE = malades.
 
@@ -843,9 +860,7 @@ class Solver(Supervisor, Entity):
                     self.execution_tree.status = "success"
 
                     if getattr(self, "depth", 0) == 0:
-                        await self._emit_mission_convergence(
-                            "pass", _("Mission accomplie."),
-                            full=str(getattr(final_result, "response", "") or ""))
+                        await self._emit_stats_snapshot()
 
                     if self.signatures:
                         is_novel = self.runtime_state.execution_markers.get("is_novel", False)
@@ -880,8 +895,6 @@ class Solver(Supervisor, Entity):
                 await self._handle_skill_lifecycle_post_execution(is_success=False)
 
                 error_msg = self.current_attempt.failure_reason if self.current_attempt else _("Échec inconnu")
-                if getattr(self, "depth", 0) == 0:
-                    await self._emit_mission_convergence("fail", error_msg)
                 result = SolverResult(
                     status=ExecutionStatus.FAILED,
                     final_context=self.context,
@@ -1204,32 +1217,6 @@ class Solver(Supervisor, Entity):
             lines.append(f"  - Type : {meta.get('type', 'unknown')} | Source : {meta.get('source', 'N/A')}")
             lines.append(f"  - Hint : {meta.get('value_hint', '')}")
         return "\n".join(lines)
-
-    async def _emit_mission_convergence(self, verdict: str, detail: str, full: str = "") -> None:
-        """Verdict mission : journal + paquet transport (le front ne lit
-        que les paquets). `detail` = 1 phrase, `full` = vrai contenu
-        (rapport final en succès, motif en échec) pour popup Détails,
-        jamais jugé. Jamais bloquant."""
-        _full = str(full or detail or "")
-        try:
-            Logger.event(
-                "convergence.check",
-                verdict=verdict,
-                detail=str(detail or "")[:300],
-                full=_full,
-                mission_id=self.id,
-            )
-        except Exception:
-            pass
-        try:
-            await self.propagate_event("convergence.check", {
-                "verdict": verdict,
-                "detail": str(detail or "")[:300],
-                "full": _full,
-                "mission_id": self.id,
-            })
-        except Exception:
-            pass
 
     async def report_critical_failure(self, error_context: str, child_solver_id: str):
         await self.parent.report_critical_failure(error_context, child_solver_id)

@@ -133,25 +133,16 @@ def test_pre_attente_lecture_seulement():
     ms3 = asyncio.run(ex3._apply_step_wait(_wstep("keyboard", 50), "before"))
     assert ms3 == 0 and calls3 == []
 
-
 def test_full_mission_reprend_vrai_rapport(monkeypatch):
-    import asyncio
-    from utils.logger import Logger
-    from core.solver import Solver
-    events = []
-    monkeypatch.setattr(Logger, "event",
-                        staticmethod(lambda event_type, **fields: events.append(
-                            {"event": event_type, **fields})))
-
-    async def _fake_propagate(name, payload):
-        events.append({"event": name, "packet": True, **payload})
-
-    solver = Solver.__new__(Solver)
-    solver.id = "m-full"
-    solver.propagate_event = _fake_propagate
-    asyncio.run(solver._emit_mission_convergence(
+    from core.solver import build_mission_convergence_payload
+    pkt = build_mission_convergence_payload(
         "pass", "Mission accomplie.",
-        full="Le résultat est 46, lu à l'écran."))
-    pkt = next(e for e in events if e.get("packet"))
+        "Le résultat est 46, lu à l'écran.", "m-full")
+    assert pkt["verdict"] == "pass"
     assert pkt["detail"] == "Mission accomplie."
     assert pkt["full"] == "Le résultat est 46, lu à l'écran."
+    assert pkt["mission_id"] == "m-full"
+    long_detail = "x" * 500
+    pkt2 = build_mission_convergence_payload("fail", long_detail, "", "m2")
+    assert len(pkt2["detail"]) == 300
+    assert pkt2["full"] == long_detail
