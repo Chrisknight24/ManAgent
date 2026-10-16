@@ -418,8 +418,7 @@ def find_unconsumed_perception_outputs(plan: Any, perception_tools: Any = None) 
             if re.search(r'"wait"|wait_mode|WAIT', later_text):
                 continue
             hits.append(
-                f"{sid} : sortie de perception non consommée — aucune étape "
-                f"postérieure ne lit {sorted(needles)[0]}. Branchez dessus ou supprimez cette perception."
+                f"{sid} : sortie non lue après (ex {sorted(needles)[0]}) — branchez dessus ou supprimez."
             )
         return hits
     except Exception:
@@ -1102,7 +1101,7 @@ class PlanValidator:
             for u in bad_sources
         ]
         problems += [f"délégation incomplète {u}" for u in incomplete_delegation]
-        problems += [f"perception non consommée {u}" for u in unconsumed]
+        problems += [f"perception non consommée : {u}" for u in unconsumed]
         if problems:
             details = ", ".join(problems[:8])
             return PlanValidationOutcome(

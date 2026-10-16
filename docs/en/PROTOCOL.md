@@ -159,7 +159,7 @@ Validation: `plan_validation_decision` (every validation: `solver_id`, `is_valid
 Convergence: `convergence.check`, low frequency (mission end + failure: `verdict`, 1-phrase `detail`, `full` verbatim text for Details popup, `mission_id` + `step_id` on in-progress failure).
 Counters: `stats.snapshot` at mission end (same content as global `stats.get`: tokens + truncations).
 
-All events above arrive as JSON packets on stdout (`{"type":"event","event":...,"payload":{...}}`), not just in logs: the frontend reads packets only. `convergence.check` frequency: every convergence failure + mission-end verdict (not after each successful task — the final `pass` covers the Verification item).
+All events above arrive as JSON packets on stdout (`{"type":"event","event":...,"payload":{...}}`), not just in logs: the frontend reads packets only. ManAgent stderr is human debug (summaries cut at 300 chars with a `[tronqué stderr]` marker): never parse it, read packets or the JSONL sink (whole). `convergence.check` frequency: every convergence failure + mission-end verdict (not after each successful task — the final `pass` covers the Verification item).
 Sequence: call `embeddings.catalog` right after `runtime.configured`.
 
 ## 9. Rules of the game

@@ -160,7 +160,7 @@ Validation : `plan_validation_decision` (chaque validation : `solver_id`, `is_va
 Convergence : `convergence.check` basse fréquence (fin de mission + échec : `verdict`, `detail` 1 phrase, `full` texte complet pour popup Détails, `mission_id` + `step_id` si échec en cours).
 Compteurs : `stats.snapshot` en fin de mission (même contenu que `stats.get` global : tokens + troncatures).
 
-Tous les events ci-dessus arrivent en paquets JSON sur stdout (`{"type":"event","event":...,"payload":{...}}`), pas seulement dans les logs : le front ne lit que les paquets. Fréquence `convergence.check` : chaque échec de convergence + verdict fin de mission (pas après chaque tâche en succès — le `pass` final couvre l'item Vérification).
+Tous les events ci-dessus arrivent en paquets JSON sur stdout (`{"type":"event","event":...,"payload":{...}}`), pas seulement dans les logs : le front ne lit que les paquets. Le stderr ManAgent est du debug humain (résumés coupés à 300 caractères + marqueur `[tronqué stderr]`) : ne jamais le parser, lire les paquets ou le sink JSONL (intégraux). Fréquence `convergence.check` : chaque échec de convergence + verdict fin de mission (pas après chaque tâche en succès — le `pass` final couvre l'item Vérification).
 
 ## 9. Règles du jeu
 

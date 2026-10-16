@@ -123,13 +123,14 @@ class Logger:
         }
         record.update(fields)
 
-        # Résumé texte (pour stderr)
+        # Résumé texte (pour stderr, debug humain : NE PAS parser, coupé + marqué).
+        # Source machine : paquets stdout / sink JSONL (intégraux).
         try:
             summary = json.dumps(fields, ensure_ascii=False, default=str)
         except Exception:
             summary = str(fields)
         if len(summary) > 300:
-            summary = summary[:300] + "…"
+            summary = summary[:300] + "…[tronqué stderr]"
         Logger._log("EVENT", f"{event_type} :: {summary}")
 
         # Écriture dans le sink JSON

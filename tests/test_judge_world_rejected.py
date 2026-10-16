@@ -266,6 +266,7 @@ def test_gate_perception_non_consommee_refusee():
     )
     hits = find_unconsumed_perception_outputs(_plan(perc, ans), {"vision"})
     assert len(hits) == 1 and "step_4" in hits[0]
+    assert "non consommée" not in hits[0] and "Branchez" not in hits[0]
 
 
 def test_gate_perception_consommee_ou_attente_passe():

@@ -22,3 +22,10 @@ def test_error_with_traceback_outside_except_does_not_raise(capsys):
     Logger.error("simple message", exc_info=True)
     out = capsys.readouterr().err
     assert "simple message" in out
+
+
+def test_event_long_marque_tronque_stderr(capsys):
+    Logger.event("evt_test", gros="x" * 900)
+    out = capsys.readouterr().err
+    assert "[tronqué stderr]" in out
+    assert out.count("x") < 900
