@@ -418,7 +418,9 @@ def find_unconsumed_perception_outputs(plan: Any, perception_tools: Any = None) 
             if re.search(r'"wait"|wait_mode|WAIT', later_text):
                 continue
             hits.append(
-                f"{sid} : sortie non lue après (ex {sorted(needles)[0]}) — branchez dessus ou supprimez."
+                f"{sid} : sortie non lue après (ex {sorted(needles)[0]}) — branchez dessus ou supprimez. "
+                f"Exemple : ajoutez un step avec execute_if: \"$@_data_{sid} == 'yes'\", "
+                f"ou passez $@_data_{sid} en argument d'un step suivant."
             )
         return hits
     except Exception:
