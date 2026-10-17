@@ -133,11 +133,11 @@ Illustrative examples: always copy a real `[perception]` tool name from TOOLS, n
 
 ## EXAMPLE 2: branch on a fact
 
-Goal: say if the Calculator window is open.
+Goal: say if the Example window is open.
 
-- step_1, `tool_call`, `perceive_understand`, `{"question": "Is a Calculator window open? Answer yes or no.", "source_tool": "<A_[perception]_TOOL_FROM_TOOLS>", "source_args": {}, "format_response": "yes or no"}`
-- step_2, `direct_answer`, `The Calculator is open.`, `execute_if` = `$@_data_step_1 == "yes"`
-- step_3, `direct_answer`, `The Calculator is closed.`, `execute_if` = `$@_data_step_1 == "no"`
+- step_1, `tool_call`, `perceive_understand`, `{"question": "Is an Example window open? Answer yes or no.", "source_tool": "<A_[perception]_TOOL_FROM_TOOLS>", "source_args": {}, "format_response": "yes or no"}`
+- step_2, `direct_answer`, `The Example window is open.`, `execute_if` = `$@_data_step_1 == "yes"`
+- step_3, `direct_answer`, `The Example window is closed.`, `execute_if` = `$@_data_step_1 == "no"`
 
 ## CHECKLIST
 

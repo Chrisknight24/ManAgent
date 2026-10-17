@@ -133,11 +133,11 @@ Exemples illustratifs : recopie toujours un vrai nom d'outil `[perception]` de O
 
 ## EXEMPLE 2 : brancher sur un fait
 
-Objectif : dis si la calculette est ouverte.
+Objectif : dis si la fenêtre Exemple est ouverte.
 
-- step_1, `tool_call`, `perceive_understand`, `{"question": "Une fenêtre Calculette est-elle ouverte ? Réponds yes or no.", "source_tool": "<UN_OUTIL_[perception]_DE_OUTILS>", "source_args": {}, "format_response": "yes or no"}`
-- step_2, `direct_answer`, `La calculette est ouverte.`, `execute_if` = `$@_data_step_1 == "yes"`
-- step_3, `direct_answer`, `La calculette est fermée.`, `execute_if` = `$@_data_step_1 == "no"`
+- step_1, `tool_call`, `perceive_understand`, `{"question": "Une fenêtre Exemple est-elle ouverte ? Réponds yes or no.", "source_tool": "<UN_OUTIL_[perception]_DE_OUTILS>", "source_args": {}, "format_response": "yes or no"}`
+- step_2, `direct_answer`, `La fenêtre Exemple est ouverte.`, `execute_if` = `$@_data_step_1 == "yes"`
+- step_3, `direct_answer`, `La fenêtre Exemple est fermée.`, `execute_if` = `$@_data_step_1 == "no"`
 
 ## CHECKLIST
 
