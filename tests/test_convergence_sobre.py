@@ -107,10 +107,10 @@ def test_tool_health_sick_after_three_straight():
 
 def test_tool_health_resets_on_change():
     streak = {"click_at": 2}
-    atts = [_att("click_at", "failed"), _att("press_key", "failed")]
+    atts = [_att("click_at", "failed"), _att("keyboard", "failed")]
     assert _update_tool_health(streak, atts) == []
     assert streak["click_at"] == 0
-    assert streak["press_key"] == 1
+    assert streak["keyboard"] == 1
 
 
 def test_convergence_template_has_tool_status():

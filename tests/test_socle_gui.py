@@ -23,7 +23,7 @@ def _plan(*steps):
 
 
 def test_null_literal_refused_with_path():
-    plan = _plan(_tool_step("step_1", "press_key", '{"key": "cliquer", "target": "null"}'))
+    plan = _plan(_tool_step("step_1", "keyboard", '{"key": "cliquer", "target": "null"}'))
     hits = find_unresolved_plan_refs(plan)
     assert len(hits) == 1 and "step_1" in hits[0] and "target" in hits[0]
 

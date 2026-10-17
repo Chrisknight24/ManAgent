@@ -31,7 +31,7 @@ def _attempt(num, plan, outcome="failed", nodes=None):
 def _plan():
     return Plan(goal="g", steps=[
         _tool_step("step_1", "perceive", "{}", out="data_vue"),
-        _tool_step("step_2", "press_key", '{"key": "WIN"}'),
+        _tool_step("step_2", "keyboard", '{"key": "WIN"}'),
     ])
 
 

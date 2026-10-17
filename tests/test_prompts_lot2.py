@@ -15,7 +15,7 @@ def _load(name, lang, **kwargs):
 
 
 def _tools():
-    return [{"name": "press_key", "kind": "action",
+    return [{"name": "keyboard", "kind": "action",
              "description": "presser une touche",
              "parameters": {"type": "object", "properties": {}}}]
 
@@ -34,7 +34,7 @@ def test_planner_renders_all_langs_without_leftovers():
 def test_feasibility_renders_all_langs():
     for lang in LANGS:
         out = _load("feasibility.md", lang, goal="g", advice="", context="c",
-                    similar_missions="", tools="- press_key : touche",
+                    similar_missions="", tools="- keyboard : touche",
                     tools_guidance="", skills="", registry="")
         assert "{{" not in out, lang
         assert "is_possible" in out, lang

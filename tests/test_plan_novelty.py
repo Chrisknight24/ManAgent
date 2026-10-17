@@ -28,7 +28,7 @@ def _failed_attempt(plan, num=1, reason="boom"):
 
 def _press_plan(key):
     return Plan(goal="ouvrir", steps=[
-        _tool_step("step_1", "press_key", {"key": key}, desc="touche Windows"),
+        _tool_step("step_1", "keyboard", {"key": key}, desc="touche Windows"),
         _tool_step("step_2", "type_text", {"text": "notepad"}, desc="taper"),
     ])
 

@@ -99,9 +99,9 @@ def test_implicit_validation_survives_replan():
                       human_validation_history=[{
                           "approved": True, "risk_level": "critical",
                           "goal": "fermer", "steps": ["Fermer avec Alt+F4"],
-                          "tools": ["press_key"],
+                          "tools": ["keyboard"],
                       }])
-    step = _tool_step("press_key", '{"key": "ALT+F4"}')
+    step = _tool_step("keyboard", '{"key": "ALT+F4"}')
     step.is_irreversible = True
     plan = _plan(step)
     decision = SimpleNamespace(irreversibility_flags=["s1"])
@@ -115,7 +115,7 @@ def test_implicit_validation_new_tool_fails():
                           "approved": True, "risk_level": "low",
                           "goal": "x", "steps": [], "tools": ["perceive"],
                       }])
-    step = _tool_step("press_key", '{"key": "ALT+F4"}')
+    step = _tool_step("keyboard", '{"key": "ALT+F4"}')
     step.is_irreversible = True
     plan = _plan(step)
     decision = SimpleNamespace(irreversibility_flags=["s1"])
