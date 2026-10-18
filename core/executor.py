@@ -13,6 +13,7 @@ import re
 from datetime import datetime
 from core.i18n import _
 from core.prompt_loader import get_prompt_loader
+from core.prompt_sanitizer import redact_binary_payloads
 from core.execution_models import (
     ExecutionNode,
     PlanAttempt,
@@ -1254,10 +1255,11 @@ class Executor:
 
             if is_success_flag == "true":
                 if actual_data is not None:
-                    if isinstance(actual_data, (dict, list)):
-                        formatted_output = json.dumps(actual_data, ensure_ascii=False, indent=2)
+                    safe_data = redact_binary_payloads(actual_data)
+                    if isinstance(safe_data, (dict, list)):
+                        formatted_output = json.dumps(safe_data, ensure_ascii=False, indent=2)
                     else:
-                        formatted_output = str(actual_data)
+                        formatted_output = str(safe_data)
                 else:
                     formatted_output = "true"
             else:
