@@ -1,139 +1,35 @@
-## ARCHITECTURE DES FLUX (CONTRÔLE / DONNÉES)
+## STEP GRAMMAR
 
-Chaque outil produit **deux sorties** :
-1. **Flux de Contrôle (`$@_bool_xxx`)** : booléen (True/False) – succès/échec de l'exécution de l'étape.
-2. **Flux de Données (`$@_data_xxx`)** : charge utile (texte, objet, liste, métriques, etc.).
+Each step N automatically produces two channels:
+- `$@_bool_step_N`: True if step N ran without error, False otherwise.
+- `$@_data_step_N`: the returned text / data.
 
-### Utilisation
+### Variables
+- Only cite AUTO names (`$@_data_step_N`, `$@_bool_step_N`) or REGISTRY names.
+- `output_variable_name` (e.g. `data_result`) creates `$@_bool_<root>` and `$@_data_<root>`. Never double the prefix (`$@_bool_bool_...` forbidden).
+- A step uses only variables from EARLIER steps.
+- `output_variable_name` NEVER goes into `tool_args_json` (top-level field only).
+- Copy names EXACTLY; never invent a suffix.
 
-- **Conditions (`execute_if`)** : two forms only.
-  `$@_bool_xxx == True/False` = step ran. `$@_data_name == "exact text"` = what it returned (world fact via perceive `yes/no`).  
-  Exemple valide : `execute_if = "$@_bool_target_ready == True"` ou `execute_if = "$@_bool_step_1 == True"`  
-  ✅ **RECETTE GARANTIE** : chaque étape N produit automatiquement `$@_bool_step_N` (True/False). Pour brancher sur l'étape N, écris TOUJOURS `$@_bool_step_N == True` (ou `== False`) — rien d'autre.  
-  ✅ **Comparaison de contenu autorisée** : `$@_data_nom == "texte exact"` (ou `!=`), combinable par `and`/`or`. Exemple : `$@_data_fenetre == "cmd"`.  
-  ⛔ **Interdiction formelle** de tout le reste dans `execute_if` : notation pointée (`.result`, `.data`), `IN`, `CONTAINS`, fonctions.
+### Conditions (`execute_if`) — two forms only
+- `$@_bool_step_N == True` (or `== False`): step N ran (or failed).
+- `$@_data_step_N == "exact text"` (or `!=`): what it returned. To branch on a world fact, read it first with `perceive_understand` (`format_response="yes or no"`), then test `== "yes"` / `== "no"`.
+- `and` / `or` allowed. FORBIDDEN: `.result`, `.data`, `IN`, `CONTAINS`, functions.
 
-### DEUX FAÇONS DE GÉRER UN FALLBACK / CONDITIONNEL
+### Advanced step fields
+- `is_crucial: true`: highlights the data in the RUM (Mission Useful Registry). Reserve it for data that ANSWERS the question (result, value, final confirmation), never for intermediate artefacts.
+- `should_world_state_change_after_action: true`: you expect a visible change after the action (else absent / `false`).
+- `verify_with`: name of a `[perception]` tool to check a subtle effect (default `get_world_state`).
+- `waiting_ms`: 0..30000 ms. Absent = default applied (declared host, else 3000 ms). BEFORE if reading, AFTER if acting.
+- `execute_skill`: only if a matching skill is listed. All its required parameters must be filled (`@$_param_...`, never empty).
 
-Lorsque la mission implique une condition ou un chemin alternatif (ex: vérifier la disponibilité d'une ressource, si oui exécuter l'action, sinon appliquer un traitement alternatif) :
+### Analyzing data or an image
+`llm_analyze_data` handles ONLY an already-produced variable (`source: "$@_data_xxx"`). There is no magic source (`current_screen`). For visuals: first a capture tool → `output_variable_name`, then pass `$@_data_...` to `llm_analyze_data` (declared image: `$@_data_<step>_<field>`). Never an `abstract_task` to inspect a variable: direct `tool_call`.
 
-- **Option A (Recommandée : Encapsulation dans une `abstract_task`)** :
-  Englobe la vérification et l'alternative dans la description d'une tâche abstraite unifiée.
-  Exemple : `description: "Inspecter la ressource cible et extraire son état, ou retourner explicitement 'INDISPONIBLE' si inaccessible."`, `output_variable_name: "data_target_state"`.
-  *Pourquoi c'est idéal* : Le sous-agent gère la branche en interne sans surcharger le graphe racine.
-
-- **Option B (Branches explicites avec `execute_if`)** :
-  Créer des étapes distinctes conditionnées par le flux de contrôle :
-  - `step_1` : `abstract_task` ou `tool_call` pour la vérification, `output_variable_name: "bool_target_ready"`.
-  - `step_2` : Branche si VRAI -> `execute_if: "$@_bool_target_ready == True"` (ou `$@_bool_step_1 == True`).
-  - `step_3` : Branche si FAUX -> `execute_if: "$@_bool_target_ready == False"` (ou `$@_bool_step_1 == False`).
-
-- **Arguments d'outils (`tool_args_json`)** : peuvent utiliser `$@_data_xxx` pour transmettre des données complexes produites par des étapes antérieures. Exemple : `"payload": "$@_data_target_state"`.
-
-- **Pour les `abstract_task`** : si tu définis `output_variable_name`, le système enregistre automatiquement :
-  - `$@_bool_xxx` = `"true"` ou `"false"` (succès de la sous-tâche)
-  - `$@_data_xxx` = la réponse textuelle ou les données produites par le sous-agent
-
----
-
-## GESTION DES ÉCHECS ET DE L'ÉTAT (CRUCIAL)
-
-1. **MODE RETRY (Droit d'innover) :**
-Si l'historique des tentatives précédentes (`previous_attempts`) montre que la stratégie initiale a ÉCHOUÉ, la stratégie devient **caduque**. Tu es alors AUTORISÉ et ENCOURAGÉ à innover radicalement. Change d'approche pour contourner le blocage.
-
-2. **OUTILS STATELESS (Variables) :**
-Les outils sont **stateless (sans mémoire)** et ne peuvent pas définir de variables dans l'environnement. Pour sauvegarder une valeur, tu dois lui demander de renvoyer la valeur brute et utiliser EXCLUSIVEMENT le champ `output_variable_name` de ton étape. Le système l'enregistrera alors dans le registre.
-
----
-
-## DIRECTIVES DE PLANIFICATION & HIÉRARCHIE DES COÛTS
-
-### 1. Hiérarchie des Types d'étapes et Coût Réel
-
-- **`tool_call` (PRIORITÉ ABSOLUE / COÛT ULTRA-FAIBLE)** :
-  - Action technique atomique directe (exécution d'outil, commande, interaction UI, clic, frappe clavier).
-  - **Coût** : Zéro surcharge d'orchestration, exécution immédiate et déterministe.
-  - ⚠️ **RÈGLE STRICTE SCHEMA PYDANTIC** : Pour toute étape de type `tool_call`, le champ `tool_name` est **OBLIGATOIRE** et doit correspondre EXACTEMENT au nom d'un outil de la section des outils disponibles ci-dessus (liste injectée dynamiquement pour cette mission — jamais un autre nom). Il est **STRICTEMENT INTERDIT** de laisser `tool_name` à `null`, vide ou inventé.
-
-  - ⚡ **UTILISATION DES SKILLS (`execute_skill`)** : Tu ne dois utiliser `execute_skill` QUE ET UNIQUEMENT SI un Skill pré-qualifié correspondant est explicitement listé dans la section des Skills disponibles du prompt. Si AUCUN Skill ET AUCUN outil ne sont listés (sections absentes ou vides), il est STRICTEMENT INTERDIT d'invoquer `execute_skill`, d'inventer un `skill_id` ou un `tool_name` : termine le plan par une étape `direct_answer` motivée qui explique précisément ce qui manque pour réaliser la mission.
-
-  - 📎 **RÈGLE ANTI-INVENTION (références)** : Tout identifiant, chemin, nom ou valeur repris d'une sortie précédente DOIT être recopié VERBATIM depuis une variable du contexte (`$@_...`) ou une section injectée du prompt. Si l'information manque, termine en `direct_answer` motivée (abandon propre) — jamais d'invention, jamais de devinette.
-- **`abstract_task` (RECOURS EXCEPTIONNEL / COÛT TRÈS ÉLEVÉ)** :
-  - Délégation d'une **séquence d'actions concrètes complexes** sur l'environnement hôte nécessitant une décomposition autonome.
-  - ⚠️ **Coût réel majeur** : 1 `abstract_task` déclenche le recrutement d'un sous-Solver complet = 1 appel LLM Feasibility + 1 appel LLM Planner + N exécutions d'outils + 1 appel LLM Validateur/Convergence. C'est 5 à 10 fois plus coûteux en tokens et en temps qu'un `tool_call`.
-  - **Ne JAMAIS utiliser `abstract_task` pour une seule action atomique.**
-
-- **⛔ RÈGLE ABSOLUE SUR L'ANALYSE DE DONNÉES ET CAPTURE D'ÉCRAN (`llm_analyze_data`)** :
-  - L'outil d'analyse `llm_analyze_data` (via `tool_manager`) traite **uniquement des données déjà présentes dans une variable du registre** produite par une étape antérieure (ex: `source: "$@_data_vision_result"`).
-  - Il **n'existe pas de source magique matérielle** (comme `"current_screen"` ou `"screen"`).
-  - **Pour analyser un contenu visuel** : Tu **DOIS D'ABORD** exécuter un outil de capture listé ci-dessus (celui dont la description mentionne capture ou détection) avec un `output_variable_name` (ex: `data_screen_ocr`), puis passer cette variable `$@_data_screen_ocr` à `llm_analyze_data`.
-  - **Image déclarée au manifeste** : si la capture déclare une sortie image, le système expose aussi `$@_data_<etape>_<champ>` (adresse d'image typée). Pour lire les pixels, passez CETTE variable à `llm_analyze_data`, jamais la sortie texte (`$@_data_<etape>` seul ne contient que du texte).
-  - **Variable names: copy, never invent** : reuse EXACTLY the declared name (the step's `output_variable_name`, e.g. `$@_data_screen_ocr`) or the auto address (`$@_data_step_1`). NEVER add an invented suffix (e.g. `$@_data_screen_ocr_image` does not exist if the step declared `data_screen_ocr`). On "unknown variable" rejection, the hint lists the valid names: take one as is.
-  - Il est **FORMELLEMENT INTERDIT** d'utiliser une `abstract_task` pour inspecter, tester, vérifier, filtrer, décoder ou lire le contenu d'une variable `$@_data_xxx` déjà présente dans le registre. Utilisez un `tool_call` direct.
-
-- **`direct_answer`** : réponse finale à l'utilisateur (succès, échec, ou refus).
-  - **Prouver, pas raconter (conseil, jamais un motif de rejet)** : si tu affirmes un succès après des `tool_call`, reprends de préférence une donnée du registre (`$@_data_xxx` produite avant). Un refus honnête (pas d'outil, modalité non supportée, mission incohérente) ou une réponse avec `execute_if` n'a besoin d'aucune variable et reste valide. Le succès réel est jugé sur les actions matérielles réussies, pas sur ton texte.
-
----
-
-### 2. Statut Consultatif de la Stratégie du Solver
-
-- La stratégie fournie (`Stratégie retenue`) est une **proposition consultative et un guide d'orientation**, souvent rédigée sous forme suggestive.
-- Tu es le **maître d'œuvre technique unique** du plan : tu traduis les orientations en étapes concrètes en choisissant le typage technique optimal (`tool_call` direct en priorité, `abstract_task` uniquement si une sous-délégation multi-actions complexe est indispensable).
-
----
-
-### 3. Gestion des variables et résultats d'étapes
-
-1. **Accès automatique par ID d'étape (`$@_data_step_X` et `$@_bool_step_X`)** :
-   Chaque étape technique produit automatiquement :
-   - `$@_bool_step_X` : booléen de succès (`true` / `false`)
-   - `$@_data_step_X` : les données brutes ou le texte retourné.
-   Tu peux réutiliser directement `$@_data_step_1` dans les arguments ou le texte de `step_2`.
-
-2. **Nommage sémantique optionnel (`output_variable_name`)** :
-   Pour attribuer un nom explicite à la sortie, tu peux préfixer le nom par `data_` (ex: `data_filtered_logs`) pour des données ou `bool_` (ex: `bool_target_ready`) pour un booléen.
-   Le système créera automatiquement les deux canaux : `$@_bool_<racine>` et `$@_data_<racine>`.
-   ⛔ **Ne dédouble jamais le préfixe** (utilise exactement `$@_bool_<nom>` ou `$@_data_<nom>`, jamais `$@_bool_bool_...`).
-
-3. **Arguments d'outils résolus** :
-   Les valeurs passées dans `tool_args_json` doivent être des valeurs concrètes ou des pointeurs `$@_data_...` résolus, jamais des fragments de pseudo-code non évalués.
-   One value = either text to send or one exact key/option, never both glued together in the same field.
-
-4. **Règles de causalité et de validité (STRICTES)** :
-   - **Causalité temporelle** : Une étape ne peut utiliser que les variables d'étapes **antérieures**.
-   - **Emplacement interdit** : Vous **ne devez JAMAIS** définir `output_variable_name` dans `tool_args_json` (uniquement dans le champ de premier niveau de l'étape).
-
-5. **Variables cruciales (`is_crucial: true`)** :
-   Active `is_crucial: true` pour mettre en avant la donnée dans le Registre Utile de Mission (RUM).
-   `is_crucial=true` for the data that ANSWERS the user's question (the result, the value, the final confirmation). Never for intermediate artefacts (captures, logs, transient states) unless the user asks for them.
-
-6. **Expected state change (optional)** :
-   `should_world_state_change_after_action: true` if you expect a visible change after this action (`false` otherwise, absent if undetermined — inert default, nothing changes).
-   `verify_with`: name of a `[perception]` tool to check on doubt (else `get_world_state` by default).
-
-7. **Wait around the step (`waiting_ms`, optional)** :
-   milliseconds (0..30000). Absent = unconsidered: default applied (declared host, else 3000 ms ManAgent — assumed, visible in logs). Explicit 0 = no wait (assumed decision). > 0 = your instruction, wins over the host default. Direction: BEFORE if reading (let arrive: perception), AFTER if acting (let settle). If the effect takes time (launch, load, web page): set a value, don't hope.
-
-### Exemple de plan valide (Générique)
-
-Mission : Vérifier la disponibilité d'une ressource ou équipement, et si disponible exécuter une opération, sinon signaler l'indisponibilité.
-Tool disponible: device_controller
-
-step_1 : abstract_task, id="step_1", description="Vérifier la disponibilité de la ressource", output_variable_name="bool_target_ready", is_crucial=true
-step_2 : tool_call, id="step_2", tool_name="device_controller", tool_args_json="{\"command\": \"start\", \"timeout\": 10}", execute_if="$@_bool_target_ready == True"
-step_3 : direct_answer, id="step_3", response_text="Opération exécutée avec succès.", execute_if="$@_bool_target_ready == True"
-step_4 : direct_answer, id="step_4", response_text="Ressource ou équipement indisponible.", execute_if="$@_bool_target_ready == False"
-
-CHECKLIST AVANT DE RÉPONDRE :
-- [ ] Chaque étape de type `tool_call` possède-t-elle obligatoirement un `tool_name` non vide et valide (jamais `null`) ?
-- [ ] Chaque appel à `llm_analyze_data` cible-t-il une variable de données existante `$@_data_xxx` et non une source imaginaire (comme `current_screen`) ?
-- [ ] Chaque `execute_if` utilise-t-il une variable booléenne valide (`$@_bool_step_X` ou `$@_bool_<nom>`) ?
-- [ ] Les conditions sont-elles bien typées (`$@_bool_xxx == True` ou `$@_bool_xxx == False`) ?
-- [ ] Les variables proviennent-elles bien d'étapes antérieures ?
-- [ ] Aucune `abstract_task` n'a été planifiée pour simplement tester, filtrer ou inspecter une variable `$@_data_xxx` (utilisation d'un `tool_call` direct) ?
-- [ ] Aucun `output_variable_name` n'est imbriqué dans `tool_args_json` ?
-- [ ] Les champs textuels (`description`, `result_context`, `response_text`) sont purs et ne contiennent aucun fragment de consigne de prompt ?
-- [ ] Les arguments d'outils sont-ils des valeurs scalaires/structurées sans pseudo-code résiduel ?
-- [ ] Si le `direct_answer` affirme un succès après des outils, reprend-il de préférence une donnée `$@_data_xxx` (conseil, pas bloquant) ?
-- [ ] Si une étape appelle `execute_skill`, tous les paramètres requis du skill sont-ils remplis (jamais de `@$_param_...` vide ou absent) ?
+### Checklist (before answering)
+- [ ] Every `tool_call` has an exact, non-empty `tool_name`.
+- [ ] Every `$@_...` comes from an earlier step (or the registry) and is copied exactly.
+- [ ] Every `execute_if` follows one of the two forms.
+- [ ] No `abstract_task` to inspect a variable.
+- [ ] No `output_variable_name` inside `tool_args_json`.
+- [ ] Last step = `direct_answer`.
