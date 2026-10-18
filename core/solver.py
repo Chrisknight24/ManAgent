@@ -107,6 +107,21 @@ def _is_pure_direct_answer_plan(plan) -> bool:
 _GENERIC_EXPECTED = {"", "true", "false", "any", "yes", "no", "ok", "success", "succès"}
 
 
+def _last_real_node(nodes: List[Any]) -> Any:
+    """Dernière étape RÉELLE exécutée (action/vérification), hors `direct_answer`.
+
+    Un `direct_answer` ne fait que reformuler la réponse : il ne « prouve » rien
+    et ne doit pas servir de critère ni de cible de feedback. Fonction pure.
+    """
+    for node in reversed(list(nodes or [])):
+        if getattr(node, "status", None) != "success":
+            continue
+        if str(getattr(node, "step_type", "") or "") == "direct_answer":
+            continue
+        return node
+    return None
+
+
 def _pick_final_criteria(goal: str, nodes: List[Any]) -> tuple:
     """Critère concret pour la convergence finale ROOT (BUG-C point 1).
 
@@ -117,19 +132,14 @@ def _pick_final_criteria(goal: str, nodes: List[Any]) -> tuple:
     le repli. Fonction pure.
     """
     desc, exp = goal, goal
-    for node in reversed(list(nodes or [])):
-        if getattr(node, "status", None) != "success":
-            continue
-        stype = str(getattr(node, "step_type", "") or "")
-        if stype == "direct_answer":
-            continue
+    node = _last_real_node(nodes)
+    if node is not None:
         nd = str(getattr(node, "description", "") or "").strip()
         ne = str(getattr(node, "expected_result", "") or "").strip()
         if nd:
             desc = nd
         if ne and ne.lower() not in _GENERIC_EXPECTED:
             exp = ne
-        break
     return desc, exp
 
 
@@ -1474,7 +1484,19 @@ class Solver(Supervisor, Entity):
             )
             if getattr(decision, "is_convergent", False):
                 return True, ""
-            return False, str(getattr(decision, "reason", "") or _("But non atteint."))
+            _reason = str(getattr(decision, "reason", "") or _("But non atteint."))
+            _node = _last_real_node(
+                getattr(getattr(self, "current_attempt", None), "nodes", None))
+            if _node is not None:
+                _sid = str(getattr(_node, "step_id", "") or "").strip()
+                _sdesc = str(getattr(_node, "description", "") or "").strip()
+                _target = (f"{_sid} ({_sdesc})".strip() if _sid else _sdesc)
+                if _target:
+                    _reason += _(
+                        " Étape probablement en cause : {target}. "
+                        "Change l'approche de cette étape, pas seulement l'attente."
+                    ).format(target=_target)
+            return False, _reason
         except Exception as e:
             Logger.warning(f"[Solver:{self.id}] Vérification finale impossible ({e}) — mission conservée.")
             return True, ""

@@ -407,7 +407,7 @@ class Executor:
                         return SolverResult(
                             status=ExecutionStatus.FAILED,
                             final_context=final_context,
-                            error_reason=_("Divergence détectée à l'étape {} : {}").format(step.id, convergence.reason),
+                            error_reason=_("Divergence détectée à l'étape {} : {} Change l'approche de cette étape, pas seulement l'attente.").format(step.id, convergence.reason),
                             failure_class=FailureClass.CONVERGENCE_FAILURE,
                             target_entity="Executor",
                             failure_bundle=getattr(node, "failure_bundle", None),
