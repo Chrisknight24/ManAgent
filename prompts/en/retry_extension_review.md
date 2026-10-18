@@ -18,10 +18,10 @@ progress made and the nature of the last failure.
 
 - **GRANT THE EXTENSION (`is_worthwhile: true`)** — ONLY if VERIFIABLE progress
   toward the goal is established:
-  - A TARGET / milestone of the goal was actually reached and verified (not
-    merely an action executed without error).
+  - A MEASURABLE milestone of the goal (plan-level, not a physical entity)
+    was actually reached and verified (not merely an action executed without error).
   - The history shows measurable progression toward the goal (steps crossed,
-    world state that moved closer to the target).
+    world state that moved closer to the goal).
   - The last failure is new or transient (network, timeout, page not yet
     loaded) and the next plan can avoid it.
 

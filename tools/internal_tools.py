@@ -817,9 +817,15 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
 
     query = question
     if format_response:
+        # Format strict SEULEMENT en cas de succès : sur une cible absente, on
+        # veut une DESCRIPTION de ce qui est visible (canal de repli), pas un
+        # « no » nu qui perd l'information pour le replan.
         query = (
-            f"{question}\nRéponds UNIQUEMENT avec le format strict suivant : "
-            f"{format_response}. Rien d'autre."
+            f"{question}\n"
+            f"Si tu TROUVES ce qui est demandé : réponds UNIQUEMENT avec le format "
+            f"strict suivant : {format_response}. Rien d'autre.\n"
+            f"Sinon (cible absente/introuvable) : décris en une phrase ce que tu VOIS "
+            f"à la place (écran, éléments présents, texte) et mets success=false."
         )
     if media_assets:
         return await _run_llm_analysis(raw_data, query, runtime_state, tag="perceive_understand", media_assets=media_assets)

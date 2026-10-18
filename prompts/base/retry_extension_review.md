@@ -18,10 +18,10 @@ progrès accompli et de la nature du dernier échec.
 
 - **ACCORDER LA RALLONGE (`is_worthwhile: true`)** — SEULEMENT si un progrès
   VÉRIFIABLE vers le but est établi :
-  - Une CIBLE / un jalon du but a été réellement atteint et vérifié (pas
-    seulement une action exécutée sans erreur).
+  - Un jalon MESURABLE du but (niveau plan, pas une entité physique) a été
+    réellement atteint et vérifié (pas seulement une action exécutée sans erreur).
   - L'historique montre une progression mesurable vers le but (éléments
-    franchis, état du monde qui s'est rapproché de la cible).
+    franchis, état du monde qui s'est rapproché du but).
   - Le dernier échec est nouveau ou transitoire (réseau, timeout, page pas
     encore chargée) et le plan suivant peut l'éviter.
 

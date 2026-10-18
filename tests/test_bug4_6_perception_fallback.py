@@ -94,6 +94,23 @@ def test_perceive_understand_source_failure_message_as_data():
     assert out["data"] == "capteur indisponible"
 
 
+def test_strict_format_relaxed_on_absence(monkeypatch):
+    seen = {}
+
+    async def fake_run(data, query, runtime_state, tag="", media_assets=None):
+        seen["q"] = query
+        return {"result": False, "data": "écran sans la cible", "error_reason": "absente"}
+
+    monkeypatch.setattr(IT, "_run_llm_analysis", fake_run)
+    st = _fake_state({"result": True, "data": {"scan": [1]}})
+    out = asyncio.run(IT.perceive_understand(
+        {"question": "le bouton est-il là ?", "source_tool": "vision",
+         "source_args": {}, "format_response": "yes or no"}, st))
+    assert "yes or no" in seen["q"]          # format strict conservé en cas de succès
+    assert "cible absente" in seen["q"]      # dérogation décrite si introuvable
+    assert out["data"] == "écran sans la cible"
+
+
 # --------------------------------------------------------------------------
 # Alerte critère mécanique sur étape de perception (jamais un refus)
 # --------------------------------------------------------------------------
