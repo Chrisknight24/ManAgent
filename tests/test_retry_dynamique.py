@@ -148,3 +148,24 @@ def test_extension_granted_once_then_capped():
     assert res.status == ExecutionStatus.FAILED
     assert s.calls["executions"] == 4
     assert s.calls["judge"] == 2
+
+
+def test_retry_event_logs_dynamic_max(monkeypatch):
+    """A5 : mission_retry loggue le budget dynamique (max_allowed), pas la constante 3."""
+    from utils.logger import Logger
+    events = []
+    monkeypatch.setattr(
+        Logger, "event",
+        staticmethod(lambda et, **f: events.append((et, dict(f)))),
+    )
+    s = _solver(
+        ["panne A", "panne B", "panne C", "panne D", "panne E"],
+        materials=[2, 2, 2, 2, 2],
+        judge_answers=[True, False],
+    )
+    res = asyncio.run(s.run())
+    assert res.status == ExecutionStatus.FAILED
+    retries = [f for (et, f) in events if et == "mission_retry"]
+    assert len(retries) == 4
+    assert retries[0]["max_attempts"] == 3
+    assert retries[-1]["max_attempts"] == 4

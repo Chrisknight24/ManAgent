@@ -197,8 +197,9 @@ class Executor:
                         **self._step_event_meta(node)
                     })
 
+                    child_solver = None
                     if step.type == StepType.ABSTRACT_TASK:
-                        success, execution_output, supplemental_data, child_result = await self._handle_abstract_task(step, accumulated_context)
+                        success, execution_output, supplemental_data, child_result, child_solver = await self._handle_abstract_task(step, accumulated_context)
                         if child_result and child_result.execution_tree:
                             node.child_execution_tree = child_result.execution_tree
                     else:
@@ -250,6 +251,7 @@ class Executor:
                         node.status = ExecutionStatus.FAILED
                         node.error_reason = _("Arrêté par l'utilisateur.")
                         node.ended_at = time.time()
+                        await self._credit_abstract_child(child_solver, False)
                         return SolverResult(status=ExecutionStatus.FAILED, final_context=accumulated_context,
                                             error_reason=_("Arrêté par l'utilisateur."))
 
@@ -292,6 +294,7 @@ class Executor:
                         )
                         registry_meta = self.solver._get_registry_metadata_view()
                         final_context = accumulated_context + f"\n{failure_trace}\n\n--- Registre (métadonnées) ---\n{self._format_registry_view(registry_meta)}"
+                        await self._credit_abstract_child(child_solver, False)
                         return SolverResult(
                             status=ExecutionStatus.FAILED,
                             final_context=final_context,
@@ -309,12 +312,14 @@ class Executor:
                         node.status = ExecutionStatus.FAILED
                         node.error_reason = _("Generation stoppee.")
                         node.ended_at = time.time()
+                        await self._credit_abstract_child(child_solver, False)
                         return SolverResult(status=ExecutionStatus.FAILED, final_context=accumulated_context,
                                             error_reason=_("Generation stoppee."),
                                             failure_class=FailureClass.USER_CANCELLED)
 
                     if convergence.is_convergent:
                         Logger.info(f"[Executor] ✅ Étape [{step.id}] validée.")
+                        await self._credit_abstract_child(child_solver, True)
                         step.status = ExecutionStatus.SUCCESS
                         if step.type == StepType.TOOL_CALL:
                             material_success_count += 1
@@ -389,6 +394,7 @@ class Executor:
                         )
                         registry_meta = self.solver._get_registry_metadata_view()
                         final_context = accumulated_context + f"\n{failure_trace}\n\n--- Registre (métadonnées) ---\n{self._format_registry_view(registry_meta)}"
+                        await self._credit_abstract_child(child_solver, False)
                         return SolverResult(
                             status=ExecutionStatus.FAILED,
                             final_context=final_context,
@@ -759,7 +765,7 @@ class Executor:
             Logger.error(f"[Executor] 🛑 Type de step non pris en charge dans _execute_step_action : '{step.type}'")
             return False, "", _("Erreur de spécification : Le type d'étape '{}' est introuvable.").format(step.type)
 
-    async def _handle_abstract_task(self, step: PlanStep, runtime_context: str) -> Tuple[bool, str, Optional[str], Optional[SolverResult]]:
+    async def _handle_abstract_task(self, step: PlanStep, runtime_context: str) -> Tuple[bool, str, Optional[str], Optional[SolverResult], Optional[Any]]:
         from .solver import Solver, MAX_DEPTH
 
         is_leaf_mode = False
@@ -930,11 +936,11 @@ class Executor:
         if child_result.status == ExecutionStatus.SUCCESS:
             final_response = child_result.response or _("Objectif de la sous-tâche [{}] atteint.").format(step.id)
             enriched_response = f"[TOOLS OK] {final_response}"
-            return True, enriched_response, child_result.final_context, child_result
+            return True, enriched_response, child_result.final_context, child_result, child_solver
         else:
             error_msg = child_result.error_reason or "Échec de la sous-tâche"
             enriched_error = f"[TOOLS FAILED] {error_msg}"
-            return False, "", enriched_error, child_result
+            return False, "", enriched_error, child_result, child_solver
 
     def _validate_tool_args(self, tool_name: str, args: dict) -> Tuple[bool, Optional[str]]:
         """
@@ -1284,8 +1290,23 @@ class Executor:
             await self._emit_convergence_check("fail", decision.reason, step_id=getattr(step, "id", None))
         return decision
 
+    async def _credit_abstract_child(self, child_solver, is_success: bool) -> None:
+        """A4a : le crédit skill d'une sous-tâche revient au PARENT, après SA
+        ConvergenceDecision sur l'abstract_task — jamais au sous-solver lui-même
+        (qui pouvait se déclarer succès localement). Best-effort, jamais bloquant.
+        `child_solver` est None pour les étapes non-abstract_task."""
+        if child_solver is None:
+            return
+        try:
+            await child_solver._handle_skill_lifecycle_post_execution(is_success=is_success)
+        except Exception as e:
+            Logger.warning(f"[Executor] Crédit skill sous-tâche impossible : {e}")
+
     async def _check_convergence_inner(self, step: PlanStep, actual_result: str, supplemental_data: Optional[str] = None, node: Optional[ExecutionNode] = None, action_success: Optional[bool] = None) -> ConvergenceDecision:
-        if not step.expected_result:
+        # A4b : le bypass « expected_result vide » est SCOPÉ aux étapes NON
+        # abstract_task (tool_call/direct_answer). Une abstract_task passe
+        # TOUJOURS par une vraie ConvergenceDecision, expected_result vide ou pas.
+        if step.type != StepType.ABSTRACT_TASK and not step.expected_result:
             Logger.info(f"[Executor] Aucun critère défini pour [{step.id}]. Convergence implicite acceptée.")
             return ConvergenceDecision(is_convergent=True, reason=_("Aucun critère d'output spécifié."))
 

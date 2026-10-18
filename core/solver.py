@@ -728,7 +728,7 @@ class Solver(Supervisor, Entity):
                             "mission_retry",
                             solver_id=self.id,
                             attempt_number=execution_attempt,
-                            max_attempts=MAX_EXECUTION_TRIES
+                            max_attempts=max_allowed
                         )
 
                         with self.runtime_state.execution_context.scope(entity_name="Executor", entity_role="Solver"):
@@ -805,7 +805,7 @@ class Solver(Supervisor, Entity):
                             self.current_attempt.target_entity = result.target_entity or "Executor"
                             self.last_failure_bundle = getattr(result, "failure_bundle", None)
                             self.last_breakout_report = getattr(result, "breakout_report", None)
-                            Logger.warning(f"[Solver:{self.id}] 🔄 Échec exécution (Tentative {execution_attempt}/{MAX_EXECUTION_TRIES}). Raison : {result.error_reason}")
+                            Logger.warning(f"[Solver:{self.id}] 🔄 Échec exécution (Tentative {execution_attempt}/{max_allowed}). Raison : {result.error_reason}")
                             if self.last_breakout_report:
                                 bo = self.last_breakout_report
                                 bo_dict = bo.to_dict() if hasattr(bo, "to_dict") else (bo if isinstance(bo, dict) else {})
@@ -825,7 +825,7 @@ class Solver(Supervisor, Entity):
                             await self.propagate_event(Events.PLAN_ABANDONED, {
                                 "mission_id": self.id,
                                 "parent_step_id": self.parent_step_id or "",
-                                "reason": _("Échec (Tentative {}/{}).").format(execution_attempt, MAX_EXECUTION_TRIES)
+                                "reason": _("Échec (Tentative {}/{}).").format(execution_attempt, max_allowed)
                             })
                             self._record_failure(
                                 fail_history,
@@ -876,7 +876,8 @@ class Solver(Supervisor, Entity):
                         else:
                             Logger.debug(f"[Solver:{self.id}] Stockage MissionProfiles ignoré (mission non nouvelle).")
 
-                    await self._handle_skill_lifecycle_post_execution(is_success=True)
+                    if getattr(self, "depth", 0) == 0:
+                        await self._handle_skill_lifecycle_post_execution(is_success=True)
 
                     final_result.execution_tree = self.execution_tree
                     if getattr(self, "depth", 0) == 0:
@@ -894,7 +895,8 @@ class Solver(Supervisor, Entity):
                         self.current_attempt.failure_class = FailureClass.MAX_RETRIES_REACHED
                         self.current_attempt.failure_reason = _("Échec définitif : impossible d'accomplir la tâche après plusieurs tentatives.")
 
-                await self._handle_skill_lifecycle_post_execution(is_success=False)
+                if getattr(self, "depth", 0) == 0:
+                    await self._handle_skill_lifecycle_post_execution(is_success=False)
 
                 error_msg = self.current_attempt.failure_reason if self.current_attempt else _("Échec inconnu")
                 result = SolverResult(
@@ -1379,12 +1381,13 @@ class Solver(Supervisor, Entity):
                         _warns = list(_store.get(self.id, None) or [])
                 except Exception:
                     _warns = []
-                for _w in _warns[:5]:
-                    evidence_parts.append(
-                        f"[AVERTISSEMENT] Attention, l'executor n'a pas pris en compte cet état du monde : {_w}. Soyez vigilant."
-                    )
+                # A1 : warnings = variable dédiée, HORS du cap `evidence` (jamais tronqués).
+                world_warnings = "\n".join(
+                    f"[AVERTISSEMENT] Attention, l'executor n'a pas pris en compte cet état du monde : {_w}. Soyez vigilant."
+                    for _w in _warns[:5]
+                )
             except Exception:
-                pass
+                world_warnings = ""
             evidence = "\n".join(p for p in evidence_parts if p)[:1500]
             try:
                 from core.alignment import plan_risk, risk_sentence
@@ -1419,6 +1422,7 @@ class Solver(Supervisor, Entity):
                 tool_status="UNKNOWN",
                 alignment_note=alignment_note,
                 world_snapshot=_final_snapshot,
+                world_warnings=world_warnings,
             )
             conv_llm = self.llm
             try:
