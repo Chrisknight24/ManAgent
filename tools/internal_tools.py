@@ -298,9 +298,18 @@ async def _run_llm_analysis(data: Any, query: str, runtime_state, tag: str, medi
             mission_id=explicit_mid
         )
         msg = getattr(analysis, "message", None) or getattr(analysis, "error_reason", None) or _("Analyse terminée.")
+        # Canal de repli perception : MÊME en échec, ce que l'on voit doit
+        # survivre dans `data` (le `message` porte « ce qui EST visible »).
+        # Sinon l'info est perdue pour le registre de variables / le RUM et le
+        # replan n'a rien à exploiter.
+        data_out = analysis.data
+        if not analysis.success and (
+            data_out is None or (isinstance(data_out, str) and not data_out.strip())
+        ):
+            data_out = msg
         return {
             "result": analysis.success,
-            "data": analysis.data,
+            "data": data_out,
             "error_reason": msg,
             "message": msg
         }
@@ -756,10 +765,15 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
             parsed = json.loads(result_str) if isinstance(result_str, str) else result_str
         except Exception as e:
             msg = _("La source '{tool}' a échoué : {err}").format(tool=source_tool, err=e)
-            return {"result": False, "data": None, "error_reason": msg, "message": msg}
+            return {"result": False, "data": msg, "error_reason": msg, "message": msg}
         if isinstance(parsed, dict) and not parsed.get("result", True):
             msg = str(parsed.get("error_reason") or parsed.get("message") or _("Source en échec."))
-            return {"result": False, "data": None, "error_reason": msg, "message": msg}
+            # Canal de repli : on garde ce que la source a renvoyé (cadre partiel,
+            # description) plutôt que `None`, pour ne pas perdre l'information.
+            _partial = parsed.get("data")
+            if _partial in (None, ""):
+                _partial = msg
+            return {"result": False, "data": _partial, "error_reason": msg, "message": msg}
         raw_data = parsed.get("data", parsed) if isinstance(parsed, dict) else parsed
         # Charges typées déclarées (contrat `returns`) : les pixels passent
         # par le canal média, jamais en base64 dans le prompt. Sans

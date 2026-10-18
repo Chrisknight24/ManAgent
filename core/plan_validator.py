@@ -482,6 +482,31 @@ def find_invalid_perceive_sources(plan: Any, known_tool_names=None) -> List[str]
     return bad
 
 
+def find_mechanical_perception_criteria(plan: Any, perception_tool_names=None) -> List[str]:
+    """BUG-4/6 : critère mécanique (true/false/any) sur une étape de PERCEPTION.
+
+    Un `expected_result` mécanique ne prouve rien : l'outil peut avoir rendu un
+    cadre SANS la cible et l'étape passerait quand même. Signal de qualité de
+    plan (jamais un refus) pour pousser vers un critère qui engage le monde.
+    Fonction pure, testable vite.
+    Retourne ["step_id: expected_result='true' (perceive_understand)", ...].
+    """
+    perception = {"perceive_understand", "perceive_action"}
+    perception |= set(perception_tool_names or set())
+    out: List[str] = []
+    for step in getattr(plan, "steps", []) or []:
+        stype = getattr(getattr(step, "type", None), "value", getattr(step, "type", None))
+        if stype != "tool_call":
+            continue
+        tname = (getattr(step, "tool_name", None) or "").strip()
+        if tname not in perception:
+            continue
+        exp = str(getattr(step, "expected_result", "") or "").strip().lower()
+        if exp in ("true", "false", "any"):
+            out.append(f"{getattr(step, 'id', '?')}: expected_result='{exp}' ({tname})")
+    return out
+
+
 def find_direct_perception_calls(plan: Any, perception_tool_names=None, tool_returns=None) -> List[str]:
     """Étapes tool_call directes vers un outil de perception externe.
 
@@ -1045,6 +1070,20 @@ class PlanValidator:
             return None
         return _("Appels perception directs : {ids} (hors exception pixels : charge média déclarée = appel direct légitime, les pixels sont préservés).").format(ids=", ".join(ids))
 
+    @staticmethod
+    def build_mechanical_perception_criteria_note(plan: Any, perception_tool_names=None) -> Optional[str]:
+        """BUG-4/6 : signal qualité (jamais un refus) sur les critères mécaniques
+        portés par une étape de perception — un `true`/`any` ne prouve pas que le
+        monde a changé ni que la cible était là."""
+        ids = find_mechanical_perception_criteria(plan, perception_tool_names)
+        if not ids:
+            return None
+        return _(
+            "⚠️ CRITÈRE MÉCANIQUE SUR PERCEPTION : {ids}. Un 'true'/'any' ne prouve "
+            "pas que la cible était présente ni que le monde a changé — préférez un "
+            "critère qui engage ce qui est RÉELLEMENT perçu."
+        ).format(ids=", ".join(ids))
+
     async def validate(
         self,
         plan: Plan,
@@ -1062,10 +1101,15 @@ class PlanValidator:
             mission_history_tree=mission_history_tree,
         )
 
+        mechanical_note = self.build_mechanical_perception_criteria_note(
+            plan, self._perception_tools)
+
         all_warnings = []
         if repeated_warning:
             all_warnings.append(repeated_warning)
         all_warnings.extend(recursion_warnings)
+        if mechanical_note:
+            all_warnings.append(mechanical_note)
         pattern_warning = "\n\n".join(all_warnings) if all_warnings else None
 
         # Nouveauté calculée (fait déterministe) : le juge voit les arguments
