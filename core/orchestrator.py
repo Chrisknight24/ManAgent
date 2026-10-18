@@ -117,8 +117,15 @@ class Orchestrator(Supervisor, Entity):
         self.input_ingestor = InputIngestor()
         self.asset_registries: Dict[str, AssetRegistry] = {}
 
-        # Observabilité structurée (Logger -> JSON)
-        Logger.configure_json_sink("observability/events.jsonl")
+        # Observabilité structurée (Logger -> JSONL). Chemin stable (data dir),
+        # surchargeable par MANAGENT_EVENTS_SINK. Le stderr reste court ; le
+        # sink porte les enregistrements intégraux (post-mortem des runs).
+        try:
+            from utils.paths import resolve_data_dir
+            _default_sink = str(resolve_data_dir() / "observability" / "events.jsonl")
+        except Exception:
+            _default_sink = "observability/events.jsonl"
+        Logger.configure_json_sink(os.environ.get("MANAGENT_EVENTS_SINK", _default_sink))
 
         # --- VALIDATION FINALE DES PLANS (LLM Judge) ---
         self._prompt_loader = get_prompt_loader()
