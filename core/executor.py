@@ -27,6 +27,14 @@ class _ConditionError(Exception):
     elle n'est jamais sautée silencieusement."""
 
 
+# Sentinelle BUG-2 : opérande NON scalaire (dict/liste) issu de l'interpolation
+# d'une variable. Une condition qui compare un non-scalaire est « insuffisante »
+# par nature -> évaluée à False + avertissement (principe A4b), JAMAIS un crash
+# qui tuerait une étape cruciale. Reste distinct d'une vraie erreur de syntaxe,
+# laquelle continue de lever `_ConditionError`.
+_NONSCALAR = object()
+
+
 # Champs-références : NOMS de variables à résoudre par l'outil lui-même,
 # jamais interpolés par l'executor (sinon l'outil reçoit la valeur et la
 # cherche comme un nom -> "Variable ... introuvable"). Noms de nos
@@ -643,18 +651,44 @@ class Executor:
             if cand in reg:
                 return cand, reg[cand]
 
+        # Repli flou (BUG-1) : le suffixe d'instance GLOBAL (`-00036`) n'encode
+        # PAS la tentative, or chaque tentative régénère les mêmes noms locaux
+        # (`step_5`). Ne JAMAIS renvoyer le premier venu : privilégier la
+        # tentative COURANTE, sinon l'entrée la plus récente (suffixe le plus
+        # grand). Empêche qu'une variable d'une tentative passée soit lue par la
+        # tentative en cours (collision de registre inter-tentatives).
+        current_att = None
+        try:
+            current_att = getattr(
+                getattr(self.solver, "current_attempt", None), "attempt_number", None)
+        except Exception:
+            current_att = None
+
+        best = None  # (rank, clé, valeur)
         for k, v in reg.items():
             k_base = re.sub(r'-\d+$', '', k)
             k_clean = re.sub(r'^(bool_|data_)+', '', k_base)
-            if k_base == var_name or k_base == base_var or k_clean == clean_base:
-                # Même saveur exigée : une demande bool_ ne rend jamais une
-                # donnée data_ (ni l'inverse) — sinon "true" pour "hello".
-                k_is_bool = k_base.startswith("bool_")
-                k_is_data = k_base.startswith("data_")
-                if (is_bool or is_data) and (k_is_bool or k_is_data):
-                    if is_bool != k_is_bool:
-                        continue
-                return k, v
+            if not (k_base == var_name or k_base == base_var or k_clean == clean_base):
+                continue
+            # Même saveur exigée : une demande bool_ ne rend jamais une
+            # donnée data_ (ni l'inverse) — sinon "true" pour "hello".
+            k_is_bool = k_base.startswith("bool_")
+            k_is_data = k_base.startswith("data_")
+            if (is_bool or is_data) and (k_is_bool or k_is_data):
+                if is_bool != k_is_bool:
+                    continue
+            _m = re.search(r'-(\d+)$', k)
+            suffix = int(_m.group(1)) if _m else -1
+            try:
+                entry_att = v.get("attempt_no") if isinstance(v, dict) else None
+            except Exception:
+                entry_att = None
+            att_rank = 1 if (current_att is not None and entry_att == current_att) else 0
+            rank = (att_rank, suffix)
+            if best is None or rank > best[0]:
+                best = (rank, k, v)
+        if best is not None:
+            return best[1], best[2]
         return None, None
 
     def _interpolate_text(self, text: str, for_json: bool = False) -> str:
@@ -1626,10 +1660,21 @@ class Executor:
                     return node.value
                 elif isinstance(node, ast.Name):
                     return node.id
+                elif isinstance(node, (ast.Dict, ast.List, ast.Set, ast.Tuple)):
+                    # Variable non scalaire interpolée (dict/ligne JSON) :
+                    # marqueur dédié, pour ne PAS confondre avec une erreur de
+                    # syntaxe (BUG-2).
+                    return _NONSCALAR
                 elif isinstance(node, ast.Compare):
                     left = eval_node(node.left)
                     op_type = type(node.ops[0])
                     right = eval_node(node.comparators[0])
+                    if left is _NONSCALAR or right is _NONSCALAR:
+                        Logger.warning(
+                            f"[Executor] Condition évaluée à False : opérande non "
+                            f"scalaire (variable dict/liste) dans '{condition_raw}'."
+                        )
+                        return False
                     if op_type in operators:
                         if isinstance(left, bool) and isinstance(right, str) and right.lower() in ["true", "false"]:
                             right = right.lower() == "true"
@@ -1646,6 +1691,10 @@ class Executor:
                     raise ValueError(_("Opérateur de comparaison non supporté : {}").format(op_type))
                 elif isinstance(node, ast.BoolOp):
                     values = [eval_node(v) for v in node.values]
+                    # Non scalaire = « insuffisant » = False dans un contexte
+                    # booléen (A4b) : une branche non scalaire ne rend jamais
+                    # vraie une condition par accident.
+                    values = [False if v is _NONSCALAR else v for v in values]
                     op_type = type(node.op)
                     if op_type == ast.And:
                         return all(values)
@@ -1654,6 +1703,12 @@ class Executor:
                 raise ValueError(_("Expression non autorisée : {}").format(type(node)))
 
             result = eval_node(tree.body)
+            if result is _NONSCALAR:
+                Logger.warning(
+                    f"[Executor] Condition évaluée à False : résultat non scalaire "
+                    f"(variable dict/liste) pour '{condition_raw}'."
+                )
+                return False
             return bool(result)
 
         except _ConditionError:
