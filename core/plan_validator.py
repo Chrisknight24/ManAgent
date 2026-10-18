@@ -988,7 +988,9 @@ class PlanValidator:
         tout replan ressemble à une redite et se fait refuser à tort. De même,
         il ne peut pas juger P2 (`should_world`/`verify_with`) ni le contexte
         (`step_context`) si on les lui ampute : libellés humains courts pour
-        aider le modèle (`monde=oui/non`, `verif=outil`).
+        aider le modèle (`monde=oui/non`, `verif=outil`). Idem pour l'attente
+        (`waiting_ms`) : le juge doit la VOIR, sinon il croit à tort qu'un plan
+        n'attend pas et le refuse en exigeant une étape `wait` séparée.
         """
         lines = [f"Objectif déclaré du plan : {plan.goal}"]
         for step in plan.steps:
@@ -1019,9 +1021,11 @@ class PlanValidator:
                 world_str = " monde=non (aucun changement attendu)"
             verify = getattr(step, "verify_with", None)
             verify_str = f" verif={str(verify).strip()}" if verify and str(verify).strip() else ""
+            waiting_ms = getattr(step, "waiting_ms", None)
+            wait_str = f" wait_ms={waiting_ms}" if waiting_ms is not None else ""
             out_var = f" -> {step.output_variable_name}" if getattr(step, "output_variable_name", None) else ""
             exp = f" attend={step.expected_result}" if getattr(step, "expected_result", None) else ""
-            lines.append(f"- {step.id} [{step_type_str}]{tool} : {step.description}{args_str}{cond}{ctx_str}{world_str}{verify_str}{out_var}{exp}{marker}{reason}")
+            lines.append(f"- {step.id} [{step_type_str}]{tool} : {step.description}{args_str}{cond}{ctx_str}{world_str}{verify_str}{wait_str}{out_var}{exp}{marker}{reason}")
         return "\n".join(lines)
 
     @staticmethod

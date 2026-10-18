@@ -18,7 +18,7 @@ Judge the plan in the current world state, not from an initial state. If the cur
 {{ goal }}
 
 ## PLAN
-Each step shows: id, type, tool, full arguments, outputs, `execute_if`, `expected_result`, `is_irreversible`, context (`ctx`), expected world effect (`monde=oui/non`: whether the visible world should change after the action), verification tool (`verif`).
+Each step shows: id, type, tool, full arguments, outputs, `execute_if`, `expected_result`, `is_irreversible`, context (`ctx`), expected world effect (`monde=oui/non`: whether the visible world should change after the action), verification tool (`verif`), waiting (`wait_ms`).
 {{ plan_summary }}
 
 {% if judge_world_snapshot %}
@@ -75,6 +75,8 @@ Answer `false` when:
 Good signs: a fresh perception after a stale reference, a new tool, a new branch, a changed argument that fixes the cause, a verification step instead of redoing proven state.
 A plan with the same structure as an earlier one is valid when its arguments changed to fix the cause.
 A plan that is slower than needed is valid.
+
+Waiting: the wait mechanism is `wait_ms` (per step). If absent, a default applies automatically (3000 ms, or the host-declared one). A plan is NEVER non-conformant for lack of waiting: never demand a separate `wait` step.
 
 ## BRANCHES
 

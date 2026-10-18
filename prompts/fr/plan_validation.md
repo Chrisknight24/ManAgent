@@ -18,7 +18,7 @@ Juge le plan dans l'état actuel du monde, pas depuis un état initial. Si l'ét
 {{ goal }}
 
 ## PLAN
-Chaque étape montre : id, type, outil, arguments complets, sorties, `execute_if`, `expected_result`, `is_irreversible`, contexte (`ctx`), effet monde attendu (`monde=oui/non` : le monde visible doit-il changer après l'action ?), outil de vérification (`verif`).
+Chaque étape montre : id, type, outil, arguments complets, sorties, `execute_if`, `expected_result`, `is_irreversible`, contexte (`ctx`), effet monde attendu (`monde=oui/non` : le monde visible doit-il changer après l'action ?), outil de vérification (`verif`), attente (`wait_ms`).
 {{ plan_summary }}
 
 {% if judge_world_snapshot %}
@@ -75,6 +75,8 @@ Fais confiance à ce calcul : des arguments modifiés pour traiter la cause = un
 Bons signes : perception fraîche après référence périmée, nouvel outil, nouvelle branche, argument modifié qui corrige la cause, étape de vérification au lieu de refaire un état prouvé.
 Un plan à structure égale est valide quand ses arguments ont changé pour corriger la cause.
 Un plan plus lent que nécessaire est valide.
+
+Attente : le mécanisme d'attente est `wait_ms` (par étape). S'il est absent, un défaut s'applique automatiquement (3000 ms, ou celui déclaré par l'hôte). Un plan n'est JAMAIS non conforme faute d'attente : n'exige jamais une étape `wait` séparée.
 
 ## BRANCHES
 
