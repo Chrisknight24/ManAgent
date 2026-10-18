@@ -104,6 +104,36 @@ def _is_pure_direct_answer_plan(plan) -> bool:
 
 
 
+_GENERIC_EXPECTED = {"", "true", "false", "any", "yes", "no", "ok", "success", "succès"}
+
+
+def _pick_final_criteria(goal: str, nodes: List[Any]) -> tuple:
+    """Critère concret pour la convergence finale ROOT (BUG-C point 1).
+
+    On ne redescend PAS sur un `direct_answer` (son `expected_result` ne fait
+    que reformuler la réponse/le but -> la convergence s'auto-validerait). On
+    prend la dernière étape RÉELLE (action/vérification), en gardant le but
+    comme critère si le sien est générique (`true`, `any`, ...). Le but reste
+    le repli. Fonction pure.
+    """
+    desc, exp = goal, goal
+    for node in reversed(list(nodes or [])):
+        if getattr(node, "status", None) != "success":
+            continue
+        stype = str(getattr(node, "step_type", "") or "")
+        if stype == "direct_answer":
+            continue
+        nd = str(getattr(node, "description", "") or "").strip()
+        ne = str(getattr(node, "expected_result", "") or "").strip()
+        if nd:
+            desc = nd
+        if ne and ne.lower() not in _GENERIC_EXPECTED:
+            exp = ne
+        break
+    return desc, exp
+
+
+
 def _pydantic_feedback(raw_error: str) -> str:
     """Message de rejet Pydantic actionnable : troncation = consigne de plan court.
 
@@ -1388,7 +1418,7 @@ class Solver(Supervisor, Entity):
                 )
             except Exception:
                 world_warnings = ""
-            evidence = "\n".join(p for p in evidence_parts if p)[:1500]
+            evidence = "\n".join(p for p in evidence_parts if p)[:6000]
             try:
                 from core.alignment import plan_risk, risk_sentence
                 _tm = getattr(self.runtime_state, "tools_manager", None)
@@ -1408,16 +1438,18 @@ class Solver(Supervisor, Entity):
             try:
                 from core.alignment import fetch_world_state_snapshot
                 _final_snapshot = await fetch_world_state_snapshot(
-                    self.runtime_state, max_chars=600)
+                    self.runtime_state, max_chars=4000)
             except Exception:
                 _final_snapshot = ""
             if strict and not _final_snapshot.strip():
                 return False, _("Vérification STRICTE : monde frais muet après échecs — réponse finale refusée.")
+            _final_desc, _final_expected = _pick_final_criteria(
+                self.goal, getattr(getattr(self, "current_attempt", None), "nodes", None))
             prompt = loader.load(
                 "convergence.md",
                 lang=self.runtime_state.language,
-                step_description=self.goal,
-                expected_result=self.goal,
+                step_description=_final_desc,
+                expected_result=_final_expected,
                 actual_result=evidence or _("(aucune preuve textuelle disponible)"),
                 tool_status="UNKNOWN",
                 alignment_note=alignment_note,
