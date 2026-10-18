@@ -21,6 +21,12 @@ Judge the plan in the current world state, not from an initial state. If the cur
 Each step shows: id, type, tool, full arguments, outputs, `execute_if`, `expected_result`, `is_irreversible`, context (`ctx`), expected world effect (`monde=oui/non`: whether the visible world should change after the action), verification tool (`verif`), waiting (`wait_ms`).
 {{ plan_summary }}
 
+{% if declared_change %}
+## CHANGE DECLARED BY THE PLANNER (declaration, to confront with the real plan)
+{{ declared_change }}
+Check that this change is REAL in the plan above and that it addresses the cause of the previous failure. A declaration not reflected in the plan does not count.
+{% endif %}
+
 {% if judge_world_snapshot %}
 ## CURRENT WORLD STATE (fresh context, never proof)
 {{ judge_world_snapshot }}

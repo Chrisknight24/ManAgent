@@ -120,6 +120,7 @@ Le résultat `$@_data_step_N` EST la réponse quand la question la demande : n'a
 ## APRÈS UN REJET
 
 Tu reçois l'erreur, ton plan rejeté et la liste des noms valides. Corrige exactement l'erreur. Recopie un nom valide de la liste. Si le plan a raté à l'exécution, change d'approche.
+Renseigne le champ `change_vs_previous` (une phrase) : ce que tu changes vs la tentative précédente et POURQUOI (ex : « ajout d'une attente de 5 s après le lancement »). Laisse-le vide au premier essai. Le juge lit ce champ pour ne pas confondre une reprise corrigée avec une redite.
 
 ---
 

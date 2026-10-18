@@ -120,6 +120,7 @@ The `$@_data_step_N` result IS the answer when the question asks for it: add no 
 ## AFTER A REJECTION
 
 You receive the error, your rejected plan and the list of valid names. Fix exactly the error. Copy a valid name from the list. If the plan failed when it ran, change approach.
+Fill the `change_vs_previous` field (one sentence): what you change vs the previous attempt and WHY (e.g. "added a 5 s wait after launch"). Leave it empty on the first try. The judge reads this field to avoid mistaking a corrected retry for a repeat.
 
 ---
 

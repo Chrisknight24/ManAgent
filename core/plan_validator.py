@@ -1209,6 +1209,7 @@ class PlanValidator:
             lang=self._language,
             goal=target_goal,
             plan_summary=self._summarize_plan_for_prompt(plan),
+            declared_change=getattr(plan, "change_vs_previous", None) or None,
             rules=self._rules_text or _("(rules.md absent ou vide — aucun critère explicite fourni.)"),
             pattern_warning=pattern_warning,
             novelty_assessment=novelty_assessment,
