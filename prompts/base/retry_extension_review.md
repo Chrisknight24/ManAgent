@@ -16,16 +16,24 @@ progrès accompli et de la nature du dernier échec.
 
 ## 🎯 Directives d'arbitrage
 
-- **ACCORDER LA RALLONGE (`is_worthwhile: true`)** :
-  - Des actions matérielles ont réellement réussi (le travail avance).
+- **ACCORDER LA RALLONGE (`is_worthwhile: true`)** — SEULEMENT si un progrès
+  VÉRIFIABLE vers le but est établi :
+  - Une CIBLE / un jalon du but a été réellement atteint et vérifié (pas
+    seulement une action exécutée sans erreur).
+  - L'historique montre une progression mesurable vers le but (éléments
+    franchis, état du monde qui s'est rapproché de la cible).
   - Le dernier échec est nouveau ou transitoire (réseau, timeout, page pas
     encore chargée) et le plan suivant peut l'éviter.
-  - La mission est proche du but d'après l'historique des tentatives.
 
 - **REFUSER LA RALLONGE (`is_worthwhile: false`)** :
   - Aucune action matérielle n'a jamais réussi.
+  - Des actions ont réussi mais AUCUN progrès observable vers le but
+    (stagnation : on agit sans avancer).
   - Le même échec se répète sans progrès (anomalie insoluble ou incomprise).
   - Le plan risque de répéter la même démarche stérile.
+
+**Règle de prudence : en cas de doute, REFUSE.** Une action qui « marche »
+sans rapprocher du but ne justifie PAS une rallonge.
 
 ---
 
