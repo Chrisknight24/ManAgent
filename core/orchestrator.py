@@ -69,6 +69,20 @@ from core.discovery.providers.mission_history_provider import MissionHistoryProv
 from core.discovery.explorers.mission_history_explorer import MissionHistoryExplorer
 from core.constants import MAX_INSIGHTS_PER_TARGET, MAX_DEPTH_EXTENSIONS, MAX_RETRY_EXTENSIONS
 
+# F-bloc 5 : le judge lit rules.md verbatim ; on retire les commentaires HTML
+# (notes d'édition destinées à l'humain, pas des critères) avant injection.
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+
+
+def _strip_rules_comments(text: str) -> str:
+    """Retire les commentaires HTML et normalise les blancs (pur, tolérant)."""
+    if not text:
+        return text
+    cleaned = _HTML_COMMENT_RE.sub("", text)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 class Orchestrator(Supervisor, Entity):
     """
     Orchestrateur central – Point d'entrée unique du runtime.
@@ -2248,7 +2262,7 @@ class Orchestrator(Supervisor, Entity):
         try:
             override = getattr(self.runtime_state, "rules_override", None)
             if isinstance(override, str) and override.strip():
-                self._rules_cache = override
+                self._rules_cache = _strip_rules_comments(override)
                 return self._rules_cache
         except Exception:
             pass
@@ -2256,7 +2270,7 @@ class Orchestrator(Supervisor, Entity):
             return self._rules_cache
         try:
             with open(self._rules_path, "r", encoding="utf-8") as f:
-                self._rules_cache = f.read()
+                self._rules_cache = _strip_rules_comments(f.read())
         except Exception as e:
             Logger.warning(
                 f"[Orchestrator] rules.md introuvable ou illisible ({self._rules_path} : {e}) — "

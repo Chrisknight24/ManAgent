@@ -1,14 +1,13 @@
 # RULES — Critères de conformité pour la validation finale des plans
 
-Ce fichier est lu par l'Orchestrateur (`Orchestrator._load_rules_md`) et injecté
-tel quel dans le prompt de validation (`plan_validation.md`). C'est un texte en
-langage naturel, pas un format structuré à parser — le LLM Judge le lit comme
-un humain le lirait. Modifiez-le librement ; aucune section n'est interprétée
-par du code.
-
-**⚠️ Brouillon de démarrage** — les critères ci-dessous sont des exemples
-plausibles pour amorcer la discussion, pas une politique validée. À réviser
-avant mise en usage réel.
+<!--
+Fichier lu par l'Orchestrateur (`Orchestrator._load_rules_md`) et injecté dans
+le prompt de validation (`plan_validation.md`) : texte en langage naturel,
+aucune section n'est interprétée par du code. Modifiez-le librement.
+Les commentaires HTML comme celui-ci sont RETIRÉS avant injection au judge :
+utilisez-les pour vos notes d'édition (elles ne consomment aucun token).
+Critères ci-dessous : à réviser avant mise en usage réel.
+-->
 
 ---
 
