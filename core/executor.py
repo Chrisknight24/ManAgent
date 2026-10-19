@@ -302,7 +302,9 @@ class Executor:
                             executed_steps_trace, step, _("Échec d'exécution de l'action"), step.result_context
                         )
                         registry_meta = self.solver._get_registry_metadata_view()
-                        final_context = accumulated_context + f"\n{failure_trace}\n\n--- Registre (métadonnées) ---\n{self._format_registry_view(registry_meta)}"
+                        # F-blk6 : failure_trace re-liste déjà les étapes réussies ->
+                        # ne pas ré-ajouter accumulated_context (doublon) ; garder l'input.
+                        final_context = current_context + f"\n{failure_trace}\n\n--- Registre (métadonnées) ---\n{self._format_registry_view(registry_meta)}"
                         await self._credit_abstract_child(child_solver, False)
                         return SolverResult(
                             status=ExecutionStatus.FAILED,
@@ -402,7 +404,9 @@ class Executor:
                             executed_steps_trace, step, _("Divergence de résultat (Non-convergence)"), convergence.reason
                         )
                         registry_meta = self.solver._get_registry_metadata_view()
-                        final_context = accumulated_context + f"\n{failure_trace}\n\n--- Registre (métadonnées) ---\n{self._format_registry_view(registry_meta)}"
+                        # F-blk6 : failure_trace re-liste déjà les étapes réussies ->
+                        # ne pas ré-ajouter accumulated_context (doublon) ; garder l'input.
+                        final_context = current_context + f"\n{failure_trace}\n\n--- Registre (métadonnées) ---\n{self._format_registry_view(registry_meta)}"
                         await self._credit_abstract_child(child_solver, False)
                         return SolverResult(
                             status=ExecutionStatus.FAILED,
