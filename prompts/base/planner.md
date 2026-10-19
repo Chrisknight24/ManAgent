@@ -34,7 +34,7 @@ Rapports de missions passées JUGÉES (le juge peut se tromper) : pistes suggest
 ## OUTILS (recopie les noms exactement)
 {% for tool in tools %}
 - **[{{ tool.name }}]** [{{ tool.kind }}]{% if tool.source == 'external' %} [hôte]{% else %} [brain]{% endif %}{% if tool.effects %} (effet {{ tool.effects }}){% endif %} : {{ tool.description }}
-  Arguments : {{ tool.parameters | tojson }}
+  Arguments : {{ tool.parameters | args_sig }}
 {% endfor %}
 
 {% include "_kinds_legend.md" %}

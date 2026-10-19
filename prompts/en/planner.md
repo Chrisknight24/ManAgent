@@ -34,7 +34,7 @@ Reports from past JUDGED missions (the judge can be wrong): suggestive leads, ne
 ## TOOLS (copy names exactly)
 {% for tool in tools %}
 - **[{{ tool.name }}]** [{{ tool.kind }}]{% if tool.source == 'external' %} [host]{% else %} [brain]{% endif %}{% if tool.effects %} ({{ tool.effects }} effect){% endif %}: {{ tool.description }}
-  Arguments: {{ tool.parameters | tojson }}
+  Arguments: {{ tool.parameters | args_sig }}
 {% endfor %}
 
 {% include "_kinds_legend.md" %}

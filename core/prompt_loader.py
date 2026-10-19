@@ -19,6 +19,37 @@ except ImportError:
 
 from utils.logger import Logger
 
+
+def args_signature(params: Any) -> str:
+    """Résumé COMPACT d'un schéma JSON d'arguments d'outil (F-bloc 3).
+
+    Remplace le dump JSON complet (bruit + tokens) par une ligne utile pour
+    remplir un appel : `nom` (+`*` si requis), valeurs fermées (`=a|b|...`),
+    type, et description courte. Pur, tolérant (schéma non conforme -> "").
+    """
+    if not isinstance(params, dict):
+        return ""
+    props = params.get("properties")
+    if not isinstance(props, dict) or not props:
+        return ""
+    required = params.get("required") or []
+    required = set(required) if isinstance(required, (list, tuple, set)) else set()
+    parts = []
+    for name, spec in props.items():
+        spec = spec if isinstance(spec, dict) else {}
+        piece = str(name) + ("*" if name in required else "")
+        enum = spec.get("enum")
+        if isinstance(enum, (list, tuple)) and enum:
+            piece += "=" + "|".join(str(e) for e in enum)
+        elif spec.get("type"):
+            piece += ":" + str(spec["type"])
+        desc = spec.get("description")
+        if desc:
+            piece += " — " + str(desc).strip()[:60]
+        parts.append(piece)
+    return "; ".join(parts)
+
+
 class PromptLoader:
     """
     Charge les prompts depuis des fichiers Markdown avec Jinja2 (ou un fallback basique).
@@ -62,6 +93,7 @@ class PromptLoader:
                     value, *args, **{**{"ensure_ascii": False}, **kwargs}
                 )
             )
+            self.env_cache[lang].filters["args_sig"] = args_signature
         return self.env_cache[lang]
 
     def _fallback_render(self, template_name: str, lang: str, kwargs: Dict[str, Any]) -> str:
