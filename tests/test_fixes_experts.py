@@ -71,4 +71,4 @@ def test_concision_sans_abstract():
                advice="", variable_registry={}, tools=[], skills="",
                model_id="m", supported_modalities=[], unsupported_modalities=[])
     assert "5 to 10 steps" in en
-    assert "abstract_task" not in en.split("8. If history")[-1].split("## VARIABLES")[0]
+    assert "abstract_task" not in en.split("8. If history")[-1].split("## READING THE WORLD")[0]

@@ -86,27 +86,6 @@ A `tool_call` needs a `tool_name` copied from TOOLS. One action = one `tool_call
 8. If history shows a failure, your new strategy must change approach (never replay the same).
 9. Your plans must fit the output limit: brief descriptions (one sentence), no repeating args in the description, typically 5 to 10 steps. Beyond that: narrow the goal or finish with an honest partial `direct_answer`.
 
-## VARIABLES
-
-Each step N produces automatically:
-- `$@_data_step_N`: the text or data returned.
-- `$@_bool_step_N`: True if step N ran without error, False otherwise.
-
-These are the only names you need, plus the REGISTRY ones. You may also name an output via `output_variable_name` (e.g. `data_result`): the system then creates `$@_bool_<name>` and `$@_data_<name>`.
-A step uses only variables from EARLIER steps. Put variables inside `tool_args_json` (e.g. `"source": "$@_data_step_1"`). Never `output_variable_name` inside `tool_args_json`. A name neither in the registry nor produced before does not exist.
-
-## CONDITIONS (`execute_if`)
-
-Two forms only:
-- `$@_bool_step_N == True` (or `== False`): step N ran (or failed).
-- `$@_data_step_N == "exact text"` (or `!=`): what step N returned.
-
-`$@_bool_step_N` says if the step ran. It says nothing yes/no about the world. To branch on a world fact:
-1. Read it with `perceive_understand`, `format_response` = "yes or no".
-2. Branch on `$@_data_step_N == "yes"` and `$@_data_step_N == "no"`.
-
-No `.result`, no `IN`/`CONTAINS`, no functions. Combine with `and` / `or`.
-
 {% if world_guidance is not defined or world_guidance %}
 ## READING THE WORLD
 

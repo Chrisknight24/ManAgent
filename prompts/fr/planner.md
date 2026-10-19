@@ -86,27 +86,6 @@ Un `tool_call` exige un `tool_name` recopié de OUTILS. Une action = un `tool_ca
 8. Si l'historique montre un échec, ta nouvelle stratégie doit changer d'approche (pas rejouer pareil).
 9. Tes plans doivent tenir dans la limite de sortie : descriptions brèves (une phrase), pas de répétition des args dans la description, 5 à 10 étapes typiquement. Au-delà : resserre l'objectif ou termine en `direct_answer` partiel honnête.
 
-## VARIABLES
-
-Chaque étape N produit automatiquement :
-- `$@_data_step_N` : le texte ou les données renvoyées.
-- `$@_bool_step_N` : True si l'étape a tourné sans erreur, False sinon.
-
-Ce sont les seuls noms dont tu as besoin, plus ceux du REGISTRE. Tu peux aussi nommer une sortie via `output_variable_name` (ex `data_resultat`) : le système crée alors `$@_bool_<nom>` et `$@_data_<nom>`.
-Une étape utilise seulement des variables d'étapes ANTÉRIEURES. Mets les variables dans `tool_args_json` (ex `"source": "$@_data_step_1"`). Jamais `output_variable_name` dans `tool_args_json`. Un nom ni au registre ni produit avant n'existe pas.
-
-## CONDITIONS (`execute_if`)
-
-Deux formes seulement :
-- `$@_bool_step_N == True` (ou `== False`) : l'étape N a tourné (ou a raté).
-- `$@_data_step_N == "texte exact"` (ou `!=`) : ce que l'étape N a renvoyé.
-
-`$@_bool_step_N` dit si l'étape a tourné. Il ne dit pas oui/non sur le monde. Pour brancher sur un fait du monde :
-1. Lis-le avec `perceive_understand`, `format_response` = "yes or no".
-2. Branche sur `$@_data_step_N == "yes"` et `$@_data_step_N == "no"`.
-
-Pas de `.result`, pas de `IN`/`CONTAINS`, pas de fonctions. Combinaisons avec `and` / `or`.
-
 {% if world_guidance is not defined or world_guidance %}
 ## LIRE LE MONDE
 
