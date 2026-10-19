@@ -21,12 +21,6 @@ Juge le plan dans l'état actuel du monde, pas depuis un état initial. Si l'ét
 Chaque étape montre : id, type, outil, arguments complets, sorties, `execute_if`, `expected_result`, `is_irreversible`, contexte (`ctx`), effet monde attendu (`monde=oui/non` : le monde visible doit-il changer après l'action ?), outil de vérification (`verif`), attente (`wait_ms`).
 {{ plan_summary }}
 
-{% if declared_change %}
-## CHANGEMENT DÉCLARÉ PAR LE PLANNER (déclaration, à confronter au plan réel)
-{{ declared_change }}
-Vérifie que ce changement est RÉEL dans le plan ci-dessus et qu'il traite la cause de l'échec précédent. Une déclaration non suivie d'effet dans le plan ne compte pas.
-{% endif %}
-
 {% if judge_world_snapshot %}
 ## ÉTAT MONDE ACTUEL (contexte frais, jamais une preuve)
 {{ judge_world_snapshot }}

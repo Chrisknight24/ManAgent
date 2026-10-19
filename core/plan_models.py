@@ -236,14 +236,6 @@ class Plan(BaseDiscoverySchema):
     """Le plan global proposé par un Solver."""
     goal: str = Field(..., description=_("L'objectif global de ce plan"))
     steps: List[PlanStep] = Field(default_factory=list, description=_("Liste ordonnée des étapes à exécuter"))
-    change_vs_previous: Optional[str] = Field(
-        default=None,
-        description=_(
-            "Sur reprise après échec/rejet : en une phrase, CE QUI change vs la "
-            "tentative précédente et POURQUOI (ex : ajout d'une attente). None au "
-            "premier essai. Lu par le juge de plans."
-        )
-    )
     
     def is_complete(self) -> bool:
         return all(step.status in [ExecutionStatus.SUCCESS, ExecutionStatus.SKIPPED] for step in self.steps)
