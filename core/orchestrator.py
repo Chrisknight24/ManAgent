@@ -2055,6 +2055,7 @@ class Orchestrator(Supervisor, Entity):
         child_solver_id: str,
         previous_attempts: Optional[List[PlanAttempt]] = None,
         mission_history_tree: Optional[Any] = None,
+        plan_id: Optional[str] = None,
     ) -> PlanValidationOutcome:
         """
         Validation finale d'un plan proposé par un Solver, avant exécution.
@@ -2222,6 +2223,7 @@ class Orchestrator(Supervisor, Entity):
         Logger.event(
             "plan_validation_decision",
             solver_id=child_solver_id,
+            plan_id=plan_id,
             is_valid=outcome.is_valid,
             reason=outcome.reason,
             risk_level=outcome.risk_level.value,
@@ -2233,6 +2235,7 @@ class Orchestrator(Supervisor, Entity):
         try:
             await self.propagate_event("plan_validation_decision", {
                 "solver_id": child_solver_id,
+                "plan_id": plan_id,
                 "is_valid": outcome.is_valid,
                 "reason": outcome.reason,
                 "risk_level": outcome.risk_level.value,

@@ -64,3 +64,18 @@ def make_step_id(local_id: str) -> str:
 def make_mission_id(prefix: str = "mission") -> str:
     """Génère un identifiant unique de mission."""
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+def make_plan_id() -> str:
+    """Identifiant unique d'une INSTANCE de plan (observabilité hôte).
+
+    Un `plan.generated` et son éventuel `plan.abandoned` (et les
+    `step.status_changed` qui en découlent) partagent ce même id : le front
+    regroupe par id au lieu de reconstituer les tentatives par ordre temporel.
+    Même compteur global que make_step_id (unicité garantie sur le process).
+
+    Exemples :
+        make_plan_id() -> "plan-00007"
+        make_plan_id() -> "plan-00008"
+    """
+    return f"plan-{next_unique_suffix()}"

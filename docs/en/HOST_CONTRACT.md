@@ -228,6 +228,19 @@ Handled types, end to end (declaration → model):
 Stable events to log host-side: `plan.generated`, `tools_manager.decision/execution/result`,
 `checkpoint.reached`, `breakout.occurred`, `execution.completed`, `learner.analyze_finished`.
 
+Plan lifecycle (deterministic ids, 2026-10-19) — for an exact tracker without
+guessing the temporal order:
+- `plan.proposed {mission_id, parent_step_id, solver_id, plan_id}`: emitted as soon
+  as a plan is proposed, BEFORE validation. A pure `direct_answer` plan also goes
+  through `plan.proposed` (its validation is skipped: `plan_validation_skipped`).
+- `plan_validation_decision` now carries `plan_id` (same id as the proposed one).
+- `plan.generated` carries `plan_id` (+ `supersedes: <previous plan_id>` when this
+  plan replaces a previous attempt). Only an ACCEPTED proposal becomes `plan.generated`.
+- `plan.abandoned` carries `plan_id`, the REAL `reason` (concrete cause, no longer the
+  generic "Attempt X/Y") and, when known, `failed_step_id`.
+- `step.status_changed` re-emits `plan_id` (group steps by plan instance).
+All additive: hosts that ignore these fields keep working.
+
 Token usage: every `llm_call` carries `usage = {prompt_tokens, completion_tokens, total_tokens, source}`
 with `source` = `real` (provider figure) or `estimated` (local ~4 chars = 1 token). Never invented.
 Two shapes, do not mix:

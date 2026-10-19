@@ -110,6 +110,14 @@ class PlanAttempt(BaseModel):
     started_at: Optional[float] = Field(None, description=_("Début de la tentative"))
     ended_at: Optional[float] = Field(None, description=_("Fin de la tentative"))
 
+    # Identité d'instance de plan (observabilité hôte) : même id porté par
+    # plan.proposed / plan.generated / plan.abandoned et les step.status_changed
+    # de cette tentative. Permet au front de regrouper sans deviner l'ordre.
+    plan_id: Optional[str] = Field(
+        None,
+        description=_("Identifiant unique de l'instance de plan de cette tentative (make_plan_id).")
+    )
+
     # Le plan qui a été proposé pour cette tentative (sérialisé en JSON)
     proposed_plan: Optional[Dict[str, Any]] = Field(
         None,

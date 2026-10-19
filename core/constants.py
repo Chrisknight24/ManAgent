@@ -62,6 +62,7 @@ class Events:
     #STEP_STARTED = "step.started"
     MISSION_STARTED = "mission.started"
     PLAN_GENERATED = "plan.generated"
+    PLAN_PROPOSED = "plan.proposed" # Instanciation de plan AVANT validation (observabilité hôte)
     STEP_STATUS_CHANGED = "step.status_changed"
     MISSION_FAILED = "mission.failed" # NOUVEAU : Rejet de faisabilité ou crash
     PLAN_ABANDONED = "plan.abandoned" # NOUVEAU : Signal qu'un plan généré a échoué et va être remplacé

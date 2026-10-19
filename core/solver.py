@@ -35,7 +35,7 @@ from .executor import Executor
 from core.llm import Llm
 from core.prompt_loader import get_prompt_loader
 from core.i18n import _
-from core.id_generator import make_step_id
+from core.id_generator import make_step_id, make_plan_id
 from core.execution_models import ExecutionTree, PlanAttempt, FailureClass
 from core.retriever import Retriever
 from core.signature_extractor import SignatureExtractor
@@ -596,8 +596,10 @@ class Solver(Supervisor, Entity):
                     # execution_attempt ne compte QUE les plans vraiment exécutés
                     # (un refus avant exécution ne mange plus le budget).
                     attempt_counter += 1
+                    plan_id = make_plan_id()
                     self.current_attempt = PlanAttempt(
                         attempt_number=attempt_counter,
+                        plan_id=plan_id,
                         started_at=time.time(),
                         outcome="in_progress",
                         failure_class=FailureClass.NONE
@@ -703,6 +705,12 @@ class Solver(Supervisor, Entity):
                             break
 
                         previous_attempts = self.execution_tree.attempts[:-1] if self.execution_tree else []
+                        await self.propagate_event(Events.PLAN_PROPOSED, {
+                            "mission_id": self.id,
+                            "parent_step_id": self.parent_step_id or "",
+                            "solver_id": self.id,
+                            "plan_id": plan_id,
+                        })
                         if _is_pure_direct_answer_plan(proposed_plan):
                             # Réponse directe pure : RIEN à valider (ni gates, ni juge).
                             # Valider du texte reviendrait à punir l'honnêteté.
@@ -715,7 +723,8 @@ class Solver(Supervisor, Entity):
                             )
                         else:
                             validation_outcome = await self.validate_plan(
-                                proposed_plan, self.id, previous_attempts=previous_attempts
+                                proposed_plan, self.id, previous_attempts=previous_attempts,
+                                plan_id=plan_id
                             )
                             is_valid = bool(validation_outcome)
                             rejection_reason = getattr(
@@ -744,10 +753,14 @@ class Solver(Supervisor, Entity):
                         for step in proposed_plan.steps:
                             step.id = make_step_id(step.id)
 
+                        _supersedes = None
+                        if previous_attempts:
+                            _supersedes = getattr(previous_attempts[-1], "plan_id", None)
                         plan_payload = {
                             "mission_id": self.id,
                             "goal": self.goal,
                             "parent_step_id": self.parent_step_id or "",
+                            "plan_id": plan_id,
                             "steps": [
                                 {
                                     "id": step.id,
@@ -759,6 +772,8 @@ class Solver(Supervisor, Entity):
                                 } for step in proposed_plan.steps
                             ]
                         }
+                        if _supersedes:
+                            plan_payload["supersedes"] = _supersedes
                         await self.propagate_event(Events.PLAN_GENERATED, plan_payload)
 
                         execution_attempt += 1
@@ -862,11 +877,17 @@ class Solver(Supervisor, Entity):
                             else:
                                 self.context += _("\n[Raison de l'échec] {}. Vous devez adapter le prochain plan.").format(result.error_reason)
 
-                            await self.propagate_event(Events.PLAN_ABANDONED, {
+                            _abandon_payload = {
                                 "mission_id": self.id,
                                 "parent_step_id": self.parent_step_id or "",
-                                "reason": _("Échec (Tentative {}/{}).").format(execution_attempt, max_allowed)
-                            })
+                                "plan_id": plan_id,
+                                "reason": (str(getattr(result, "error_reason", "") or "").strip()
+                                           or _("Échec (Tentative {}/{}).").format(execution_attempt, max_allowed)),
+                            }
+                            _failed_step = self._last_failed_step_id()
+                            if _failed_step:
+                                _abandon_payload["failed_step_id"] = _failed_step
+                            await self.propagate_event(Events.PLAN_ABANDONED, _abandon_payload)
                             self._record_failure(
                                 fail_history,
                                 self.current_attempt.failure_class,
@@ -1201,6 +1222,7 @@ class Solver(Supervisor, Entity):
         child_solver_id: str,
         previous_attempts: Optional[List] = None,
         mission_history_tree: Optional[Any] = None,
+        plan_id: Optional[str] = None,
     ):
         root_solver = self._get_root_solver()
         mission_history_tree = mission_history_tree or (root_solver.execution_tree if root_solver else self.execution_tree)
@@ -1210,6 +1232,7 @@ class Solver(Supervisor, Entity):
                 child_solver_id,
                 previous_attempts=previous_attempts,
                 mission_history_tree=mission_history_tree,
+                plan_id=plan_id,
             )
         except TypeError as e:
             if "mission_history_tree" not in str(e):
@@ -1218,8 +1241,24 @@ class Solver(Supervisor, Entity):
                 f"[Solver:{self.id}] validate_plan : repli sur l'appel sans mission_history_tree ({e})."
             )
             return await self.parent.validate_plan(
-                plan, child_solver_id, previous_attempts=previous_attempts
+                plan, child_solver_id, previous_attempts=previous_attempts, plan_id=plan_id
             )
+
+    def _last_failed_step_id(self) -> Optional[str]:
+        """Id de la dernière étape en échec de la tentative courante (observabilité).
+
+        Sert au `plan.abandoned` : le front cible la branche concernée. None si
+        aucune étape n'a échoué (ex : échec avant exécution).
+        """
+        try:
+            for node in reversed(list(getattr(self.current_attempt, "nodes", []) or [])):
+                st = getattr(node, "status", None)
+                if (st == ExecutionStatus.FAILED
+                        or str(getattr(st, "value", st)).lower() == "failed"):
+                    return getattr(node, "step_id", None)
+        except Exception:
+            pass
+        return None
 
     def _get_root_solver(self) -> 'Solver':
         node = self

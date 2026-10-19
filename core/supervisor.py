@@ -14,6 +14,7 @@ class Supervisor(ABC):
         child_solver_id: str,
         previous_attempts: Optional[List[PlanAttempt]] = None,
         mission_history_tree: Optional[Any] = None,
+        plan_id: Optional[str] = None,
     ):
         """
         Valide un plan avant exécution (le "LLM Judge", voir

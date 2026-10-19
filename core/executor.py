@@ -80,6 +80,9 @@ class Executor:
             "started_at": datetime.fromtimestamp(node.started_at).isoformat() if node.started_at else None,
             "ended_at": datetime.fromtimestamp(node.ended_at).isoformat() if getattr(node, "ended_at", None) else None,
         }
+        _plan_id = getattr(self, "_current_plan_id", None)
+        if _plan_id:
+            meta["plan_id"] = _plan_id
         if node.tool_name:
             meta["tool_name"] = node.tool_name
         if node.tool_args:
@@ -88,6 +91,8 @@ class Executor:
 
     async def execute_plan(self, plan: Plan, current_context: str, current_attempt: PlanAttempt) -> SolverResult:
         Logger.info(f"[Executor] 🚀 Initialisation de l'exécution du plan : '{plan.goal}'")
+        # Écho de l'identité de plan dans chaque step.status_changed (observabilité hôte).
+        self._current_plan_id = getattr(current_attempt, "plan_id", None)
 
         user_responses: List[str] = []
         executed_steps_trace: List[str] = []

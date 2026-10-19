@@ -265,6 +265,19 @@ Types gérés, de bout en bout (déclaration → modèle) :
 
 Événements stables à logger côté hôte : `planner.start/finished`, `plan.generated`, `tools_manager.decision/execution/result`, `checkpoint.reached`, `breakout.occurred`, `execution.completed`, `learner.analyze_finished`. Voir `core/constants.py:31`, `transport/packet_models.py:39`.
 
+Cycle de vie des plans (ids déterministes, 2026-10-19) — pour un tracker exact,
+sans deviner l'ordre temporel :
+- `plan.proposed {mission_id, parent_step_id, solver_id, plan_id}` : émis dès qu'un
+  plan est proposé, AVANT la validation. Un plan `direct_answer` pur passe aussi par
+  `plan.proposed` (sa validation est sautée : `plan_validation_skipped`).
+- `plan_validation_decision` porte désormais `plan_id` (même id que le proposé).
+- `plan.generated` porte `plan_id` (+ `supersedes: <plan_id précédent>` quand ce plan
+  remplace une tentative antérieure). Seul un proposé ACCEPTÉ devient `plan.generated`.
+- `plan.abandoned` porte `plan_id`, la VRAIE `reason` (cause concrète, plus le
+  générique « Tentative X/Y ») et, si connue, `failed_step_id`.
+- `step.status_changed` re-émet `plan_id` (regroupement des étapes par instance).
+Tout est additif : un hôte qui ignore ces champs continue de fonctionner.
+
 Inspection des prompts (debug) : lancez avec `MANAGENT_RECORD_PROMPTS=1` —
 chaque prompt rendu est copié dans `prompts_log/` (dossier de données) avec
 la liste des variables (noms seuls, jamais les valeurs/secrets).
