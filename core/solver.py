@@ -513,11 +513,14 @@ class Solver(Supervisor, Entity):
                 # Stérile 2x de suite = résignation. Progrès + budget épuisé
                 # = rallonge jugée (root seul, plafond dur côté orchestrateur).
                 fail_history = []
-                # Recul solver : 2 échecs d'exécution/convergence de même classe
-                # = la stratégie est peut-être mauvaise, pas le plan. On la
-                # rafraîchit (re-faisabilité) au lieu de replanifier pareil.
+                # Recul solver : rafraîchit la stratégie (re-faisabilité) plutôt
+                # que de replanifier pareil (voir _recul_key_for pour les cas).
                 # Erreurs de variables → direct planner (pas de recul utile).
                 strategy_refreshed_key: Optional[str] = None
+                # Rejets consécutifs du superviseur (plan_rejected) : à 2, le
+                # planner ne sait plus quoi changer → recul solver. Remis à 0
+                # dès qu'un plan passe la validation.
+                _consecutive_supervisor_rejections = 0
                 # Anti faux-succès (Alerte 1) : cumul inter-tentatives.
                 seen_tool_steps_total = 0
                 material_success_total = 0                # Santé outils : même outil en échec N fois (toutes signatures)
@@ -535,25 +538,28 @@ class Solver(Supervisor, Entity):
                         self.context += _("\n[Abandon] {}.").format(_resign_why)
                         break
 
-                    # Recul solver : 2 échecs d'exécution/convergence de même
-                    # classe = peut-être la stratégie, pas le plan. On la
-                    # rafraîchit une fois par série avant de replanifier.
-                    if len(fail_history) >= 2:
-                        _c1 = str(fail_history[-1][0]).split(" :: ")[0]
-                        _c2 = str(fail_history[-2][0]).split(" :: ")[0]
-                        if _c1 == _c2 and _c1 in ("execution_failure", "convergence_failure"):
-                            if strategy_refreshed_key != _c1:
-                                strategy_refreshed_key = _c1
-                                try:
-                                    with self.runtime_state.execution_context.scope(entity_name="Feasibility", entity_role="Solver"):
-                                        _new_decision = await self._check_feasibility(similar_missions_context)
-                                    if getattr(_new_decision, "is_possible", True):
-                                        decision = _new_decision
-                                        Logger.info(f"[Solver:{self.id}] 🔄 Stratégie rafraîchie après 2 échecs {_c1}.")
-                                        self.context += _("\n[Recul] Nouvelle stratégie après échecs répétés : {}.").format(
-                                            getattr(decision, "refined_strategy", "")[:500])
-                                except Exception as _e:
-                                    Logger.warning(f"[Solver:{self.id}] Recul impossible ({_e}) — on garde l'ancienne stratégie.")
+                    # Recul solver — la stratégie est peut-être en cause, pas le
+                    # plan. Un seul recul par classe et par mission (anti-boucle),
+                    # puis on replanifie avec la stratégie rafraîchie :
+                    #  - convergence_failure : dès le 1er échec (plan exécuté,
+                    #    stratégie en cause) ;
+                    #  - execution_failure : après 2 échecs de même classe (inchangé) ;
+                    #  - plan_rejected : après 2 rejets consécutifs du superviseur
+                    #    (le planner n'arrive plus à changer d'approche seul).
+                    _recul_key = self._recul_key_for(fail_history, _consecutive_supervisor_rejections)
+                    if _recul_key and strategy_refreshed_key != _recul_key:
+                        strategy_refreshed_key = _recul_key
+                        try:
+                            with self.runtime_state.execution_context.scope(entity_name="Feasibility", entity_role="Solver"):
+                                _new_decision = await self._check_feasibility(similar_missions_context)
+                            if getattr(_new_decision, "is_possible", True):
+                                decision = _new_decision
+                                Logger.info(f"[Solver:{self.id}] 🔄 Stratégie rafraîchie (recul : {_recul_key}).")
+                                Logger.event("solver_recul", solver_id=self.id, reason=_recul_key)
+                                self.context += _("\n[Recul] Nouvelle stratégie après échecs répétés : {}.").format(
+                                    getattr(decision, "refined_strategy", "")[:500])
+                        except Exception as _e:
+                            Logger.warning(f"[Solver:{self.id}] Recul impossible ({_e}) — on garde l'ancienne stratégie.")
 
                     # Disjoncteur quota : le quota vide ne se répare pas en
                     # replanifiant. Stopper proprement au lieu de spiraler en 429.
@@ -746,9 +752,13 @@ class Solver(Supervisor, Entity):
                                 self.current_attempt.target_entity = "Planner"
                                 self.context += _("\n[Échec] Plan refusé par le Superviseur : {reason}").format(reason=rejection_reason)
                                 self._preexecution_failures += 1
+                                _consecutive_supervisor_rejections += 1
                                 if self._preexecution_failures >= MAX_PREEXECUTION_FAILURES:
                                     break
                                 continue
+
+                        # Plan accepté : la série de rejets du superviseur est cassée.
+                        _consecutive_supervisor_rejections = 0
 
                         for step in proposed_plan.steps:
                             step.id = make_step_id(step.id)
@@ -1352,6 +1362,33 @@ class Solver(Supervisor, Entity):
             fail_history.append((normalize_failure_signature(failure_class, reason), int(material)))
         except Exception:
             fail_history.append((normalize_failure_signature(failure_class, reason), 0))
+
+    @staticmethod
+    def _recul_key_for(fail_history, consecutive_supervisor_rejections: int) -> Optional[str]:
+        """Clé du recul stratégie (ou None). Pur, testable.
+
+        - convergence_failure : dès le 1er échec (le plan a été exécuté : c'est
+          la stratégie qui a échoué, pas la syntaxe du plan).
+        - execution_failure : après 2 échecs de même classe (comportement historique).
+        - plan_rejected : après 2 rejets consécutifs du superviseur (le planner
+          n'arrive plus à changer d'approche seul → problème stratégique).
+        """
+        key: Optional[str] = None
+        try:
+            if fail_history:
+                last = str(fail_history[-1][0]).split(" :: ")[0]
+                if last == "convergence_failure":
+                    key = "convergence_failure"
+                elif len(fail_history) >= 2:
+                    c1 = str(fail_history[-1][0]).split(" :: ")[0]
+                    c2 = str(fail_history[-2][0]).split(" :: ")[0]
+                    if c1 == c2 and c1 in ("execution_failure", "convergence_failure"):
+                        key = c1
+        except Exception:
+            key = None
+        if consecutive_supervisor_rejections >= 2:
+            key = key or "plan_rejected"
+        return key
 
     def _summarize_retry_progress(self, fail_history, max_allowed) -> str:
         """Résumé pour le juge de rallonge (pur)."""
