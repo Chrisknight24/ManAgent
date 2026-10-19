@@ -24,9 +24,7 @@ Rapports de missions passées JUGÉES (le juge peut se tromper) : pistes suggest
 
 ## REGISTRE (noms déjà produits)
 {% if variable_registry %}
-{% for name, meta in variable_registry.items() %}
-- **`$@_{{ name }}`** : {{ meta.description }} (source : {{ meta.source }})
-{% endfor %}
+{{ variable_registry | registry_compact('$@_') }}
 {% else %}
 [Registre vide : aucune variable à recopier pour l'instant.]
 {% endif %}

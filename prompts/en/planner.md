@@ -24,9 +24,7 @@ Reports from past JUDGED missions (the judge can be wrong): suggestive leads, ne
 
 ## REGISTRY (names already produced)
 {% if variable_registry %}
-{% for name, meta in variable_registry.items() %}
-- **`$@_{{ name }}`**: {{ meta.description }} (source: {{ meta.source }})
-{% endfor %}
+{{ variable_registry | registry_compact('$@_') }}
 {% else %}
 [Registry empty: no names to copy yet.]
 {% endif %}

@@ -28,7 +28,7 @@ lieu de trancher en silence.
 - **Contexte d'exécution** (traces utiles) :
 {{ final_context }}
 - **Registre des variables résolues** (usage interne) :
-{{ variable_registry }}
+{{ variable_registry | registry_compact }}
 
 ## SESSION CONTEXT
 

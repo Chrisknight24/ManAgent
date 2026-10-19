@@ -50,6 +50,34 @@ def args_signature(params: Any) -> str:
     return "; ".join(parts)
 
 
+def registry_compact(view: Any, prefix: str = "") -> str:
+    """Vue REGISTRE compacte (F-bloc 4).
+
+    Une ligne par variable : `- <prefix><nom> (type) : description — hint`.
+    Retire les champs de bruit (`timestamp`) et tronque les descriptions
+    longues. Tolérant aux vues sans `type`/`value_hint` (planner). Pur.
+    """
+    if not isinstance(view, dict) or not view:
+        return ""
+    lines = []
+    for name, meta in view.items():
+        meta = meta if isinstance(meta, dict) else {}
+        typ = meta.get("type")
+        hint = meta.get("value_hint")
+        desc = str(meta.get("description", "") or "").strip()
+        if len(desc) > 120:
+            desc = desc[:119] + "…"
+        head = f"- {prefix}{name}"
+        if typ:
+            head += f" ({typ})"
+        if desc:
+            head += f" : {desc}"
+        if hint:
+            head += f" — {hint}"
+        lines.append(head)
+    return "\n".join(lines)
+
+
 class PromptLoader:
     """
     Charge les prompts depuis des fichiers Markdown avec Jinja2 (ou un fallback basique).
@@ -94,6 +122,7 @@ class PromptLoader:
                 )
             )
             self.env_cache[lang].filters["args_sig"] = args_signature
+            self.env_cache[lang].filters["registry_compact"] = registry_compact
         return self.env_cache[lang]
 
     def _fallback_render(self, template_name: str, lang: str, kwargs: Dict[str, Any]) -> str:
