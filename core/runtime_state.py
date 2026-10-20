@@ -7,6 +7,7 @@ et permet la configuration dynamique depuis le frontend Qt.
 from core.i18n import _
 from typing import Dict, List, Optional, Any
 from core.execution_context import ExecutionContext
+from core.targets import TargetRegistry
 from embeddings.manager import EmbeddingProviderManager
 from utils.logger import Logger
 
@@ -28,6 +29,7 @@ class RuntimeState:
         self.presentator_detail_level = "brief"   # "brief" ou "detailed"
         self.current_signatures = []
         self.solver_registry: Dict[str, Dict] = {}
+        self.target_registry = TargetRegistry()
         self.current_mission_id = None
         self.depth_extensions_granted: Dict[str, int] = {}
         self.retry_extensions_granted: Dict[str, int] = {}
@@ -74,6 +76,13 @@ class RuntimeState:
             "plan_rejected": False,
             "is_novel": False,
         }
+
+    def reset_target_registry(self) -> None:
+        """Purge les liaisons de cibles (configure, reset, manifest update)."""
+        try:
+            self.target_registry.purge(all=True)
+        except Exception:
+            self.target_registry = TargetRegistry()
 
     def reset_usage_counters(self) -> None:
         """Remet à zéro les compteurs RAM (tokens, troncatures, attentes).

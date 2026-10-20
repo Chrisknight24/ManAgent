@@ -4,10 +4,11 @@ core/prompt_loader.py
 Chargeur de prompts avec templating Jinja2 et support multilingue.
 """
 
+import ast
 import os
 import re
 import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 try:
     from jinja2 import Environment, FileSystemLoader
@@ -78,6 +79,93 @@ def registry_compact(view: Any, prefix: str = "") -> str:
     return "\n".join(lines)
 
 
+class _UnsafeConditional(Exception):
+    """Condition non evaluable sans Jinja2 : on refuse plutot que fuiter."""
+
+
+def _eval_fallback_condition(expr: str, kwargs: Dict[str, Any]) -> bool:
+    text = str(expr or "").strip()
+    if not text:
+        raise _UnsafeConditional("condition vide")
+
+    context = dict(kwargs)
+
+    def _defined(match: re.Match) -> str:
+        name = match.group(1)
+        negated = bool(match.group(2))
+        key = f"__undefined_{name}" if negated else f"__defined_{name}"
+        context[key] = (name not in kwargs) if negated else (name in kwargs)
+        return key
+
+    def _none(match: re.Match) -> str:
+        name = match.group(1)
+        negated = bool(match.group(2))
+        key = f"__not_none_{name}" if negated else f"__none_{name}"
+        context[key] = (kwargs.get(name) is not None) if negated else (kwargs.get(name) is None)
+        return key
+
+    text = re.sub(
+        r"\b([A-Za-z_]\w*)\s+is\s+(not\s+)?defined\b",
+        _defined,
+        text,
+    )
+    text = re.sub(
+        r"\b([A-Za-z_]\w*)\s+is\s+(not\s+)?none\b",
+        _none,
+        text,
+    )
+
+    try:
+        tree = ast.parse(text, mode="eval")
+    except SyntaxError as exc:
+        raise _UnsafeConditional(f"condition illisible: {expr!r}") from exc
+
+    def evaluate(node: ast.AST) -> Any:
+        if isinstance(node, ast.Name):
+            return context.get(node.id, False)
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.BoolOp):
+            values = [evaluate(value) for value in node.values]
+            if isinstance(node.op, ast.And):
+                return all(values)
+            if isinstance(node.op, ast.Or):
+                return any(values)
+            raise _UnsafeConditional(f"operateur non supporte: {expr!r}")
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            return not evaluate(node.operand)
+        if isinstance(node, ast.Compare):
+            left = evaluate(node.left)
+            for operator, comparator in zip(node.ops, node.comparators):
+                right = evaluate(comparator)
+                if isinstance(operator, ast.Eq):
+                    ok = left == right
+                elif isinstance(operator, ast.NotEq):
+                    ok = left != right
+                elif isinstance(operator, ast.Is):
+                    ok = left is right
+                elif isinstance(operator, ast.IsNot):
+                    ok = left is not right
+                elif isinstance(operator, ast.In):
+                    ok = left in right
+                elif isinstance(operator, ast.NotIn):
+                    ok = left not in right
+                else:
+                    raise _UnsafeConditional(f"comparaison non supportee: {expr!r}")
+                if not ok:
+                    return False
+                left = right
+            return True
+        raise _UnsafeConditional(f"expression non supportee: {expr!r}")
+
+    try:
+        return bool(evaluate(tree.body))
+    except _UnsafeConditional:
+        raise
+    except Exception as exc:
+        raise _UnsafeConditional(f"condition non evaluable: {expr!r}") from exc
+
+
 class PromptLoader:
     """
     Charge les prompts depuis des fichiers Markdown avec Jinja2 (ou un fallback basique).
@@ -144,14 +232,69 @@ class PromptLoader:
         if content is None:
             raise FileNotFoundError(f"Template {template_name} non trouvé dans {template_dirs}")
             
-        # Remplacement très basique des {{ var }}
-        for k, v in kwargs.items():
-            content = re.sub(r'\{\{\s*' + re.escape(k) + r'\s*\}\}', str(v), content)
-            
-        # Suppression basique des blocs if
-        content = re.sub(r'\{%.*?%\}', '', content)
-        
-        return content
+        content = re.sub(r"\{#.*?#\}", "", content, flags=re.S)
+        parts = re.split(r"(\{%.*?%\}|\{\{.*?\}\})", content, flags=re.S)
+        stack: List[Dict[str, Any]] = []
+        output: List[str] = []
+
+        def is_active() -> bool:
+            return all(frame["active"] for frame in stack)
+
+        def render_text(piece: str) -> str:
+            def replace(match: re.Match) -> str:
+                key = match.group(1)
+                return str(kwargs[key]) if key in kwargs else ""
+
+            return re.sub(r"\{\{\s*([A-Za-z_]\w*)\s*\}\}", replace, piece)
+
+        for part in parts:
+            if part.startswith("{%") and part.endswith("%}"):
+                tag = part[2:-2].strip()
+                if not tag:
+                    continue
+                head = tag.split(None, 1)[0]
+                rest = tag[len(head):].strip()
+                if head == "if":
+                    parent = is_active()
+                    condition = _eval_fallback_condition(rest, kwargs) if parent else False
+                    stack.append({"active": condition, "taken": condition, "kind": "if"})
+                elif head == "elif":
+                    if not stack or stack[-1].get("kind") != "if":
+                        raise _UnsafeConditional("elif sans if")
+                    frame = stack[-1]
+                    parent = all(item["active"] for item in stack[:-1])
+                    if parent and not frame["taken"]:
+                        condition = _eval_fallback_condition(rest, kwargs)
+                        frame["active"] = condition
+                        frame["taken"] = condition
+                    else:
+                        frame["active"] = False
+                elif head == "else":
+                    if not stack or stack[-1].get("kind") != "if":
+                        raise _UnsafeConditional("else sans if")
+                    frame = stack[-1]
+                    parent = all(item["active"] for item in stack[:-1])
+                    frame["active"] = parent and not frame["taken"]
+                    frame["taken"] = True
+                elif head == "endif":
+                    if not stack or stack[-1].get("kind") != "if":
+                        raise _UnsafeConditional("endif sans if")
+                    stack.pop()
+                else:
+                    raise _UnsafeConditional(f"balise non supportee: {tag!r}")
+            elif part.startswith("{{") and part.endswith("}}"):
+                if is_active():
+                    output.append(render_text(part))
+            else:
+                if is_active():
+                    output.append(part)
+
+        if stack:
+            raise _UnsafeConditional("bloc conditionnel non ferme")
+        rendered = "".join(output)
+        if "{{" in rendered or "{%" in rendered:
+            raise _UnsafeConditional("expression non resolue")
+        return rendered
 
     def load(self, template_name: str, lang: Optional[str] = None, **kwargs) -> str:
         """

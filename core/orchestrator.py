@@ -2440,6 +2440,7 @@ class Orchestrator(Supervisor, Entity):
             if not future.done():
                 future.set_result(_('{"result": false, "message": "Exécution interrompue par l\'utilisateur."}'))
         self.pending_tool_calls.clear()
+        self.runtime_state.reset_target_registry()
         return ResponsePacket(type="response", status="success", payload={"message": _("Stop signal broadcasted")})
 
     async def _handle_chat_reset(self):
@@ -2459,6 +2460,7 @@ class Orchestrator(Supervisor, Entity):
                 future.set_result(_('{"result": false, "message": "Exécution interrompue par réinitialisation."}'))
         self.pending_tool_calls.clear()
         self.runtime_state.reset_execution_markers()
+        self.runtime_state.reset_target_registry()
         self.runtime_state.current_mission_id = None
         return ResponsePacket(type="response", status="success", payload={"message": _("Chat reset handled successfully")})
 
@@ -2768,6 +2770,7 @@ class Orchestrator(Supervisor, Entity):
         for _m in _env_missing:
             Logger.warning(f"[Orchestrator] Variable d'environnement absente : {_m} (chaîne vide utilisée).")
         self.runtime_state.cancel_requested = False
+        self.runtime_state.reset_target_registry()
         if hasattr(self.runtime_state, "cancel_requested_for_turn"):
             self.runtime_state.cancel_requested_for_turn = False
         self.runtime_state.system_prompt = payload.get("system_prompt", "")

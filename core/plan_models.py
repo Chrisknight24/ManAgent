@@ -105,6 +105,11 @@ class PlanStep(BaseModel):
         description=_("Description de ce que représente cette donnée dans le registre.")
     )
 
+    output_target_name: Optional[str] = Field(
+        None,
+        description=_("Nom local de cible produit par cette etape (optionnel, sans prefixe data_/bool_).")
+    )
+
     execute_if: Optional[str] = Field(
         None,
         description=_("Condition déterministe STRICTEMENT booléenne. Ex: '$@_bool_nom == True'.")

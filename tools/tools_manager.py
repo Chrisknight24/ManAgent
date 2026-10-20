@@ -28,6 +28,11 @@ except Exception:
         pass
 from core.constants import Events
 from core.host_manifest import HostManifest
+from core.target_contract import (
+    TargetContract,
+    lint_target_payload,
+    parse_target_contract,
+)
 
 
 class ToolsManager(Entity):
@@ -49,6 +54,7 @@ class ToolsManager(Entity):
         self.runtime_state = runtime_state
         self._host_manifest: Optional[HostManifest] = None
         self._tools: Dict[str, Dict] = {}
+        self._target_contracts: Dict[str, TargetContract] = {}
         self._tool_handlers: Dict[str, Callable] = {}
         self._internal_tool_handlers: Dict[str, Callable] = {}
         self._internal_tools_metadata: Dict[str, Dict] = {}
@@ -431,6 +437,23 @@ class ToolsManager(Entity):
         if host_manifest.tools:
             self.load_tools_from_payload(host_manifest.tools)
 
+        manifest_targets = None
+        if isinstance(manifest_data, dict):
+            manifest_targets = manifest_data.get("targets")
+        if manifest_targets is None:
+            manifest_targets = getattr(host_manifest, "targets", None)
+        has_contracts = any(
+            isinstance(tool, dict) and tool.get("target_contract")
+            for tool in (host_manifest.tools or [])
+        )
+        if manifest_targets and not has_contracts:
+            Logger.warning(
+                "[ToolsManager] HostManifest declares 'targets' without any "
+                "tool 'target_contract'; targets stay inert."
+            )
+        if self.runtime_state and hasattr(self.runtime_state, "reset_target_registry"):
+            self.runtime_state.reset_target_registry()
+
         Logger.info(
             f"[ToolsManager] 🌐 HostManifest enregistré : "
             f"host='{host_manifest.host_name}' v{host_manifest.host_version}, "
@@ -446,7 +469,18 @@ class ToolsManager(Entity):
             return self.runtime_state.host_manifest
         return None
 
-    def register_tool(self, name: str, role: str, description: str, parameters_schema: dict, source: str = "external", kind: str = "action", returns: Optional[List[Dict]] = None, effects: Optional[str] = None, effects_timeout_ms: Optional[int] = None) -> None:
+    def get_target_contract(self, tool_name: str) -> Optional[TargetContract]:
+        """Contrat valide d'un outil, ou None si absent/invalide."""
+        return self._target_contracts.get(tool_name)
+
+    def has_target_contracts(self) -> bool:
+        """True si au moins un contrat effectif est enregistre."""
+        return any(contract.is_effective for contract in self._target_contracts.values())
+
+    def target_contract_names(self) -> List[str]:
+        return sorted(self._target_contracts)
+
+    def register_tool(self, name: str, role: str, description: str, parameters_schema: dict, source: str = "external", kind: str = "action", returns: Optional[List[Dict]] = None, effects: Optional[str] = None, effects_timeout_ms: Optional[int] = None, target_contract: Optional[Dict[str, Any]] = None) -> None:
         try:
             timeout_ms = int(effects_timeout_ms) if effects_timeout_ms is not None else None
             if timeout_ms is not None and timeout_ms <= 0:
@@ -464,6 +498,22 @@ class ToolsManager(Entity):
             "effects": (effects or "").strip().lower() or None,
             "effects_timeout_ms": timeout_ms,
         }
+        if target_contract is None:
+            self._target_contracts.pop(name, None)
+        else:
+            result = parse_target_contract(
+                target_contract,
+                tool_name=name,
+                parameters_schema=parameters_schema,
+            )
+            for warning in result.warnings:
+                Logger.warning(f"[ToolsManager] target_contract: {warning}")
+            if result.ok and result.contract is not None:
+                self._target_contracts[name] = result.contract
+            else:
+                self._target_contracts.pop(name, None)
+                for error in result.errors:
+                    Logger.error(f"[ToolsManager] target_contract: {error}")
         Logger.debug(f"[ToolsManager] Outil enregistré : {name} (source={source}, kind={kind})")
 
     def get_tool_timeout_ms(self, tool_name: str) -> Optional[int]:
@@ -515,6 +565,8 @@ class ToolsManager(Entity):
         return uris
 
     def load_tools_from_payload(self, tools_payload: List[Dict]) -> None:
+        for warning in lint_target_payload(tools_payload):
+            Logger.warning(f"[ToolsManager] target lint: {warning}")
         for tool_def in tools_payload:
             name = tool_def.get("name")
             if not name:
@@ -529,6 +581,7 @@ class ToolsManager(Entity):
                 returns=tool_def.get("returns"),
                 effects=tool_def.get("effects"),
                 effects_timeout_ms=tool_def.get("effects_timeout_ms"),
+                target_contract=tool_def.get("target_contract"),
             )
 
     async def get_tools_view(self, goal_query: str = None) -> List[Dict]:

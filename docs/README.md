@@ -14,6 +14,7 @@ contract; the rest is for maintainers.
 | Understand effects and alignment | [ALIGNMENT](ALIGNMENT.md) | FR |
 | Build the Windows executable | [BUILD_EXE](BUILD_EXE.md) | FR |
 | Understand the target registry design | [TARGET_REGISTRY](TARGET_REGISTRY.md) | FR |
+| Follow the target registry implementation plan | [TARGET_ROADMAP](TARGET_ROADMAP.md) | FR |
 
 ## Language policy
 
