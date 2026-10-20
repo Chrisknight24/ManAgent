@@ -1,5 +1,9 @@
 # CHANTIER TARGET — cadrage (à valider avant tout code)
 
+> **Remplacé par [`TARGET_REGISTRY.md`](TARGET_REGISTRY.md)** (vision v1.0,
+> arbitrages de Christian). Ce fichier est conservé pour l'historique du
+> cadrage ; ne pas s'en servir comme source de vérité.
+
 Statut : cadrage uniquement. Aucun code. Chantier architectural séparé des correctifs
 A1-A6 (prompts/crédit) et de l'hygiène. Prérequis : figer le contrat hôte AVANT de coder.
 

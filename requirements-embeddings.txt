@@ -1,0 +1,7 @@
+# ManAgent — optional local embeddings (heavy: torch + models)
+# Install: pip install -r requirements-embeddings.txt
+# Not needed for the default `lite` or for `remote` embeddings.
+-r requirements.txt
+sentence-transformers>=2.0
+torch>=2.0
+transformers>=4.40

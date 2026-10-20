@@ -1,11 +1,15 @@
 # HOST_CONTRACT — How to use ManAgent without reading its code
 
+> Language: **English** · [Français](../HOST_CONTRACT.md).
+> Both versions follow the same section numbers. The French version is the
+> primary reference; if they differ, `docs/HOST_CONTRACT.md` wins.
+
 ManAgent is a black box: you use it without looking inside.
 The host (Qt, Web, CLI) NEVER touches the `.py` files. It starts a process,
 sends JSON on stdin, reads JSON on stdout.
 
 Full reference: `docs/en/PROTOCOL.md`. This contract is the stable summary
-for integrators. French version: `docs/HOST_CONTRACT.md`.
+for integrators.
 
 ## 1. Launch
 
@@ -24,6 +28,9 @@ Command:
   `{"type":"event","event":"runtime.ready","payload":{}}`
 - Version handshake: `runtime.configure` sends `"protocol_version": "1"`
   (top level); `runtime.configured` echoes it. Mismatch = loud error, no session.
+- API keys: never hardcode. Use `"api_key": "env:MY_KEY_VAR"` (a list is
+  accepted for rotation). A missing variable = empty string + warning, never a
+  crash.
 
 Healthcheck: no `runtime.ready` within 15 s → kill and restart.
 
@@ -54,35 +61,74 @@ Rule: `action` is always lowercase with a dot (`runtime.configure`, `tool.result
 ## 3. Mandatory sequence
 
 1. `runtime.configure` — providers + keys + system prompt. Always first.
+```json
+{"type":"request","action":"runtime.configure","payload":{
+  "system_prompt":"You are a helpful assistant.",
+  "providers":[{"name":"groq","api_key":"gsk_xxx","model":"llama-3.3-70b-versatile"}]
+}}
+```
 2. `host.manifest.register` — introduce the host (see `docs/host.manifest.example.json`).
+   Each tool declares `kind`: `"perception"` (reads the world without changing it)
+   or `"action"` (changes it). Without `kind` it is treated as an action (safe default).
+   The vocabulary is open: a robot declares the same way (`lidar_scan` = perception...).
 3. `chat.send` — send missions (`content` + optional `forced_provider`/`forced_model`,
    without them the brain auto-routes by capabilities).
 4. Listen to `response.chunk` / `response.completed` + `plan.generated` / `execution.completed`.
+
+## 3a. Reading the world (`perceive_understand` meta-tool)
+
+Rule: the planner NEVER calls a `[perception]` tool directly.
+To look before deciding, or verify after acting, it uses:
+```json
+{"tool_name": "perceive_understand", "question": "where is the door?",
+ "source_tool": "lidar_scan", "source_args": {},
+ "format_response": "direction and distance in meters"}
+```
+- `question`: what to look for, in natural language (required).
+- `source_tool` + `source_args`: which host tool to call (or `source_data`: an
+  already-available variable).
+- `format_response`: strict expected format (empty = free-form report).
+The system calls the source, has an LLM interpret it, and returns the value.
 
 ## 3b. Embeddings (lite / local / remote)
 
 The host picks the mode in `runtime.configure`:
 ```json
-{"embeddings":{"mode":"lite"}}
+{"type":"request","action":"runtime.configure","payload":{
+  "system_prompt":"...",
+  "providers":[...],
+  "embeddings":{"mode":"lite"}
+}}
 ```
 - `"lite"` (default): 0 MB, offline, lower accuracy. Enough to start.
 - `"local"`: e.g. `"model":"sentence-transformers/all-MiniLM-L6-v2"`. Accurate,
   ~90–500 MB downloaded on first run into `%APPDATA%/ManAgent/models`.
-- `"remote"`: API-based (`model`, `api_key`, `base_url`). Accurate, 0 MB local, billed per use.
+- `"remote"`: `"model":"text-embedding-3-small","api_key":"sk-...","base_url":"https://api.openai.com/v1"`.
+  Accurate, 0 MB local, billed per use.
+- Advanced (legacy) format:
+  `"embedding_models":[{"type":"hash"|"sentence-transformer"|"remote",...}],"active_embedding_model":"..."`.
 
-`runtime.configured` echoes `embeddings_mode` + `active_embedding_model`.
+`runtime.configured` and the associated event echo `embeddings_mode` +
+`active_embedding_model`. The host may declare its capabilities in the
+manifest: `"capabilities":["mouse","keyboard","embeddings-local"]`.
 
 ## 3c. Model management (setup UI — query, never hardcode)
 
-1. `embeddings.catalog` → list with sizes + installed flags. Never hardcode a model host-side.
-2. Download button → `embeddings.prepare {"id":...}` → `embedding.download_started/finished/error`.
-   `force:true` re-downloads, `set_default:true` activates immediately.
-3. Default button → `embeddings.set_default` → hot swap (+ `embedding.active_changed`).
-   Clear error if not installed. One memory space per model, old data preserved.
-4. Cancel button → `embeddings.cancel` (auto-resume on next prepare). Disk space is
-   checked before downloading, with a clear error if insufficient.
+Recommended sequence for the host's model screen:
+1. `{"action":"embeddings.catalog","payload":{}}` → `{"models":[{"id","display_name","type","languages","size_mb","dim","installed","size_bytes","active"}]}`. Fill the list + sizes + installed state. Never hardcode a model host-side.
+2. Download button → `{"action":"embeddings.prepare","payload":{"id":"..."}}` → events `embedding.download_started/finished/error` (+ progression `EMBEDDING_MODEL_LOADING/...` for local). `force:true` re-downloads, `set_default:true` activates immediately.
+3. Default button → `{"action":"embeddings.set_default","payload":{"id":"..."}}` → hot swap (response + `embedding.active_changed` event). Clear error if not installed ("call embeddings.prepare first"). One memory space per model: no mixing, old data preserved.
+4. Cancel button (during a download) → `{"action":"embeddings.cancel","payload":{"id":"..."}}` (auto-resume on next prepare). `prepare` checks disk space first and refuses clearly if insufficient.
+5. One-shot alternative: `runtime.configure {"embeddings":{"mode":"lite|local|remote",...}}` (see §3b).
 
-## 3d. Rigid tool descriptions (mandatory, imposed by ManAgent)
+## 3d. World name (alias, optional)
+
+State discovery (`world`) shows a stable fictional target because the world has
+no inventory: `"this_world"` by default. For a business name (e.g. `"workshop"`,
+`"line-3"`), declare `"metadata": {"world_alias": "workshop"}` in the manifest.
+No new field: `metadata` is free-form.
+
+## 3e. Rigid tool descriptions (mandatory, imposed by ManAgent)
 
 The brain only sees your descriptions. Vague = mechanical hallucination,
 not bad will. Absolute rules for every declared tool:
@@ -110,7 +156,7 @@ not bad will. Absolute rules for every declared tool:
    The brain follows descriptions as best it can; if nothing is clear,
    it guesses — mechanically.
 
-## 3e. Tool effects (optional)
+## 3f. Tool effects (optional)
 
 Each tool may declare `effects`: `"deterministic"` (the reported result
 always equals the real effect) or `"uncertain"` (they may differ).
@@ -128,7 +174,7 @@ and pays zero extra verification. Details: `docs/ALIGNMENT.md`.
   otherwise. The brain never blocks: client timeout = `max_wait_ms`
   + margin.
 
-## 3f. World state (optional, recommended for visual hosts)
+## 3g. World state (optional, recommended for visual hosts)
 
 So the brain knows "where it is" without guessing:
 - Either declare `world_snapshot: {source_tool, source_args, max_chars}` (manifest metadata or environment): source read on demand, capped text.
@@ -137,7 +183,7 @@ So the brain knows "where it is" without guessing:
 - Read points: before feasibility, before each plan, before each convergence (never judged as proof, context only).
 - Documented `get_world_state` convention here: plain text return or `{summary_text, full}` (summary in prompt, detail via PD).
 
-## 3g. Active wait per call (optional)
+## 3h. Active wait per call (optional)
 
 For gestures whose effect takes time (launch an app, then type into it):
 `await_change` (optional, boolean) per `mouse`/`keyboard` call. After the
@@ -218,6 +264,7 @@ Your tool and field names stay free.
 Handled types, end to end (declaration → model):
 
 | Family | Examples | Actual handling |
+|---|---|---|
 | `image/*` | jpeg, png, webp, gif, bmp | pixels to the model, if the model has vision, else clear refusal |
 | `application/pdf` | pdf | document to the model |
 | `video/*`, `audio/*` | mp4, mp3 | stored as assets, not yet sent to the model |
@@ -225,8 +272,10 @@ Handled types, end to end (declaration → model):
 
 ## 6. Observability
 
-Stable events to log host-side: `plan.generated`, `tools_manager.decision/execution/result`,
-`checkpoint.reached`, `breakout.occurred`, `execution.completed`, `learner.analyze_finished`.
+Stable events to log host-side: `planner.start/finished`, `plan.generated`,
+`tools_manager.decision/execution/result`, `checkpoint.reached`,
+`breakout.occurred`, `execution.completed`, `learner.analyze_finished`.
+See `core/constants.py` and `transport/packet_models.py`.
 
 Plan lifecycle (deterministic ids, 2026-10-19) — for an exact tracker without
 guessing the temporal order:
@@ -241,19 +290,51 @@ guessing the temporal order:
 - `step.status_changed` re-emits `plan_id` (group steps by plan instance).
 All additive: hosts that ignore these fields keep working.
 
-Token usage: every `llm_call` carries `usage = {prompt_tokens, completion_tokens, total_tokens, source}`
-with `source` = `real` (provider figure) or `estimated` (local ~4 chars = 1 token). Never invented.
-Two shapes, do not mix:
-- Per mission (flat keys): `stats.get {"mission_id":"m123"}` → `{"mission_id":"m123","found":true,"prompt_tokens":1200,"completion_tokens":800,"total_tokens":2000,"calls":5,"real_calls":4,"estimated_calls":1}`.
-- Global (nested: read `total.*`): `stats.get {}` → `{"found":true,"total":{"prompt_tokens":...,"completion_tokens":...,"total_tokens":...,"calls":...},"by_mission":{"m123":{...}},"truncations":{"Plan":1}}`.
+Prompt inspection (debug): launch with `MANAGENT_RECORD_PROMPTS=1` — every
+rendered prompt is copied into `prompts_log/` (data folder) with the variable
+names only (never the values or secrets).
+
+Living world via discovery: authorized entities (solver, planner in retry,
+convergence) may request `world` (`inspect_state`, `locate_target`,
+`verify_effect`) when the data at hand is not enough — never systematically.
+Host heads-up: each call arrives as `tool.requested` as usual; nothing new to wire.
+
+## 7. Plan-first + rules
+
+ManAgent always answers with a validated plan. The user can constrain it with
+`rules.md` (human confirmation, rejections, risk levels). The host does not need
+to read the prompts.
+
+Dev (file): edit `rules.md` + restart. Prod (exe, no file): send
+`runtime.configure {"rules_text":"..."}` once, or `rules.set` live + `rules.get`
+to read it back. The in-memory override wins over the file. Empty = refused with
+a clear error.
+
+## 7b. Token usage
+
+Every `llm_call` carries `usage = {prompt_tokens, completion_tokens, total_tokens, source}`
+where `source` is `real` (provider figure), `estimated` (local ~4 chars = 1 token)
+or absent. Never invented: if the provider says nothing, we estimate and say so.
+
+Host query — two shapes, do not mix:
+- Per mission (flat keys):
+```json
+{"type":"request","action":"stats.get","payload":{"mission_id":"m123"}}
+→ {"mission_id":"m123","found":true,"prompt_tokens":1200,"completion_tokens":800,"total_tokens":2000,"calls":5,"real_calls":4,"estimated_calls":1}
+```
+- Global (nested: read `total.*`):
+```json
+{"type":"request","action":"stats.get","payload":{}}
+→ {"found":true,"total":{"prompt_tokens":1200,"completion_tokens":800,"total_tokens":2000,"calls":5},"by_mission":{"m123":{...}},"truncations":{"Plan":1}}
+```
 Unknown mission → `found:false` + zeros, no error.
 
-Rules: file `rules.md` for dev (edit + restart). Prod (exe): `runtime.configure {"rules_text":"..."}` once,
-or `rules.set` live + `rules.get` to read back. Memory override wins over file.
+## 7c. Skills: who decides the numbers
 
-## 6b. Skills: who decides the numbers
-
-Defaults: automation after **2** consecutive successes, 1 shadow trial before prod, quarantine after **3** failures, max **3** repairs. These are displayed defaults — you decide for your context.
+By default, ManAgent creates an automation after **2** consecutive successes,
+tests it once as a shadow, quarantines it after **3** failures, and repairs it at
+most **3** times. These numbers are displayed defaults — you decide for your
+context.
 
 | Setting | Default | Plain meaning |
 |---|---|---|
@@ -269,30 +350,56 @@ Defaults: automation after **2** consecutive successes, 1 shadow trial before pr
 2. **Tool sensitivity**: `"sensitivity": "high"` on a tool (bank transfer) → the automation becomes strict by itself (thresholds halved). `"low"` → relaxed (×2). Default = standard.
 3. **Per skill**: `"skill_governance": {"skills": {"skill.transfer.send": {"circuit_breaker_max_failures": 1}}}` (IDs come from `skill.list_request`).
 
-Bank (strict): `{"tools": [{"name": "transfer.send", "sensitivity": "high", "requires_env": ["session_auth"]}], "skill_governance": {"max_repairs": 1}}`.
-Demo (relaxed): `{"skill_governance": {"circuit_breaker_max_failures": 5, "max_repairs": null}}`.
-Golden rule: an imported automation starts as shadow (never instant trust). A v2 replaces v1 only with more proof.
+Bank (strict, one failure is enough):
+```json
+{"host_name": "bank", "tools": [{"name": "transfer.send", "sensitivity": "high", "requires_env": ["session_auth"]}], "skill_governance": {"max_repairs": 1}}
+```
+Demo (relaxed, experimenting):
+```json
+{"host_name": "demo", "skill_governance": {"circuit_breaker_max_failures": 5, "max_repairs": null}}
+```
+Golden rule: an imported automation starts as shadow (never instant trust). A v2 replaces v1 only with more proof (margin above).
 
-## 6c. Exploration (tunable limits)
+## 7d. Exploration (tunable limits)
 
-When the brain lacks info, it explores (defaults: 5 back-and-forths, 10 steps). Hitting the ceiling emits `discovery.ceiling_hit`. To explore more:
+When the brain lacks info, it explores (defaults: 5 back-and-forths, 10 steps).
+Hitting the ceiling emits `discovery.ceiling_hit`. To explore more:
 ```json
 {"type":"request","action":"runtime.configure","payload":{"discovery":{"max_iterations":8,"max_session_steps":12}}}
 ```
 Clamped 1..20, defaults otherwise. Hard ceiling: 20 (no infinite loops).
 
-## 6d. Embeddings: who uses your model, how much RAM
+## 7e. Embeddings: who uses your model, how much RAM
 
-Your chosen model serves EVERYTHING: mission memory, lessons (write AND read), skill profiles. One space at a time, never mixed. Lessons from another model are skipped with a log (dimension guard).
+Your chosen model (`embeddings.mode` + catalog) serves EVERYTHING: mission
+memory, lessons (write AND read), skill profiles. One space at a time, never
+mixed. Lessons from another model are skipped with a log (dimension guard).
 
-Approximate RAM: `lite` (default) 0 MB offline · MiniLM/e5 ~500 MB · BGE-M3 ~2.3 GB · `remote` 0 MB local, billed per use. 1 GB+ in dev with BGE-M3 is normal (torch + weights). To slim down: `lite` or `remote`.
+Approximate RAM:
+| Model | RAM |
+|---|---|
+| `lite` (default) | 0 MB, offline |
+| MiniLM L6 / multilingual / e5-small | ~500 MB |
+| BGE-M3 | ~2.3 GB |
+| `remote` (API) | 0 MB local, billed per use |
 
-## 7. Secrets
-
-Never hardcode keys: `"api_key": "env:MY_KEY_VAR"` (lists supported for rotation).
-Missing variable = empty string + warning, never a crash.
+1 GB+ in dev with BGE-M3 is normal (torch + weights). To slim down: `lite` or `remote`.
 
 ## 8. Compatibility
 
-Only optional fields are added; an existing action is never renamed without a
-major version bump. `protocol_version` mismatch = loud error, no session.
+ManAgent exposes its version via `pyproject.toml`. The host sends `host_version`
+in the manifest. Rule: only optional fields are added; an existing action is
+never renamed without a major version bump. `protocol_version` mismatch = loud
+error, no session.
+
+## 9. QProcess checklist (Qt)
+
+- `QProcess::start(MANAGENT_PYTHON, {MANAGENT_PATH})`, `setWorkingDirectory(managentDir)`
+- `write(json + "\n")`, `readLine()` → `QJsonDocument::fromJson`
+- `runtime.ready` timeout: 15 s. `chat.send` timeout: mission-dependent, listen to `heartbeat`.
+- Never parse stdout as text; always parse it as JSON, line by line.
+- v0 rule: only process lines that start with `{` (safety belt).
+  ManAgent logs already go to stderr (verified: only JSON on stdout); keep the
+  filter as belt and braces.
+- Never read the `.py` files; use this contract + `docs/en/PROTOCOL.md` +
+  `docs/host.manifest.example.json`.

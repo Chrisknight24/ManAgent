@@ -12,6 +12,9 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
 
 # Runtime local — ne jamais versionner (1)
 memory.db
@@ -21,7 +24,6 @@ memory.db
 execution_trees/
 observability/
 observability_report.html
-observability/*.jsonl
 data/*.jsonl
 
 # Build / packaging (ne jamais versionner : reconstruit a chaque cuisson)

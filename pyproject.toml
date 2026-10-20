@@ -16,6 +16,11 @@ dependencies = [
   "google-genai>=1.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Chrisknight24/ManAgent"
+Repository = "https://github.com/Chrisknight24/ManAgent"
+Issues = "https://github.com/Chrisknight24/ManAgent/issues"
+
 [project.optional-dependencies]
 embeddings = ["sentence-transformers>=2.0", "torch>=2.0", "transformers>=4.40"]
 test = ["pytest>=8.0", "pytest-asyncio>=0.23"]
@@ -26,4 +31,4 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 110
-target-version = "py312"
+target-version = "py310"

@@ -6,7 +6,8 @@
 ## Entrée
 - `main.py` — démarre tout : transport + orchestrateur, boucle de lecture JSON.
 - `managent.spec`, `tools/build_exe.py` — recette + script de cuisson de l'exe.
-- `pyproject.toml`, `requirements.txt` — dépendances. `pytest.ini` — réglage tests.
+- `pyproject.toml` — dépendances + réglage pytest. `requirements.txt` (core), `requirements-dev.txt` (tests), `requirements-embeddings.txt` (embeddings locaux optionnels).
+- `.github/` — templates issue/PR. `CHANGELOG.md`, `SECURITY.md`, `CONTRIBUTING.md` — vie du dépôt.
 
 ## Cerveau (core/)
 - `core/orchestrator.py` — le chef : reçoit les actions (§5 du protocole), coordonne.
@@ -34,4 +35,4 @@
 
 ## Config et docs (à côté du code, modifiables sans recompiler)
 - `rules.md` — règles des plans (confirmations, rejets). `memory.db` — base locale (jamais sur git).
-- `docs/` — `PROTOCOL.md` (le vrai protocole), `HOST_CONTRACT.md` (guide hôte), `BUILD_EXE.md` (cuisson), `host.manifest.example.json`, `FILES.md` (cette page).
+- `docs/` — index `README.md` ; `PROTOCOL.md` (le vrai protocole), `HOST_CONTRACT.md` (guide hôte), `BUILD_EXE.md` (cuisson), `TARGET_REGISTRY.md` (vision registre de cibles), `host.manifest.example.json` + `.schema.json`, `FILES.md` (cette page). `docs/en/` = traductions hôte/protocole/déploiement. `docs/legacy/` = archives.

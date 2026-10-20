@@ -14,6 +14,8 @@ cd C:\... \ManAgent
 .venv\Scripts\activate
 pip install pyinstaller
 pip install -r requirements.txt
+# version full (embeddings locaux) uniquement :
+# pip install -r requirements-embeddings.txt
 ```
 
 ## 2. Fichiers à créer (mission suivante, je les prépare)

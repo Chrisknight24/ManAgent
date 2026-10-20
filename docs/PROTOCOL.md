@@ -1,7 +1,7 @@
 # PROTOCOL — Parler à ManAgent (v2, depuis le code réel)
 
 > Document source de vérité, écrit depuis `core/orchestrator.py`.
-> L'ancien `protocol.md` est périmé (voir `protocol.legacy.md`).
+> L'ancien `protocol.md` est périmé (voir `legacy/protocol.legacy.md`).
 > Règle : une ligne = un JSON. Côté hôte, ne lire que les lignes qui commencent par `{`.
 
 ## 1. En 30 secondes

@@ -1,5 +1,9 @@
 # HOST_CONTRACT — Comment utiliser ManAgent sans lire son code
 
+> Langue : **Français** · [English](en/HOST_CONTRACT.md).
+> Les deux versions suivent la même numérotation. La version française est la
+> référence ; en cas d'écart, ce fichier gagne.
+
 ManAgent est une boîte noire (black box = on l'utilise sans voir l'intérieur).
 L'hôte (Qt, Web, CLI) ne touche JAMAIS aux `.py`. Il lance un processus, envoie du JSON sur stdin (entrée standard), lit du JSON sur stdout (sortie standard).
 
@@ -19,6 +23,7 @@ Commande :
 - Protocole : une ligne = un JSON. Pas de log texte sur stdout, que du JSON.
 - Premier signal attendu : `{"type":"event","event":"runtime.ready","payload":{}}` (voir `main.py`, `core/constants.py:32`).
 - Handshake de version : `runtime.configure` envoie `"protocol_version": "1"` (top-level) ; `runtime.configured` la renvoie. Mismatch = erreur bruyante, pas de session.
+- Clés API : jamais en dur. Utilisez `"api_key": "env:MA_VARIABLE"` (une liste est acceptée pour la rotation). Variable absente = chaîne vide + avertissement, jamais de crash.
 
 Santé (healthcheck) : si pas de `runtime.ready` en 15s → tuer le QProcess et relancer.
 
@@ -76,7 +81,7 @@ Pour voir avant de décider ou vérifier après avoir agi, il utilise :
 - `format_response` : format strict attendu (vide = rapport libre).
 Le système appelle la source, fait comprendre par LLM, renvoie la valeur.
 
-## 3b. Embeddings (lite / local / full)
+## 3b. Embeddings (lite / local / remote)
 
 L'hôte choisit le mode dans `runtime.configure` (simple pour l'utilisateur du setup) :
 ```json
@@ -256,6 +261,7 @@ noms propres. Vos noms d'outils et de champs restent libres.
 Types gérés, de bout en bout (déclaration → modèle) :
 
 | Famille | Exemples | Sort réel |
+|---|---|---|
 | `image/*` | jpeg, png, webp, gif, bmp | pixels au modèle, si le modèle a la vision, sinon refus clair |
 | `application/pdf` | pdf | document au modèle |
 | `video/*`, `audio/*` | mp4, mp3 | enregistrés comme assets, pas encore envoyés au modèle |
@@ -363,7 +369,7 @@ Poids mémoire vive (RAM) approximatifs :
 
 ## 8. Compatibilité (versioning)
 
-ManAgent affiche sa version via `pyproject.toml` / `VERSION`. L'hôte envoie `host_version` dans le manifest. Règle : on n'ajoute que des champs optionnels, on ne renomme jamais une action existante sans montée de version majeure.
+ManAgent affiche sa version via `pyproject.toml`. L'hôte envoie `host_version` dans le manifest. Règle : on n'ajoute que des champs optionnels, on ne renomme jamais une action existante sans montée de version majeure.
 
 ## 9. Checklist QProcess (Qt)
 
@@ -374,4 +380,4 @@ ManAgent affiche sa version via `pyproject.toml` / `VERSION`. L'hôte envoie `ho
 - Règle v0 : ne traiter que les lignes qui commencent par `{` (sécurité).
   Les logs vont déjà sur stderr côté ManAgent (vérifié : seul le JSON va sur
   stdout) ; le filtre reste en ceinture + bretelles.
-- Ne jamais aller lire les `.py`, utiliser ce contrat + `docs/protocol.md` + `docs/host.manifest.example.json`.
+- Ne jamais aller lire les `.py`, utiliser ce contrat + `docs/PROTOCOL.md` + `docs/host.manifest.example.json`.
