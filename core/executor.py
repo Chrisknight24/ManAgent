@@ -1085,6 +1085,12 @@ class Executor:
                 skip_keys=set(_REFERENCE_FIELDS) | consumer_keys,
             )
 
+        if step.tool_name in ("perceive_understand", "perceive_action"):
+            self.solver.runtime_state._solver_registry_for_tools = self.solver.variable_registry
+            if getattr(step, "output_target_name", None) and isinstance(tool_args_raw, dict):
+                tool_args_raw = dict(tool_args_raw)
+                tool_args_raw["_output_target_name"] = step.output_target_name
+
         # Validation déterministe pré-exécution des arguments d'outil
         is_valid_args, validation_err = self._validate_tool_args(step.tool_name, tool_args_raw)
         if not is_valid_args:

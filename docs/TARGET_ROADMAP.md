@@ -1,6 +1,6 @@
 ﻿# TargetRegistry — Roadmap d'implémentation
 
-**Statut : S2 implémenté** (2026-10-21). Tests verts (545). S3 en attente de GO.
+**Statut : S3 implémenté** (2026-10-21). Tests verts (552). S4 en attente de GO.
 Ce document est la **source de vérité** du chantier ; il remplace
 `CHANTIER_TARGET.md` (archivé) et complète `TARGET_REGISTRY.md` (spec de
 conception, propriété de l'Expert).
@@ -389,7 +389,7 @@ d'intégration utilisent `HostSim`.
 
 Chaque étape = un commit indépendant, tests verts, aucun changement de
 comportement tant que `target_contract` est absent. La suite doit rester à
-**545** tests après S2.
+**552** tests après S3.
 
 ### S0 — Contrat + registre inerte (implémenté le 2026-10-20)
 
@@ -467,7 +467,7 @@ stockage, `node.result` inclus ; updates appliquées même sur résultat en éch
 puis retirées du payload ; snapshot `register=False` (projection seule, cibles
 inconnues omises). 8 tests ajoutés (suite 545 verte).
 
-### S3 — Sélection et méta-outils
+### S3 — Sélection et méta-outils (implémenté le 2026-10-21)
 
 - `perceive_understand` / `perceive_action` : perception → projection →
   sélection ; `single` auto ; `candidates` via `TargetSelection` (3 issues) ;
@@ -479,6 +479,15 @@ inconnues omises). 8 tests ajoutés (suite 545 verte).
 - Tests : T9-T12, T16, T23.
 - Acceptation : aucune ref brute dans les artefacts LLM ; action sur cible
   fraîche.
+
+**Implémentation** : `core/target_ingress.py` expose `collect_projected_targets`
+et `selection_from_payload` (`none`/`single`/`candidates`). `perceive_action`
+projette l'observation avant toute sélection, auto-sélectionne `single`, fait
+choisir une **clé locale** parmi `candidates`, puis substitue `$TARGET` par la ref
+au dernier moment ; `perceive_understand` sélectionne et lie `output_target_name`
+(`type`/`kind: "target"`, valeur = nom local). Les updates sont appliquées dans
+les méta-outils. Sans contrat : chemin legacy brut inchangé (F15 seulement avec
+contrat). 7 tests ajoutés (suite 552 verte).
 
 ### S4 — Validation de plan et UX contrat
 
@@ -624,3 +633,9 @@ inconnues omises). 8 tests ajoutés (suite 545 verte).
   `executor` avant stockage et dans `node.result`, `target_updates` appliquées
   puis retirées, snapshot en projection seule (`register=False`). 8 tests
   ajoutés (suite 545 verte). Aucun prompt modifié.
+- 2026-10-21 : **S3 implémenté**. Sélection `none`/`single`/`candidates` dans
+  `perceive_understand`/`perceive_action`, projection avant grounding, clés
+  locales seulement (aucune ref LLM), `output_target_name` lié en variable
+  `type`/`kind: "target"`, `$TARGET` substitué au dernier moment, updates
+  appliquées. Chemin legacy sans contrat inchangé. 7 tests ajoutés (suite 552
+  verte). Aucun prompt modifié.

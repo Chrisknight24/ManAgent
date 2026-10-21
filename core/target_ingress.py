@@ -11,7 +11,13 @@ import copy
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.target_contract import ProducerSpec, TargetContract
-from core.targets import TargetRegistry, TargetSchemaError, TargetUpdate
+from core.targets import (
+    TargetEntry,
+    TargetRegistry,
+    TargetSchemaError,
+    TargetSelection,
+    TargetUpdate,
+)
 
 
 _MISSING = object()
@@ -207,3 +213,52 @@ def strip_target_updates(payload: Any) -> Any:
     projected = copy.deepcopy(payload)
     projected.pop("target_updates", None)
     return projected
+
+
+def collect_projected_targets(
+    registry: Optional[TargetRegistry],
+    contract: Optional[TargetContract],
+    payload: Any,
+) -> List[TargetEntry]:
+    """Cibles actives presentes dans un payload deja projete (ordre conserve)."""
+    if registry is None or contract is None or not isinstance(payload, dict):
+        return []
+
+    found: List[TargetEntry] = []
+    seen = set()
+    for spec in contract.producers:
+        current = _read_path(payload, spec.path)
+        if current is _MISSING:
+            continue
+        if spec.mode == "single":
+            items = [current]
+        elif isinstance(current, list):
+            items = current
+        else:
+            items = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            key = item.get("key")
+            if not isinstance(key, str):
+                continue
+            entry = registry.get(key)
+            if entry is None or not entry.active or entry.local_name in seen:
+                continue
+            seen.add(entry.local_name)
+            found.append(entry)
+    return found
+
+
+def selection_from_payload(
+    registry: Optional[TargetRegistry],
+    contract: Optional[TargetContract],
+    payload: Any,
+) -> TargetSelection:
+    """Selection deterministe : none / single (auto) / candidates (choix requis)."""
+    entries = collect_projected_targets(registry, contract, payload)
+    if not entries:
+        return TargetSelection(kind="none", reason="no_target")
+    if len(entries) == 1:
+        return TargetSelection(kind="single", entries=tuple(entries))
+    return TargetSelection(kind="candidates", entries=tuple(entries))
