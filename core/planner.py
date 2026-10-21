@@ -19,6 +19,7 @@ from core.i18n import _
 from core.constants import Events, ModelCapabilities, LLM_STRUCTURED_MAX_OUTPUT_TOKENS
 from typing import Tuple, List, Optional, Any, Dict, Union
 from core.entity import Entity
+from core.targets import target_is_live
 
 PLANNER_PD_ENABLED = False
 
@@ -215,7 +216,12 @@ class Planner(Entity):
                 skills_text = "\n".join(lines)
 
         enriched_registry = {}
+        target_registry = getattr(self.runtime_state, "target_registry", None)
         for name, info in (variable_registry or {}).items():
+            if info.get("type") == "target" and not target_is_live(
+                target_registry, info.get("value")
+            ):
+                continue
             enriched_registry[name] = {
                 "description": info.get("description", ""),
                 "timestamp": info.get("timestamp", "N/A"),

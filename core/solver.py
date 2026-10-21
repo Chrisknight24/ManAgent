@@ -44,6 +44,7 @@ from core.runtime_state import RuntimeState
 from memory.mission_profile_store import MissionProfileStore
 from memory.mission_store import MissionStore
 from core.discovery.providers.registry_provider import SolverRegistryProvider
+from core.targets import target_is_live
 
 MAX_DEPTH = SOLVER_MAX_DEPTH
 MAX_EXECUTION_TRIES = SOLVER_MAX_EXECUTION_TRIES
@@ -295,9 +296,12 @@ class Solver(Supervisor, Entity):
 
     def _get_registry_metadata_view(self) -> Dict[str, Any]:
         view = {}
+        target_registry = getattr(self.runtime_state, "target_registry", None)
         for key, info in self.variable_registry.items():
             value = info.get("value")
             var_type = info.get("type", self._get_type_string(value))
+            if var_type == "target" and not target_is_live(target_registry, value):
+                continue
 
             if var_type == "bool":
                 hint = f"(bool: {str(value).lower()})"

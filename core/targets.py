@@ -62,6 +62,22 @@ class TargetScopeMismatch(TargetError):
         )
 
 
+def target_is_live(registry: Any, local_name: Any) -> bool:
+    """Vrai seulement si le registre connait ce nom local comme cible active.
+
+    Utilise pour filtrer les alias de variables `type == "target"` dont la
+    cible a ete invalidee ou purgee : un alias mort ne doit plus apparaitre
+    dans les vues de prompt (registre perime).
+    """
+    if registry is None or not isinstance(local_name, str) or not local_name:
+        return False
+    try:
+        entry = registry.get(local_name)
+    except Exception:
+        return False
+    return bool(entry is not None and getattr(entry, "active", False))
+
+
 def canonical_ref(value: Any) -> str:
     """Canonicalise une reference hote en JSON trie, sans NaN/Infinity."""
 

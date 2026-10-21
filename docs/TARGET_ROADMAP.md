@@ -1,6 +1,6 @@
 ﻿# TargetRegistry — Roadmap d'implémentation
 
-**Statut : S6 implémenté** (2026-10-21). Tests verts (570). S7 en attente de GO.
+**Statut : S9 implémenté** (2026-10-21). Tests verts (579). Prêt pour le pilote R1.
 Ce document est la **source de vérité** du chantier ; il remplace
 `CHANTIER_TARGET.md` (archivé) et complète `TARGET_REGISTRY.md` (spec de
 conception, propriété de l'Expert).
@@ -552,23 +552,47 @@ inchangée à 564 tests.
   réel reste cadré par R1. Le HostSim complet (génération/ABA/rejets variés)
   reste en S9.
 
-### S7 — Recul / snapshot
+### S7 — Recul / snapshot (implémenté le 2026-10-21)
 
 - Vérifier que le recul refait un snapshot (conditionnel à
   `world_guidance_visible`) et ne réutilise pas un registre périmé ; T13.
-- Aucun changement si le comportement actuel suffit ; test + doc.
+- Constat : `_check_feasibility` et `Planner.propose_plan` relisent déjà le
+  snapshot à chaque appel (aucun cache de monde) ; aucun changement de flux.
+- Correctif : `target_is_live(registry, local_name)` dans `core/targets.py` ;
+  les alias de variables `type == "target"` dont la cible est invalide/purgée
+  sont filtrés de `Solver._get_registry_metadata_view` et de l'`enriched_registry`
+  du Planner. Le registre de mission reste la seule vérité.
+- Tests : `tests/test_targets_s7.py` (4 tests : helper, vue Solver, prompt
+  Planner, deux lectures de monde successives A→B). Suite : **574**.
+- Aucune surface hôte modifiée ; `HOST_CONTRACT.md` inchangé.
 
-### S8 — Concurrence (conditionnel)
+### S8 — Concurrence (conditionnel, fermé le 2026-10-21)
 
 - Si parallélisme réel : lock/atomicité ; sinon documenter « sync, pas de lock »
   + test T29 (aucune coroutine).
-- Ne pas ouvrir ce chantier sans besoin mesuré.
+- Constat : aucun `await` sur le registre, aucune méthode `async` ; les
+  mutations restent synchrones sur la boucle unique. Pas de lock ajouté.
+- Test : `tests/test_targets_s8.py` (T29, introspection des méthodes publiques).
+- Si un parallélisme réel multi-thread apparaît un jour, rouvrir ce chantier :
+  le lock ne sera pas gratuit et devra être mesuré.
 
-### S9 — Matrice complète + HostSim
+### S9 — Matrice complète + HostSim (implémenté le 2026-10-21)
 
 - `HostSim` : manifeste, producteurs/consommateurs, updates, rejets, génération.
 - Exécuter T1-T34 ; golden d'inertie ; métriques de base.
 - Acceptation : tout vert, prêt pour le pilote.
+- Implémentation : `tests/test_targets_s9.py` (4 tests d'intégration HostSim) :
+  génération supérieure gagne / ancienne ignorée, update pendant action puis
+  refus ferme `TARGET_INACTIVE`, purge entre scan et click
+  (`TARGET_NOT_FOUND`, zéro dispatch), item producteur invalide rejeté sans
+  bloquer la cible valide.
+- Couverture : T1-T34 déjà répartis entre `test_targets_contract.py`,
+  `test_targets_inertie.py`, `test_targets_egress.py`, `test_targets_ingress.py`,
+  `test_targets_selection.py`, `test_targets_registry.py`, `test_targets_s4.py`,
+  `test_targets_s6.py`, `test_targets_s7.py`, `test_targets_s8.py` ; S9 ajoute
+  les scénarios de bout en bout manquants. Suite : **579**.
+- Limite maintenue : le smoke réel CondiFlow reste R1 ; aucun nom d'hôte/outil
+  en dur, aucun contrat = inertie.
 
 ---
 
@@ -683,3 +707,21 @@ inchangée à 564 tests.
   `dispatched`, `arguments_display`, lois L1-L5, surface de prompts et
   non-bridage. Schéma et manifeste d'exemple mis à jour. Aucun code ; suite
   inchangée à 564 tests.
+- 2026-10-21 : **S6 implémenté**. `tests/host_sim.py` + `tests/test_targets_s6.py`
+  (6 tests) : `arguments_display`/`dispatched`, refus d'enveloppe sans event,
+  `target_updates` appliquées sur échec, purge `manifest_updated`, hôte qui
+  rejette toujours (T17), chokepoint unique (T19). Aucun code runtime modifié ;
+  suite **570** verte.
+- 2026-10-21 : **S7 implémenté**. `target_is_live` + filtrage des alias cibles
+  mortes dans les vues Solver/Planner ; T13 vérifié : deux reculs successifs
+  relisent le monde (A puis B), aucun registre périmé dans les prompts.
+  4 tests ajoutés (suite **574** verte). Aucune surface hôte modifiée.
+- 2026-10-21 : **S8 fermé**. Registre synchrone (aucune coroutine, aucun `await`),
+  boucle unique : pas de lock ajouté. T29 par introspection des méthodes
+  publiques (1 test, suite **575** verte). À rouvrir seulement si parallélisme
+  multi-thread réel mesuré.
+- 2026-10-21 : **S9 implémenté**. `tests/test_targets_s9.py` (4 tests d'intégration
+  HostSim) : génération, update en cours d'action, purge entre scan et click,
+  rejet partiel producteur. Couverture T1-T34 consolidée ; suite **579** verte.
+  Le pilote réel CondiFlow reste R1 (smoke externe), rien n'est promis au-delà
+  de la surface testée.
