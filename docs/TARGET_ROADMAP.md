@@ -1,6 +1,6 @@
-# TargetRegistry — Roadmap d'implémentation
+﻿# TargetRegistry — Roadmap d'implémentation
 
-**Statut : S0 implémenté** (2026-10-20). Tests verts (525). S1 en attente de GO.
+**Statut : S1 implémenté** (2026-10-21). Tests verts (537). S2 en attente de GO.
 Ce document est la **source de vérité** du chantier ; il remplace
 `CHANTIER_TARGET.md` (archivé) et complète `TARGET_REGISTRY.md` (spec de
 conception, propriété de l'Expert).
@@ -289,6 +289,8 @@ contrat verrait des champs qu'il ne peut pas produire. En S4, un plan qui utilis
 Règles :
 
 - `version` obligatoire ; absent → inerte (warning de lint si `targets` seul).
+- `consumes[].raw` : `deny` (défaut) refuse toute valeur non liée ;
+  `allow` est l'échappatoire explicite pour les hôtes legacy (passthrough).
 - `consumes[].param` : nom du paramètre hôte ; **interdit** : `source`,
   `source_data`, `sources` (réservés par `_REFERENCE_FIELDS`). Un paramètre
   consommateur ne doit **pas** déclarer d'`enum` (le planner passe un nom local,
@@ -424,7 +426,7 @@ comportement tant que `target_contract` est absent. La suite doit rester à
 **Acceptation** : suite verte ; prompts byte-identiques ; aucun appel hôte
 modifié ; `git diff` limité aux fondations.
 
-### S1 — Membrane egress (chokepoint)
+### S1 — Membrane egress (implémenté le 2026-10-21)
 
 - `executor.py` : substitution **consumer-aware brute** avant
   `_interpolate_dict` (target → valeur brute ; texte → `for_json=False` ;
@@ -437,6 +439,15 @@ modifié ; `git diff` limité aux fondations.
 - Tests : T2-T5, T7, T8, T20, T27.
 - Acceptation : l'hôte reçoit des refs ; les variables/historique/prompts
   reçoivent des noms ; échec = aucun dispatch.
+
+**Implémentation** : `consumer.raw` (`deny` par défaut, `allow` explicite) ;
+substitution brute exacte dans `executor` (y compris `source_args`/`action_args`
+des méta-outils) ; résolution tout-ou-rien dans `_execute_external_tool` avant
+`tool.requested`, refs brutes sous le nom du paramètre, `arguments_display`
+(noms) pour l'UI seulement, erreurs fermées + `dispatched:false`, aucun dispatch
+sur échec ; `dispatched:true` ajouté au résultat **uniquement** si un contrat
+actif existe ; exemption `enum` aux deux sites. 12 tests ajoutés (suite 537
+verte).
 
 ### S2 — Membrane ingress
 
@@ -595,3 +606,9 @@ modifié ; `git diff` limité aux fondations.
   `core/prompt_capabilities.py`, câblage `ToolsManager`/`RuntimeState`,
   `PlanStep.output_target_name`, fallback Jinja2 conservateur. 56 tests ajoutés
   (suite 525 verte). Aucun template modifié ; T28/T30 verts.
+- 2026-10-21 : **S1 implémenté**. `consumer.raw` (`deny`/`allow`),
+  substitution brute exacte (executor + méta-outils), résolution tout-ou-rien
+  avant `tool.requested`, refs brutes sous le nom du paramètre, `arguments_display`
+  (noms) pour l'UI, erreurs fermées + `dispatched:false`, `dispatched:true`
+  seulement si contrat actif, exemption enum aux deux sites. 12 tests ajoutés
+  (suite 537 verte). Aucun prompt modifié.

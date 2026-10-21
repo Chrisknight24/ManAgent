@@ -11,6 +11,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from core.targets import TargetError
+
 
 RESERVED_CONSUMER_PARAMS = frozenset({"source_data", "source", "sources"})
 SUPPORTED_VERSION = 1
@@ -28,6 +30,7 @@ class ConsumerSpec:
     param: str
     scope: Optional[str] = None
     required: bool = True
+    raw_allow: bool = False
 
 
 @dataclass(frozen=True)
@@ -82,8 +85,73 @@ def consumer_param_names(contract: TargetContract) -> set:
     return contract.consumer_param_names()
 
 
+def declared_consumer_params(tools_mgr: Any, tool_name: str) -> set:
+    """Parametres consommateurs declares pour un outil (vide si absent)."""
+    try:
+        contract = tools_mgr.get_target_contract(tool_name)
+    except Exception:
+        return set()
+    return contract.consumer_param_names() if contract else set()
+
+
 def producer_specs(contract: TargetContract) -> Tuple[ProducerSpec, ...]:
     return contract.producer_specs()
+
+
+_REFERENCE_TOKEN_RE = re.compile(r"(\$@_|@\$_)[A-Za-z0-9_-]+")
+
+
+def resolve_consumer_arguments(
+    registry: Any,
+    contract: Optional[TargetContract],
+    arguments: Any,
+) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], Optional[Dict[str, str]]]:
+    """Resout les noms locaux des consommateurs en references hote brutes.
+
+    Regles S1 : strict par defaut (`raw: deny`), tout ou rien, aucune
+    substitution partielle. Retourne `(arguments_resolus, arguments_affiches,
+    erreur)`. En cas d'erreur, `arguments_resolus` est l'original et
+    `arguments_affiches` vaut None : l'appelant ne doit pas dispatcher.
+    """
+    if not isinstance(arguments, dict):
+        return arguments, None, None
+    if contract is None or not contract.consumers:
+        return arguments, None, None
+
+    resolved = dict(arguments)
+    display: Optional[Dict[str, Any]] = None
+    for consumer in contract.consumers:
+        param = consumer.param
+        if param not in resolved:
+            continue
+        if consumer.raw_allow:
+            continue
+        if display is None:
+            display = dict(arguments)
+        value = resolved[param]
+        if not isinstance(value, str) or not value.strip():
+            return arguments, None, {
+                "code": "TARGET_SCHEMA_INVALID",
+                "message": f"consumer '{param}' expects a local target name",
+            }
+        if _REFERENCE_TOKEN_RE.search(value):
+            return arguments, None, {
+                "code": "TARGET_NOT_FOUND",
+                "message": (
+                    f"consumer '{param}' mixes text and target reference: {value!r}"
+                ),
+            }
+        if registry is None:
+            return arguments, None, {
+                "code": "TARGET_NOT_FOUND",
+                "message": f"no target registry for consumer '{param}'",
+            }
+        try:
+            ref = registry.resolve(value, consumer.scope)
+        except TargetError as exc:
+            return arguments, None, {"code": exc.code, "message": exc.message}
+        resolved[param] = ref.value
+    return resolved, display, None
 
 
 def lint_target_payload(tools_payload: Any) -> List[str]:
@@ -228,6 +296,18 @@ def _parse_consumer(
         error(f"consumes[{index}].required must be a boolean")
         required = True
 
+    raw_policy = item.get("raw", "deny")
+    if raw_policy is None:
+        raw_policy = "deny"
+    if not isinstance(raw_policy, str) or raw_policy.strip().lower() not in (
+        "allow",
+        "deny",
+    ):
+        error(f"consumes[{index}].raw must be 'allow' or 'deny'")
+        raw_allow = False
+    else:
+        raw_allow = raw_policy.strip().lower() == "allow"
+
     if isinstance(parameters_schema, dict):
         properties = parameters_schema.get("properties")
         if isinstance(properties, dict):
@@ -244,7 +324,12 @@ def _parse_consumer(
                             f"consumer parameter '{param}' must not declare enum"
                         )
 
-    return ConsumerSpec(param=param, scope=scope, required=required)
+    return ConsumerSpec(
+        param=param,
+        scope=scope,
+        required=required,
+        raw_allow=raw_allow,
+    )
 
 
 def _parse_producer(

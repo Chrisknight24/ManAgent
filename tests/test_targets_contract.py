@@ -239,3 +239,26 @@ def test_lint_targets_without_contract():
     )
     assert len(warnings) == 1
     assert "a" in warnings[0] and "without 'target_contract'" in warnings[0]
+
+
+def test_consumer_raw_policy_defaults_to_deny_and_accepts_allow():
+    result = _parse(
+        {
+            "version": 1,
+            "consumes": [
+                {"param": "target", "raw": "allow"},
+                {"param": "target2"},
+            ],
+        }
+    )
+    assert result.ok, result.errors
+    assert result.contract.consumer_for("target").raw_allow is True
+    assert result.contract.consumer_for("target2").raw_allow is False
+
+
+def test_consumer_invalid_raw_policy_is_rejected():
+    result = _parse(
+        {"version": 1, "consumes": [{"param": "target", "raw": "maybe"}]}
+    )
+    assert not result.ok
+    assert any("raw" in error for error in result.errors)

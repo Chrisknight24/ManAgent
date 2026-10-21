@@ -42,6 +42,7 @@ from typing import Optional, Dict, List, Tuple, Any
 
 from core.prompt_loader import get_prompt_loader
 from core.i18n import _
+from core.target_contract import resolve_consumer_arguments
 
 import uuid
 import copy
@@ -2475,6 +2476,48 @@ class Orchestrator(Supervisor, Entity):
 
     # Dans core/orchestrator.py
 
+    def _resolve_target_arguments(self, tool_name: str, arguments: dict):
+        """Resout les consommateurs de cibles avant tout dispatch hote.
+
+        Retourne `(arguments, display, error, actif)`. `actif` est faux quand
+        l'outil n'a pas de contrat : le comportement historique est conserve.
+        """
+        try:
+            tools_mgr = getattr(self.runtime_state, "tools_manager", None)
+            if tools_mgr is None:
+                return arguments, None, None, False
+            contract = tools_mgr.get_target_contract(tool_name)
+            if contract is None:
+                return arguments, None, None, False
+            registry = getattr(self.runtime_state, "target_registry", None)
+            resolved, display, error = resolve_consumer_arguments(
+                registry, contract, arguments
+            )
+            return resolved, display, error, True
+        except Exception as e:
+            Logger.error(f"[Orchestrator] Resolution de cibles impossible pour '{tool_name}': {e}")
+            return arguments, None, {
+                "code": "TARGET_SCHEMA_INVALID",
+                "message": str(e),
+            }, True
+
+    @staticmethod
+    def _mark_dispatched(result: Any) -> Any:
+        """Marque un resultat hote comme dispatche (sans ecraser l'hote)."""
+        if not isinstance(result, str):
+            return result
+        try:
+            parsed = json.loads(result)
+        except Exception:
+            return result
+        if isinstance(parsed, dict) and "dispatched" not in parsed:
+            parsed["dispatched"] = True
+            try:
+                return json.dumps(parsed, ensure_ascii=False)
+            except Exception:
+                return result
+        return result
+
     async def _execute_external_tool(self, tool_name: str, arguments: dict) -> str:
         """
         Méthode privée appelée par ToolsManager pour exécuter un outil externe (C++).
@@ -2487,20 +2530,43 @@ class Orchestrator(Supervisor, Entity):
             Logger.error(f"[Orchestrator] Échec de validation de l'appel d'outil '{tool_name}': {e}")
             return json.dumps({"result": False, "data": None, "message": str(e)})
 
+        prepared, display, error, target_active = self._resolve_target_arguments(
+            tool_name, arguments
+        )
+        if error is not None:
+            message = error.get("message", "")
+            Logger.warning(
+                f"[Orchestrator] Cible refusee pour '{tool_name}': "
+                f"{error.get('code')} ({message})"
+            )
+            return json.dumps({
+                "result": False,
+                "data": None,
+                "dispatched": False,
+                "error": error,
+                "message": message,
+            }, ensure_ascii=False)
+
         call_id = str(uuid.uuid4())
         loop = asyncio.get_running_loop()
         future = loop.create_future()
         self.pending_tool_calls[call_id] = future
 
-        Logger.info(f"[Orchestrator] 📤 Dispatch outil [{tool_name}] (ID: {call_id})")
-        await self.propagate_event(Events.TOOL_REQUESTED, {
+        payload = {
             "call_id": call_id,
             "tool_name": tool_name,
-            "arguments": arguments
-        })
+            "arguments": prepared,
+        }
+        if display is not None:
+            payload["arguments_display"] = display
+
+        Logger.info(f"[Orchestrator] ?? Dispatch outil [{tool_name}] (ID: {call_id})")
+        await self.propagate_event(Events.TOOL_REQUESTED, payload)
 
         try:
             result = await future
+            if target_active:
+                return self._mark_dispatched(result)
             return result
         finally:
             self.pending_tool_calls.pop(call_id, None)

@@ -761,6 +761,63 @@ class Executor:
 
         return re.sub(r'(\$@_|@\$_)([a-zA-Z0-9_-]+)', replace_var, text)
 
+    def _target_consumer_keys(self, tool_name: str) -> set:
+        """Parametres consommateurs declares par le contrat de l'outil."""
+        try:
+            runtime_state = getattr(self.solver, "runtime_state", None)
+            tools_mgr = getattr(runtime_state, "tools_manager", None)
+            if tools_mgr is None:
+                return set()
+            contract = tools_mgr.get_target_contract(tool_name)
+            return contract.consumer_param_names() if contract else set()
+        except Exception:
+            return set()
+
+    def _substitute_consumer_values(self, args: Any, keys: set) -> Any:
+        """Substitution brute des noms locaux, sans quoting JSON.
+
+        Seul un jeton exact `$@_nom` / `@$_nom` est remplace. Un texte mixte
+        (texte + cible) reste intact : la membrane egress le refusera.
+        """
+        if not isinstance(args, dict) or not keys:
+            return args
+        result = dict(args)
+        for key in keys:
+            if key not in result:
+                continue
+            value = result[key]
+            if not isinstance(value, str):
+                continue
+            match = re.fullmatch(r'(\$@_|@\$_)([a-zA-Z0-9_-]+)', value.strip())
+            if not match:
+                continue
+            _matched_key, entry = self._find_var_in_registry(match.group(2))
+            if not isinstance(entry, dict):
+                continue
+            raw_value = entry.get("value")
+            if isinstance(raw_value, str) and raw_value:
+                result[key] = raw_value
+        return result
+
+    def _substitute_meta_targets(self, args: Any) -> Any:
+        """Applique la substitution cible aux `source_args`/`action_args`."""
+        if not isinstance(args, dict):
+            return args
+        for args_key, tool_key in (
+            ("source_args", "source_tool"),
+            ("action_args", "action_tool"),
+        ):
+            sub_args = args.get(args_key)
+            sub_tool = args.get(tool_key)
+            if not isinstance(sub_args, dict):
+                continue
+            if not isinstance(sub_tool, str) or not sub_tool.strip():
+                continue
+            keys = self._target_consumer_keys(sub_tool.strip())
+            if keys:
+                args[args_key] = self._substitute_consumer_values(sub_args, keys)
+        return args
+
     def _interpolate_dict(self, obj, for_json: bool = True, skip_keys=None):
         """
         Parcourt récursivement un objet et interpole les chaînes.
@@ -1016,12 +1073,16 @@ class Executor:
         # --- SI tool_manager, on garde les arguments bruts (avec $@_) ---
         if step.tool_name == "tool_manager":
             tool_args_raw = tool_args.copy()
+            tool_args_raw = self._substitute_meta_targets(tool_args_raw)
             Logger.debug(f"[Executor] tool_manager appelé avec arguments bruts : {tool_args_raw}")
             self.solver.runtime_state._solver_registry_for_tools = self.solver.variable_registry
         else:
+            consumer_keys = self._target_consumer_keys(step.tool_name)
+            if consumer_keys:
+                tool_args = self._substitute_consumer_values(tool_args, consumer_keys)
             tool_args_raw = self._interpolate_dict(
                 tool_args, for_json=True,
-                skip_keys=_REFERENCE_FIELDS,
+                skip_keys=set(_REFERENCE_FIELDS) | consumer_keys,
             )
 
         # Validation déterministe pré-exécution des arguments d'outil

@@ -693,7 +693,13 @@ def _prevalidate_external(tools_mgr, tool_name: str, args) -> Optional[str]:
         tools_mgr.validate_tool_call(tool_name, dict(args or {}))
         if isinstance(tool_def, dict):
             from core.alignment import invalid_enum_value
-            bad_value = invalid_enum_value(tool_def, args)
+            from core.target_contract import declared_consumer_params
+            consumer_keys = declared_consumer_params(tools_mgr, tool_name)
+            enum_args = (
+                {k: v for k, v in args.items() if k not in consumer_keys}
+                if isinstance(args, dict) else args
+            )
+            bad_value = invalid_enum_value(tool_def, enum_args)
             if bad_value:
                 return bad_value
         return None
