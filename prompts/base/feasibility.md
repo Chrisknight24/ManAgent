@@ -40,6 +40,14 @@ Si un skill couvre l'objectif, la stratégie le priorise (`execute_skill`).
 
 ## REGISTRE
 {{ registry }}
+{% if targets_enabled %}
+## CIBLES
+- Les cibles sont des noms locaux (`$@_<nom>`), jamais des références brutes.
+- Une stratégie peut réutiliser une cible déjà nommée dans un argument consommateur.
+{% if target_selection_enabled %}
+- Plusieurs candidates : prévoir le méta-outil de sélection, qui choisit une clé locale.
+{% endif %}
+{% endif %}
 
 ---
 

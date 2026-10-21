@@ -10,6 +10,10 @@ Chaque étape N produit automatiquement deux canaux :
 - Une étape n'utilise que des variables d'étapes ANTÉRIEURES.
 - `output_variable_name` ne va JAMAIS dans `tool_args_json` (champ de premier niveau seulement).
 - Recopie EXACTEMENT les noms ; n'invente jamais de suffixe.
+{% if targets_enabled %}
+- `output_target_name` nomme une cible produite par l'étape (sans préfixe `data_`/`bool_`). Tu la réutilises comme `$@_<nom>` uniquement dans un argument consommateur de cible.
+- Jamais de référence brute, d'identifiant hôte ni de clé inventée.
+{% endif %}
 
 ### Conditions (`execute_if`) — deux formes seulement
 - `$@_bool_step_N == True` (ou `== False`) : l'étape N a tourné (ou raté).

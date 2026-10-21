@@ -10,6 +10,10 @@ Each step N automatically produces two channels:
 - A step uses only variables from EARLIER steps.
 - `output_variable_name` NEVER goes into `tool_args_json` (top-level field only).
 - Copy names EXACTLY; never invent a suffix.
+{% if targets_enabled %}
+- `output_target_name` names a target produced by the step (no `data_`/`bool_` prefix). Reuse it as `$@_<name>` only in a target consumer argument.
+- Never a raw reference, host identifier or invented key.
+{% endif %}
 
 ### Conditions (`execute_if`) — two forms only
 - `$@_bool_step_N == True` (or `== False`): step N ran (or failed).

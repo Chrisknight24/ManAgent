@@ -1,6 +1,6 @@
 ﻿# TargetRegistry — Roadmap d'implémentation
 
-**Statut : S3 implémenté** (2026-10-21). Tests verts (552). S4 en attente de GO.
+**Statut : S4 implémenté** (2026-10-21). Tests verts (564). S5 en attente de GO.
 Ce document est la **source de vérité** du chantier ; il remplace
 `CHANTIER_TARGET.md` (archivé) et complète `TARGET_REGISTRY.md` (spec de
 conception, propriété de l'Expert).
@@ -389,7 +389,7 @@ d'intégration utilisent `HostSim`.
 
 Chaque étape = un commit indépendant, tests verts, aucun changement de
 comportement tant que `target_contract` est absent. La suite doit rester à
-**552** tests après S3.
+**564** tests après S4.
 
 ### S0 — Contrat + registre inerte (implémenté le 2026-10-20)
 
@@ -489,7 +489,7 @@ au dernier moment ; `perceive_understand` sélectionne et lie `output_target_nam
 les méta-outils. Sans contrat : chemin legacy brut inchangé (F15 seulement avec
 contrat). 7 tests ajoutés (suite 552 verte).
 
-### S4 — Validation de plan et UX contrat
+### S4 — Validation de plan et UX contrat (implémenté le 2026-10-21)
 
 - Def-use **paramètre-aware** : consommateurs = variables ∪ noms de cibles
   antérieurs ; autres = variables seulement. Littéraux (V2) validés.
@@ -504,6 +504,20 @@ contrat). 7 tests ajoutés (suite 552 verte).
   scan de vocabulaire T30 ; `plan_grammar` conditionnel.
 - Acceptation : plan invalide rejeté avant exécution, message clair ; sans
   contrat, prompts inchangés (aucun jeton cible) ; budget respecté.
+
+**Implémentation** : `find_target_plan_problems` (`core/plan_validator.py`)
+valide les alias (`output_target_name`), les collisions, le charset, le préfixe
+interdit, et le def-use paramètre-aware : un alias antérieur n'est légal que
+dans un argument consommateur ; ailleurs (ou avant production) il est rejeté.
+Les littéraux consommateurs exigent `raw: allow`. Les garde-fous S3 sont
+appliqués au plan : producteur `candidates` direct refusé, `single` enveloppé
+refusé. `planner._validate_plan` et `PlanValidator.validate` branchent le gate.
+Descriptions des arguments consommateurs augmentées (`[target]`) uniquement
+pour les contrats effectifs, sans muter le manifeste. Prompts : flags
+`targets_enabled` / `target_selection_enabled` calculés une fois, marqueur
+`(target)` dans la ligne de registre, note de sélection seulement si
+`candidates`, grammaire `output_target_name` conditionnelle, blocs `base`/`en`/`fr`.
+Sans contrat : aucun jeton cible. 12 tests ajoutés (suite 564 verte).
 
 ### S5 — HOST_CONTRACT (FR/EN)
 
@@ -639,3 +653,11 @@ contrat). 7 tests ajoutés (suite 552 verte).
   `type`/`kind: "target"`, `$TARGET` substitué au dernier moment, updates
   appliquées. Chemin legacy sans contrat inchangé. 7 tests ajoutés (suite 552
   verte). Aucun prompt modifié.
+- 2026-10-21 : **S4 implémenté**. Gate cible paramètre-aware
+  (`find_target_plan_problems`) : alias seulement dans un consommateur, littéraux
+  contrôlés (`raw: allow`), `output_target_name` (charset, préfixe, collisions,
+  contrat actif), `candidates` direct / `single` enveloppé refusés. Arguments
+  consommateurs marqués `[target]` (contrat effectif seulement). Prompt :
+  marqueur `(target)`, note de sélection conditionnelle, grammaire
+  `output_target_name` conditionnelle (`base`/`en`/`fr`). Sans contrat : zéro
+  jeton cible, prompts inchangés. 12 tests ajoutés (suite 564 verte).

@@ -234,7 +234,249 @@ def _plan_declared_ref_names(steps: Any, upto_index: int) -> set:
             names.add(f"$@_bool_{clean}")
             names.add(f"$@_data_{clean}")
             names.add(f"$@_{r}")
+        target_name = getattr(s, "output_target_name", None)
+        if target_name and str(target_name).strip():
+            names.add(f"$@_{str(target_name).strip()}")
     return names
+
+
+_TARGET_ALIAS_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_TARGET_REF_RE = re.compile(r"(\$@_|@\$_)([A-Za-z0-9_-]+)")
+_META_TARGET_TOOLS = {"perceive_understand", "perceive_action"}
+_MISSING = object()
+
+
+def _target_contract(tools_mgr: Any, tool_name: str) -> Any:
+    if tools_mgr is None or not tool_name:
+        return None
+    getter = getattr(tools_mgr, "get_target_contract", None)
+    if not callable(getter):
+        return None
+    try:
+        return getter(tool_name)
+    except Exception:
+        return None
+
+
+def _target_producer_modes(contract: Any) -> Set[str]:
+    if contract is None:
+        return set()
+    return {str(producer.mode) for producer in getattr(contract, "producers", ())}
+
+
+def _active_target_contracts(tools_mgr: Any) -> List[Any]:
+    if tools_mgr is None:
+        return []
+    names: List[str] = []
+    names_getter = getattr(tools_mgr, "target_contract_names", None)
+    if callable(names_getter):
+        try:
+            names = list(names_getter())
+        except Exception:
+            names = []
+    if not names:
+        contracts = getattr(tools_mgr, "_target_contracts", {}) or {}
+        names = list(contracts)
+    found = []
+    for name in names:
+        contract = _target_contract(tools_mgr, name)
+        if contract is not None and getattr(contract, "is_effective", False):
+            found.append(contract)
+    return found
+
+
+def _step_tool_name(step: Any) -> str:
+    return str(getattr(step, "tool_name", "") or "").strip()
+
+
+def _meta_source_tool(step: Any, args: Dict[str, Any]) -> str:
+    if _step_tool_name(step) not in _META_TARGET_TOOLS:
+        return ""
+    value = args.get("source_tool")
+    return str(value).strip() if isinstance(value, str) else ""
+
+
+def _step_target_producer_modes(step: Any, args: Dict[str, Any], tools_mgr: Any) -> Set[str]:
+    tool_name = _step_tool_name(step)
+    if tool_name in _META_TARGET_TOOLS:
+        return _target_producer_modes(
+            _target_contract(tools_mgr, _meta_source_tool(step, args))
+        )
+    return _target_producer_modes(_target_contract(tools_mgr, tool_name))
+
+
+def _step_consumer_specs(step: Any, args: Dict[str, Any], tools_mgr: Any) -> Dict[str, Any]:
+    specs: Dict[str, Any] = {}
+    tool_name = _step_tool_name(step)
+    if tool_name in _META_TARGET_TOOLS:
+        source = _target_contract(tools_mgr, _meta_source_tool(step, args))
+        if source is not None:
+            for consumer in getattr(source, "consumers", ()):
+                specs[f"source_args.{consumer.param}"] = consumer
+        if tool_name == "perceive_action":
+            action_name = args.get("action_tool")
+            action_name = str(action_name).strip() if isinstance(action_name, str) else ""
+            action = _target_contract(tools_mgr, action_name)
+            if action is not None:
+                for consumer in getattr(action, "consumers", ()):
+                    specs[f"action_args.{consumer.param}"] = consumer
+        return specs
+    contract = _target_contract(tools_mgr, tool_name)
+    if contract is not None:
+        for consumer in getattr(contract, "consumers", ()):
+            specs[consumer.param] = consumer
+    return specs
+
+
+def _read_arg_path(args: Any, path: str) -> Any:
+    current = args
+    for part in path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return _MISSING
+        current = current[part]
+    return current
+
+
+def find_target_plan_problems(plan: Any, tools_mgr: Any = None) -> List[str]:
+    """Gate deterministe des cibles : contrat, alias et def-use parametre-aware."""
+    steps = list(getattr(plan, "steps", []) or [])
+    if not steps or tools_mgr is None:
+        return []
+    active = _active_target_contracts(tools_mgr)
+    has_active = bool(active)
+    hits: List[str] = []
+
+    aliases: Dict[str, int] = {}
+    declared_vars = set()
+    for step in steps:
+        alias = getattr(step, "output_target_name", None)
+        alias = str(alias).strip() if alias else ""
+        if alias:
+            aliases[alias] = aliases.get(alias, 0) + 1
+        raw = getattr(step, "output_variable_name", None)
+        if raw and str(raw).strip():
+            value = str(raw).strip()
+            declared_vars.add(value)
+            declared_vars.add(re.sub(r"^(bool_|data_)+", "", value))
+
+    seen_aliases: Set[str] = set()
+    for step in steps:
+        args = _parse_step_args(getattr(step, "tool_args_json", "{}"))
+        step_id = str(getattr(step, "id", "?"))
+        tool_name = _step_tool_name(step)
+        modes = _step_target_producer_modes(step, args, tools_mgr)
+        producer_ok = False
+
+        if tool_name in _META_TARGET_TOOLS:
+            producer_ok = "candidates" in modes
+            if "single" in modes:
+                hits.append(
+                    f"{step_id}: producteur 'single' enveloppe dans "
+                    f"'{tool_name}' (appelez-le directement)"
+                )
+        else:
+            if "candidates" in modes:
+                hits.append(
+                    f"{step_id}: producteur 'candidates' appele directement "
+                    "(selection via perceive_understand/perceive_action)"
+                )
+            producer_ok = "single" in modes
+
+        raw_alias = getattr(step, "output_target_name", None)
+        raw_alias = str(raw_alias) if raw_alias else ""
+        alias = raw_alias.strip()
+        if alias:
+            if not has_active:
+                hits.append(
+                    f"{step_id}: output_target_name exige un target_contract actif"
+                )
+            if raw_alias != alias:
+                hits.append(
+                    f"{step_id}: output_target_name ne doit pas contenir d'espaces"
+                )
+            if not _TARGET_ALIAS_RE.fullmatch(alias):
+                hits.append(f"{step_id}: output_target_name invalide {alias!r}")
+            if alias.startswith(("data_", "bool_")):
+                hits.append(
+                    f"{step_id}: output_target_name ne prend pas de prefixe data_/bool_"
+                )
+            if aliases.get(alias, 0) > 1:
+                hits.append(f"{step_id}: collision de cible {alias!r}")
+            if alias in declared_vars:
+                hits.append(
+                    f"{step_id}: collision entre cible et variable {alias!r}"
+                )
+            if not producer_ok:
+                hits.append(
+                    f"{step_id}: output_target_name interdit sur '{tool_name}' "
+                    "(producteur de cibles ou meta-outil de selection requis)"
+                )
+
+        consumer_specs = _step_consumer_specs(step, args, tools_mgr)
+        future_aliases = {
+            name
+            for name, count in aliases.items()
+            if count and name not in seen_aliases
+        }
+
+        def _scan(value: Any, path: str) -> None:
+            if isinstance(value, dict):
+                for key, sub in value.items():
+                    _scan(sub, f"{path}.{key}" if path else str(key))
+                return
+            if isinstance(value, list):
+                for item_index, sub in enumerate(value):
+                    _scan(sub, f"{path}[{item_index}]")
+                return
+            if not isinstance(value, str):
+                return
+            stripped = value.strip()
+            for match in _TARGET_REF_RE.finditer(stripped):
+                name = match.group(2)
+                full = match.group(0)
+                consumer = consumer_specs.get(path)
+                if name in seen_aliases:
+                    if consumer is None:
+                        hits.append(
+                            f"{step_id}: {path} utilise le nom de cible "
+                            f"{full} hors argument consommateur"
+                        )
+                    elif stripped != full:
+                        hits.append(
+                            f"{step_id}: {path} doit contenir exactement le nom "
+                            f"de cible {full}"
+                        )
+                elif name in future_aliases:
+                    hits.append(
+                        f"{step_id}: {path} utilise {full} avant sa production"
+                    )
+
+        _scan(args, "")
+
+        for path, consumer in consumer_specs.items():
+            value = _read_arg_path(args, path)
+            if value is _MISSING or getattr(consumer, "raw_allow", False):
+                continue
+            if not isinstance(value, str) or not value.strip():
+                if getattr(consumer, "required", True):
+                    hits.append(
+                        f"{step_id}: {path} exige un nom local de cible"
+                    )
+                continue
+            stripped = value.strip()
+            if stripped == "$TARGET" and tool_name == "perceive_action":
+                continue
+            if _TARGET_REF_RE.fullmatch(stripped):
+                continue
+            hits.append(
+                f"{step_id}: {path} doit utiliser un nom local de cible "
+                f"($@_...), pas {_short_value(stripped)}"
+            )
+
+        if alias:
+            seen_aliases.add(alias)
+
+    return hits
 
 
 def find_unresolved_plan_refs(plan: Any) -> List[str]:
@@ -1150,6 +1392,7 @@ class PlanValidator:
         unresolved = find_unresolved_plan_refs(plan)
         bad_sources = find_invalid_perceive_sources(plan, self._available_tools)
         incomplete_delegation = find_incomplete_delegated_args(plan, self._tools_manager)
+        target_problems = find_target_plan_problems(plan, self._tools_manager)
         unconsumed = find_unconsumed_perception_outputs(plan, self._perception_tools)
         problems = [f"inconnu:{u}" for u in unknown]
         problems += [f"args illisibles étape:{s}" for s in malformed]
@@ -1165,6 +1408,7 @@ class PlanValidator:
             for u in bad_sources
         ]
         problems += [f"délégation incomplète {u}" for u in incomplete_delegation]
+        problems += [f"cible invalide {u}" for u in target_problems]
         # P2 doctrine : la non-consommation ne refuse plus. Signal
         # pour la convergence finale (garde-fou déplacé début→fin).
         if unconsumed:

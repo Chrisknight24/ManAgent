@@ -28,6 +28,14 @@ Rapports de missions passées JUGÉES (le juge peut se tromper) : pistes suggest
 {% else %}
 [Registre vide : aucune variable à recopier pour l'instant.]
 {% endif %}
+{% if targets_enabled %}
+## CIBLES
+- Une cible se désigne par un nom local (`$@_<nom>`), jamais par une référence brute.
+- `output_target_name` : uniquement sur un producteur de cibles ou un méta-outil de sélection. Renseigne ensuite ce nom exact dans un argument consommateur.
+{% if target_selection_enabled %}
+- Plusieurs candidates : le méta-outil de sélection choisit une clé locale. Ne fabrique jamais de clé.
+{% endif %}
+{% endif %}
 
 ## OUTILS (recopie les noms exactement)
 {% for tool in tools %}

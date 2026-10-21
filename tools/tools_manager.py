@@ -480,6 +480,14 @@ class ToolsManager(Entity):
     def target_contract_names(self) -> List[str]:
         return sorted(self._target_contracts)
 
+    def has_candidate_target_producers(self) -> bool:
+        """True si un contrat declare un producteur en mode candidates."""
+        return any(
+            producer.mode == "candidates"
+            for contract in self._target_contracts.values()
+            for producer in contract.producers
+        )
+
     def register_tool(self, name: str, role: str, description: str, parameters_schema: dict, source: str = "external", kind: str = "action", returns: Optional[List[Dict]] = None, effects: Optional[str] = None, effects_timeout_ms: Optional[int] = None, target_contract: Optional[Dict[str, Any]] = None) -> None:
         try:
             timeout_ms = int(effects_timeout_ms) if effects_timeout_ms is not None else None
@@ -584,11 +592,49 @@ class ToolsManager(Entity):
                 target_contract=tool_def.get("target_contract"),
             )
 
+    def _augment_target_consumers(self, tools: List[Dict]) -> List[Dict]:
+        """Marque les arguments consommateurs des contrats effectifs."""
+        augmented: List[Dict] = []
+        for tool in tools:
+            if not isinstance(tool, dict):
+                augmented.append(tool)
+                continue
+            contract = self._target_contracts.get(str(tool.get("name") or ""))
+            params = tool.get("parameters")
+            consumer_params = (
+                contract.consumer_param_names()
+                if contract is not None and contract.is_effective
+                else set()
+            )
+            if not consumer_params or not isinstance(params, dict):
+                augmented.append(tool)
+                continue
+            properties = params.get("properties")
+            if not isinstance(properties, dict):
+                augmented.append(tool)
+                continue
+            cloned_properties = {}
+            for name, spec in properties.items():
+                if name in consumer_params and isinstance(spec, dict):
+                    spec = dict(spec)
+                    description = str(spec.get("description") or "").strip()
+                    if "[target]" not in description:
+                        spec["description"] = (
+                            f"{description} [target]" if description else "[target]"
+                        )
+                cloned_properties[name] = spec
+            cloned_params = dict(params)
+            cloned_params["properties"] = cloned_properties
+            cloned_tool = dict(tool)
+            cloned_tool["parameters"] = cloned_params
+            augmented.append(cloned_tool)
+        return augmented
+
     async def get_tools_view(self, goal_query: str = None) -> List[Dict]:
         """Retourne la vue unifiée de TOUS les outils (externes + internes)."""
         external_tools = list(self._tools.values())
         internal_tools = self._get_internal_tools_view()
-        return external_tools + internal_tools
+        return self._augment_target_consumers(external_tools) + internal_tools
 
     def perception_tool_names(self) -> set:
         """Outils EXTERNES qui lisent le monde (kind=perception).

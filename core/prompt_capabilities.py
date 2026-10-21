@@ -73,6 +73,25 @@ def prompt_capabilities(
     return caps
 
 
+def _has_candidate_producer(runtime_state: Any) -> bool:
+    manager = _read(runtime_state, "tools_manager")
+    checker = _read(manager, "has_candidate_target_producers")
+    if callable(checker):
+        try:
+            return bool(checker())
+        except Exception:
+            return False
+    contracts = _read(manager, "_target_contracts", {}) or {}
+    try:
+        return any(
+            producer.mode == "candidates"
+            for contract in contracts.values()
+            for producer in getattr(contract, "producers", ())
+        )
+    except Exception:
+        return False
+
+
 def target_prompt_flags(
     runtime_state: Any = None,
     tools_view: Any = None,
@@ -88,8 +107,11 @@ def target_prompt_flags(
         skills_text=skills_text,
         discovery=discovery,
     )
+    targets_enabled = CAP_TARGETS in caps
     return {
-        "targets_enabled": CAP_TARGETS in caps,
+        "targets_enabled": targets_enabled,
+        "target_selection_enabled": targets_enabled
+        and _has_candidate_producer(runtime_state),
         "world_guidance": CAP_WORLD in caps,
         "typed_assets_enabled": CAP_TYPED_ASSETS in caps,
         "skills_enabled": CAP_SKILLS in caps,

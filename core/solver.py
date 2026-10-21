@@ -1133,8 +1133,18 @@ class Solver(Supervisor, Entity):
 
         skills_text = self._format_candidate_skills(getattr(self, "_candidate_skills", []) or [])
 
+        try:
+            from core.prompt_capabilities import target_prompt_flags
+            target_flags = target_prompt_flags(self.runtime_state, tools_view)
+        except Exception:
+            target_flags = {
+                "targets_enabled": False,
+                "target_selection_enabled": False,
+            }
         registry_view = self._get_registry_metadata_view()
-        registry_text = self._format_registry_metadata(registry_view)
+        registry_text = self._format_registry_metadata(
+            registry_view, targets_enabled=target_flags["targets_enabled"]
+        )
 
         loader = get_prompt_loader()
         if hasattr(self, '_cached_advice') and self._cached_advice is not None:
@@ -1171,7 +1181,9 @@ class Solver(Supervisor, Entity):
             skills=skills_text,
             similar_missions=similar_missions_context,
             registry=registry_text,
-            advice=advice
+            advice=advice,
+            targets_enabled=target_flags["targets_enabled"],
+            target_selection_enabled=target_flags["target_selection_enabled"],
         )
 
         decision: FeasibilityDecision = await self.llm.generate_structured(
@@ -1300,13 +1312,20 @@ class Solver(Supervisor, Entity):
             )
             return False
 
-    def _format_registry_metadata(self, registry_view: dict) -> str:
+    def _format_registry_metadata(
+        self, registry_view: dict, targets_enabled: bool = False
+    ) -> str:
         """Formate la vue des métadonnées du registre pour l'affichage dans un prompt."""
         if not registry_view:
             return _("(registre vide)")
         lines = []
         for key, meta in registry_view.items():
-            lines.append(f"- **`$@_{key}`** : {meta.get('description', '')}")
+            marker = (
+                " (target)"
+                if targets_enabled and meta.get("type") == "target"
+                else ""
+            )
+            lines.append(f"- **`$@_{key}`**{marker} : {meta.get('description', '')}")
             lines.append(f"  - Type : {meta.get('type', 'unknown')} | Source : {meta.get('source', 'N/A')}")
             lines.append(f"  - Hint : {meta.get('value_hint', '')}")
         return "\n".join(lines)

@@ -163,6 +163,14 @@ class Planner(Entity):
             show_world_guidance = world_guidance_visible(tools_view)
         except Exception:
             show_world_guidance = True
+        try:
+            from core.prompt_capabilities import target_prompt_flags
+            target_flags = target_prompt_flags(self.runtime_state, tools_view)
+        except Exception:
+            target_flags = {
+                "targets_enabled": False,
+                "target_selection_enabled": False,
+            }
         # Monde vivant : UNIQUEMENT en retry (premier passage inchangé :
         # rapide, pas cher). Le solver active après le 1er échec.
         if enable_world_pd and self.runtime_state.discovery_engine:
@@ -213,6 +221,8 @@ class Planner(Entity):
                 "timestamp": info.get("timestamp", "N/A"),
                 "source": info.get("source", "N/A"),
             }
+            if target_flags["targets_enabled"] and info.get("type") == "target":
+                enriched_registry[name]["type"] = "target"
 
         # --- PRÉPARATION DES MODALITÉS GÉRÉES / DYNAMIQUES POUR LE PLANIFICATEUR ---
         supported_modalities = []
@@ -271,7 +281,9 @@ class Planner(Entity):
             advice=advice,
             model_id=self.llm.model_id,
             supported_modalities=supported_modalities,
-            unsupported_modalities=unsupported_modalities
+            unsupported_modalities=unsupported_modalities,
+            targets_enabled=target_flags["targets_enabled"],
+            target_selection_enabled=target_flags["target_selection_enabled"],
         )
 
         proposed_plan: Plan = await self.llm.generate_structured(
@@ -428,6 +440,16 @@ class Planner(Entity):
                 known_vars.add(f"bool_{clean_out_root}")
                 known_vars.add(f"data_{clean_out_root}")
 
+            target_name = getattr(step, "output_target_name", None)
+            if target_name and str(target_name).strip():
+                target_name = str(target_name).strip()
+                if target_name in known_vars:
+                    errors.append(
+                        _("L'étape '{}' déclare une cible '{}' qui entre en collision "
+                          "avec un nom déjà connu.").format(step.id, target_name)
+                    )
+                known_vars.add(target_name)
+
             # 4. Vérifications d'intégrité tool_args_json
             if step.type == StepType.TOOL_CALL and step.tool_args_json:
                 try:
@@ -444,6 +466,16 @@ class Planner(Entity):
                                 break
                 except (json.JSONDecodeError, TypeError):
                     pass
+
+        try:
+            from core.plan_validator import find_target_plan_problems
+            runtime_state = getattr(self, "runtime_state", None)
+            tools_mgr = getattr(runtime_state, "tools_manager", None)
+            errors.extend(find_target_plan_problems(plan, tools_mgr))
+        except Exception as e:
+            warnings.append(
+                _("Validation des cibles indisponible : {err}").format(err=e)
+            )
 
         if unknown_hints:
             # Une seule piste par variable : proches + disponibles (capé).

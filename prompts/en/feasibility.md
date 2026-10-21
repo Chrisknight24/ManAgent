@@ -41,6 +41,14 @@ If a skill covers the goal, the strategy prioritizes it (`execute_skill`).
 
 ## REGISTRY
 {{ registry }}
+{% if targets_enabled %}
+## TARGETS
+- Targets are local names (`$@_<name>`), never raw references.
+- A strategy may reuse an already named target in a consumer argument.
+{% if target_selection_enabled %}
+- Several candidates: plan the selection meta-tool, which picks a local key.
+{% endif %}
+{% endif %}
 
 ---
 

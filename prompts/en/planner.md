@@ -28,6 +28,14 @@ Reports from past JUDGED missions (the judge can be wrong): suggestive leads, ne
 {% else %}
 [Registry empty: no names to copy yet.]
 {% endif %}
+{% if targets_enabled %}
+## TARGETS
+- A target is designated by a local name (`$@_<name>`), never by a raw reference.
+- `output_target_name`: only on a target producer or a selection meta-tool. Put that exact name in a consumer argument afterwards.
+{% if target_selection_enabled %}
+- Several candidates: the selection meta-tool picks a local key. Never invent a key.
+{% endif %}
+{% endif %}
 
 ## TOOLS (copy names exactly)
 {% for tool in tools %}
