@@ -191,6 +191,253 @@ Après ce geste, l'hôte vérifie activement que le monde a bougé. Absent ou
   l'écrit jamais lui-même.
 - Exemple : `{"action": "text", "text": "12+34=", "await_change": true}`.
 
+## 3i. Cibles opaques (`target_contract`, optionnel)
+
+Un hôte visuel manipule souvent des références qu'il ne faut **jamais** montrer
+au LLM : handle de fenêtre, index DOM, identifiant interne, coordonnée stable.
+`target_contract` permet à l'hôte de déclarer, outil par outil :
+
+- les paramètres qui **consomment** une cible (clic, saisie, focus...) ;
+- les chemins de résultat qui **produisent** des cibles (scan, perception...).
+
+Le runtime garde la référence opaque, donne au LLM un **nom local** stable
+(`target_ui_element_ab12cd34`), puis la résout au dernier moment vers la
+référence brute avant l'appel hôte. Sans `target_contract`, rien ne change :
+aucun nom n'est créé, aucun prompt cible n'apparaît, le comportement est
+identique à l'octet près. Un seul interrupteur : la présence du contrat.
+
+### Déclaration dans le manifeste
+
+`target_contract` est un champ de l'outil, au même niveau que `parameters`
+(schéma : `docs/host.manifest.schema.json`, exemple complet :
+`docs/host.manifest.example.json`) :
+
+```json
+{
+  "name": "click_element",
+  "kind": "action",
+  "description": "Clique un élément déjà perçu.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "target": {"type": "string", "description": "Nom local de la cible."}
+    },
+    "required": ["target"]
+  },
+  "target_contract": {
+    "version": 1,
+    "consumes": [
+      {"param": "target", "scope": "ui_element", "required": true}
+    ]
+  }
+}
+```
+
+```json
+{
+  "name": "scan_ui",
+  "kind": "perception",
+  "description": "Liste les éléments visibles.",
+  "parameters": {
+    "type": "object",
+    "properties": {"query": {"type": "string"}},
+    "required": ["query"]
+  },
+  "target_contract": {
+    "version": 1,
+    "produces": [
+      {
+        "path": "data.targets",
+        "mode": "candidates",
+        "scope": "ui_element",
+        "fields": {
+          "ref": "id",
+          "description": "label",
+          "correlation_id": "corr",
+          "generation": "gen"
+        }
+      }
+    ]
+  }
+}
+```
+
+Règles de validation (le contrat est tout ou rien) :
+
+- `version` vaut `1` ; absent ou invalide = contrat refusé, outil utilisable
+  mais **inerte** côté cibles (diagnostic dans les logs).
+- `consumes[].param` doit exister dans `parameters.properties`, être unique, et
+  ne pas déclarer d'`enum` (le LLM passe un nom local, pas une valeur hôte).
+- Paramètres réservés, interdits comme consommateur : `source`, `source_data`,
+  `sources` (ils gardent leur sens de référence de variable).
+- `produces[].path` est un chemin pointé **relatif au résultat complet** :
+  `data.targets` désigne `result["data"]["targets"]`.
+- `mode` : `single` (une seule cible, auto-sélectionnée) ou `candidates`
+  (liste ; le LLM choisit une clé locale).
+- `scope` XOR `fields.scope` : scope fixe déclaré, ou scope lu sur chaque item.
+  Un item sans scope exploitable est ignoré (une sortie `single` devient `null`).
+- `fields.ref` est obligatoire. Les autres rôles reconnus sont `description`,
+  `scope`, `correlation_id`, `generation` ; les rôles inconnus sont ignorés
+  avec un avertissement.
+- `usable_as` (optionnel) élargit les scopes consommables : une cible de ce
+  scope peut remplir un slot de chaque scope listé. Défaut : `[scope]`.
+  La relation n'est pas transitive.
+- Aucun `enum` sur un paramètre consommateur, et aucun `targets` legacy sans
+  `target_contract` : le lint le signale et les cibles restent inertes.
+
+### Consommer une cible
+
+1. Le plan choisit un **nom local** déjà présent dans le registre :
+   `target: "$@_target_ui_element_ab12cd34"`.
+2. Le runtime résout le nom, vérifie l'état et le scope, puis envoie à l'hôte
+   la **référence brute** sous le même paramètre :
+   `{"target": {"hwnd": 7, "index": 3}}`. La référence n'est jamais envoyée
+   au LLM.
+3. Si le contrat contient plusieurs consommateurs, la résolution est
+   **tout ou rien** : un seul nom inconnu, inactif ou de mauvais scope annule
+   l'appel complet. Aucun `tool.requested` n'est émis, aucun effet hôte.
+
+Le `tool.requested` peut porter `arguments_display` : une copie des arguments
+avec les **noms locaux** (pour l'UI/logs hôte), tandis que `arguments` contient
+les références brutes. Il n'est ajouté que si au moins un consommateur `deny` a
+été résolu ; un consommateur `"raw": "allow"` reste inchangé et n'ajoute rien.
+
+`raw` (défaut `deny`) :
+
+- `deny` : la valeur doit être un nom local de cible ; texte mixte, référence
+  brute ou nom inconnu = refus avant dispatch.
+- `allow` : échappatoire legacy explicite. La valeur est transmise telle quelle,
+  sans résolution ni validation ; aucune entrée `arguments_display` n'est
+  ajoutée pour ce consommateur. À réserver aux outils qui ne peuvent pas encore
+  migrer.
+
+### Produire des cibles
+
+Quand un outil producteur répond, l'hôte renvoie ses références brutes dans le
+chemin déclaré :
+
+```json
+{"result": true,
+ "data": {"targets": [
+   {"id": {"hwnd": 7, "index": 3}, "label": "Fermer", "corr": "scan-1", "gen": 4}
+ ]}}
+```
+
+Le runtime :
+
+- enregistre chaque item valide et remplace le chemin par sa forme publique :
+  `{"key": "target_ui_element_ab12cd34", "description": "Fermer",
+    "scope": "ui_element"}` ;
+- supprime la référence brute, `correlation_id` et `generation` de la vue
+  stockée et de tout artefact LLM-facing ;
+- ignore un item sans `ref` exploitable (liste : item omis ; `single` : `null`) ;
+- ne réutilise jamais silencieusement une cible ressemblante.
+
+Identité et fraîcheur :
+
+- **dédup** : d'abord `correlation_id`, sinon la référence canonique (JSON trié).
+  Une même cible garde le même nom local.
+- **génération** : une génération supérieure ou égale met à jour l'entrée ; une
+  génération absente n'écrase jamais une génération présente ; une génération
+  inférieure est ignorée. Les entiers négatifs sont invalides.
+- **ABA** : une cible invalidée n'est jamais réutilisée sous le même nom pour
+  une autre cible. Si l'hôte la retrouve avec le même `correlation_id`, elle
+  peut être réactivée sous son ancien nom ; sinon un nouveau nom local est
+  créé et l'ancien reste mort.
+- une référence doit être non vide et sans `NaN`/`Infinity`, sinon
+  `TARGET_SCHEMA_INVALID` (diagnostic, l'item est ignoré).
+- les descriptions sont des **données non fiables**, plafonnées à 200
+  caractères, jamais des instructions.
+
+### Mises à jour (`target_updates`)
+
+Un résultat peut invalider des cibles connues :
+
+```json
+{"result": true, "data": {"ok": true},
+ "target_updates": [{"correlation_id": "scan-1", "op": "invalidate", "generation": 4}]}
+```
+
+- seul `op: "invalidate"` existe en v1 ; `op` absent vaut `invalidate` ;
+- la cible est trouvée par `correlation_id`, sinon par `ref` ;
+- si l'entrée a une génération, l'update doit fournir une génération
+  supérieure ou égale ; une génération absente n'invalide pas une entrée
+  générationnée ;
+- l'update est appliqué **au plus tard avec le résultat de l'action**, même si
+  `result` vaut `false`, puis retiré du payload stocké. Le LLM ne voit ni
+  l'update ni la référence.
+
+### Erreurs et paquets
+
+Refus **avant dispatch** (aucun effet hôte) :
+
+```json
+{"result": false, "data": null, "dispatched": false,
+ "error": {"code": "TARGET_NOT_FOUND", "message": "..."},
+ "message": "..."}
+```
+
+| Code | Sens |
+|---|---|
+| `TARGET_NOT_FOUND` | nom local inconnu, texte mixte, ou aucune cible résolue |
+| `TARGET_INACTIVE` | cible connue mais invalidée |
+| `TARGET_SCOPE_MISMATCH` | scope produit incompatible avec le scope consommé |
+| `TARGET_SCHEMA_INVALID` | nom local vide/mal formé, référence ou entrée invalide |
+| `TARGET_STALE_REF` | réservé à un refus de référence signalé par l'hôte ; le runtime ne l'invente jamais |
+
+`TARGET_REF_REJECTED` n'existe pas. Un refus émis par l'hôte reste un refus
+hôte (`result.status: "rejected"` + son `error.code`), pas une réécriture
+runtime.
+
+Champs de résultat :
+
+- `dispatched: true` est ajouté par le runtime à un résultat hôte effectivement
+  reçu si le contrat est actif et si l'hôte ne l'a pas déjà fourni. Le runtime
+  ne remplace jamais une valeur hôte.
+- `dispatched: false` signifie « rien n'a été envoyé à l'hôte » (refus avant
+  dispatch).
+- Sans contrat, le résultat hôte est renvoyé **inchangé** : aucun `dispatched`,
+  aucun `arguments_display`.
+
+### Surface de prompts
+
+Tout est piloté par le manifeste, jamais par une option cachée :
+
+- sans `target_contract` effectif : prompts **byte-identiques** à la version
+  sans cibles ; aucun jeton `target_contract`, `output_target_name`, `TARGET_`,
+  `dispatched` ni `(target)` ;
+- avec un contrat effectif : seuls les blocs cibles minimaux apparaissent
+  (`(target)` dans la ligne de registre, note de sélection si un producteur
+  `candidates` existe, grammaire `output_target_name`). Les paramètres
+  consommateurs sont marqués `[target]` dans la description de l'outil ;
+- jamais de référence brute, `correlation_id`, `generation` ni payload hôte
+  dans un prompt ; les cibles inactives et les alias morts ne sont pas affichés ;
+- un contrat invalide ou partiel laisse le prompt de base et produit un
+  diagnostic, jamais une section partielle ;
+- `manifest_updated` ou un reset recalcule la surface immédiatement ; retirer
+  le contrat fait disparaître les blocs.
+
+Budget : la surface cible reste petite (marqueur + quelques lignes, ~200 tokens
+au plus). `targets` est indépendant de `world` : déclarer des cibles n'active
+pas le snapshot monde, et inversement.
+
+### Lois hôte (L1-L5)
+
+- **L1** : « rejeter » = aucun effet (atomique).
+- **L2** : une référence invalidée n'est jamais réutilisée pour une autre
+  cible sans `generation`.
+- **L3** : un update/invalidation causé par une action est livré au plus tard
+  avec le résultat de cette action.
+- **L4** : l'hôte n'agit jamais sur un substitut ressemblant.
+- **L5** : les descriptions de cibles sont des données non fiables.
+
+### Non-bridage
+
+TargetRegistry n'ajoute aucun plafond de sortie et ne baisse pas
+`LLM_STRUCTURED_MAX_OUTPUT_TOKENS`. Un échec de cible est honnête : pas de
+retry local, pas de substitution automatique, remontée au Solver. La référence
+opaque reste côté runtime ; seul le nom local circule vers le LLM.
+
 ## 4. Actions supportées (voir `core/constants.py:8`)
 
 | Action | Usage |

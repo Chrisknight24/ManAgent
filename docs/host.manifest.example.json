@@ -18,6 +18,24 @@
       }
     },
     {
+      "name": "clic_element",
+      "kind": "action",
+      "description": "Clique une cible déjà perçue. Le paramètre target reçoit un nom local fourni par ManAgent.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "target": { "type": "string", "description": "Nom local de la cible à cliquer." }
+        },
+        "required": ["target"]
+      },
+      "target_contract": {
+        "version": 1,
+        "consumes": [
+          { "param": "target", "scope": "ui_element" }
+        ]
+      }
+    },
+    {
       "name": "taper_texte",
       "kind": "action",
       "description": "Tape du texte au clavier. Renvoie true si envoyé.",
@@ -32,13 +50,29 @@
     {
       "name": "lire_ecran",
       "kind": "perception",
-      "description": "Décrit ce qui est visible à l'écran. Appelé uniquement via perceive_understand, jamais en direct.",
+      "description": "Décrit les éléments visibles à l'écran et renvoie data.targets. Appelé uniquement via perceive_understand, jamais en direct.",
       "parameters": {
         "type": "object",
         "properties": {
           "question": { "type": "string", "description": "Que chercher (ex: où est le bouton OK ?)." }
         },
         "required": ["question"]
+      },
+      "target_contract": {
+        "version": 1,
+        "produces": [
+          {
+            "path": "data.targets",
+            "mode": "candidates",
+            "scope": "ui_element",
+            "fields": {
+              "ref": "id",
+              "description": "label",
+              "correlation_id": "corr",
+              "generation": "gen"
+            }
+          }
+        ]
       }
     },
     {

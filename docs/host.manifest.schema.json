@@ -24,6 +24,73 @@
           "max_wait_ms": { "type": "integer", "minimum": 1, "description": "Optional per-tool active-wait ceiling (changing_effects). Absent = host default." },
           "description": { "type": "string" },
           "parameters": { "type": "object" },
+          "target_contract": {
+            "type": "object",
+            "description": "Optional opaque-target contract (version 1). Invalid contract = tool stays usable but target-inert. Ref: docs/HOST_CONTRACT.md section 3i.",
+            "required": ["version"],
+            "properties": {
+              "version": { "type": "integer", "const": 1 },
+              "consumes": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["param"],
+                  "properties": {
+                    "param": {
+                      "type": "string",
+                      "description": "Top-level tool parameter. Reserved: source, source_data, sources. Must not declare an enum."
+                    },
+                    "scope": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
+                    },
+                    "required": { "type": "boolean", "default": true },
+                    "raw": { "type": "string", "enum": ["deny", "allow"], "default": "deny" }
+                  },
+                  "additionalProperties": true
+                }
+              },
+              "produces": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["path", "mode", "fields"],
+                  "description": "Use scope XOR fields.scope. fields.ref is mandatory.",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)*$",
+                      "description": "Dotted path relative to the full tool result (e.g. data.targets)."
+                    },
+                    "mode": { "type": "string", "enum": ["single", "candidates"] },
+                    "scope": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
+                    },
+                    "fields": {
+                      "type": "object",
+                      "required": ["ref"],
+                      "properties": {
+                        "ref": { "type": "string" },
+                        "description": { "type": "string" },
+                        "scope": { "type": "string" },
+                        "correlation_id": { "type": "string" },
+                        "generation": { "type": "string" }
+                      },
+                      "additionalProperties": true
+                    },
+                    "usable_as": {
+                      "type": "array",
+                      "items": { "type": "string" },
+                      "description": "Consumable scopes; default [scope]. Not transitive."
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            },
+            "additionalProperties": true
+          },
           "returns": {
             "type": "array",
             "description": "Typed output payloads (ManAgent vocabulary: MIME types). Optional; undeclared = text.",

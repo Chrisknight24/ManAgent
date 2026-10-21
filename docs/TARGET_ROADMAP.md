@@ -1,6 +1,6 @@
 ﻿# TargetRegistry — Roadmap d'implémentation
 
-**Statut : S4 implémenté** (2026-10-21). Tests verts (564). S5 en attente de GO.
+**Statut : S5 implémenté** (2026-10-21). Tests verts (564). S6 en attente de GO.
 Ce document est la **source de vérité** du chantier ; il remplace
 `CHANTIER_TARGET.md` (archivé) et complète `TARGET_REGISTRY.md` (spec de
 conception, propriété de l'Expert).
@@ -519,7 +519,7 @@ pour les contrats effectifs, sans muter le manifeste. Prompts : flags
 `candidates`, grammaire `output_target_name` conditionnelle, blocs `base`/`en`/`fr`.
 Sans contrat : aucun jeton cible. 12 tests ajoutés (suite 564 verte).
 
-### S5 — HOST_CONTRACT (FR/EN)
+### S5 — HOST_CONTRACT (FR/EN) (implémenté le 2026-10-21)
 
 - Documenter : manifeste, `consumes`/`produces`, modes, opacité des refs, lois
   L1-L5, codes, génération/ABA, `target_updates`, `raw deny/allow`, noms
@@ -528,6 +528,15 @@ Sans contrat : aucun jeton cible. 12 tests ajoutés (suite 564 verte).
   déclare est ce qui apparaît ; sans déclaration, prompts inchangés à l'octet.
 - Aucun code ; T28 reste vert.
 - Acceptation : un hôte peut implémenter sans lire le code.
+
+**Implémentation** : sections `3i. Cibles opaques` dans
+`docs/HOST_CONTRACT.md` et `docs/en/HOST_CONTRACT.md` : déclaration
+`target_contract`, consommateurs/producteurs, `raw`, `usable_as`, codes,
+génération/dédup/ABA, `target_updates`, `dispatched`, `arguments_display`,
+surface de prompts et lois L1-L5. `docs/host.manifest.schema.json` et
+`docs/host.manifest.example.json` documentent le champ, avec un producteur
+`candidates` et un consommateur valides. Aucun code runtime modifié ; suite
+inchangée à 564 tests.
 
 ### S6 — Surface hôte
 
@@ -661,3 +670,9 @@ Sans contrat : aucun jeton cible. 12 tests ajoutés (suite 564 verte).
   marqueur `(target)`, note de sélection conditionnelle, grammaire
   `output_target_name` conditionnelle (`base`/`en`/`fr`). Sans contrat : zéro
   jeton cible, prompts inchangés. 12 tests ajoutés (suite 564 verte).
+- 2026-10-21 : **S5 implémenté**. Documentation hôte FR/EN complète dans
+  `HOST_CONTRACT.md` (section 3i) : manifeste, consommateurs/producteurs,
+  modes, opacité, codes, génération/ABA, `target_updates`, `raw`, noms réservés,
+  `dispatched`, `arguments_display`, lois L1-L5, surface de prompts et
+  non-bridage. Schéma et manifeste d'exemple mis à jour. Aucun code ; suite
+  inchangée à 564 tests.

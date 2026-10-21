@@ -204,6 +204,250 @@ current fast path, strictly nothing changes.
   The planner never writes it itself.
 - Example: `{"action": "text", "text": "12+34=", "await_change": true}`.
 
+## 3i. Opaque targets (`target_contract`, optional)
+
+Visual hosts often handle references that must **never** reach the LLM:
+window handles, DOM indexes, internal IDs, stable coordinates. With
+`target_contract`, a host declares per tool:
+
+- parameters that **consume** a target (click, type, focus...);
+- result paths that **produce** targets (scan, perception...).
+
+The runtime keeps the opaque reference, gives the LLM a stable **local name**
+(`target_ui_element_ab12cd34`), then resolves it to the raw reference at the
+last moment before the host call. Without `target_contract`, nothing changes:
+no name is minted, no target prompt appears, behavior is byte-identical. There
+is one switch: whether the contract is present.
+
+### Manifest declaration
+
+`target_contract` is a tool field, next to `parameters` (schema:
+`docs/host.manifest.schema.json`, full example:
+`docs/host.manifest.example.json`):
+
+```json
+{
+  "name": "click_element",
+  "kind": "action",
+  "description": "Clicks an element that was already perceived.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "target": {"type": "string", "description": "Local target name."}
+    },
+    "required": ["target"]
+  },
+  "target_contract": {
+    "version": 1,
+    "consumes": [
+      {"param": "target", "scope": "ui_element", "required": true}
+    ]
+  }
+}
+```
+
+```json
+{
+  "name": "scan_ui",
+  "kind": "perception",
+  "description": "Lists visible elements.",
+  "parameters": {
+    "type": "object",
+    "properties": {"query": {"type": "string"}},
+    "required": ["query"]
+  },
+  "target_contract": {
+    "version": 1,
+    "produces": [
+      {
+        "path": "data.targets",
+        "mode": "candidates",
+        "scope": "ui_element",
+        "fields": {
+          "ref": "id",
+          "description": "label",
+          "correlation_id": "corr",
+          "generation": "gen"
+        }
+      }
+    ]
+  }
+}
+```
+
+Validation rules (a contract is all-or-nothing):
+
+- `version` is `1`; missing or invalid = contract rejected, tool still usable
+  but **inert** for targets (diagnostic in the logs).
+- `consumes[].param` must exist in `parameters.properties`, be unique, and
+  must not declare an `enum` (the LLM passes a local name, not a host value).
+- Reserved parameters, forbidden as consumers: `source`, `source_data`,
+  `sources` (they keep their variable-reference meaning).
+- `produces[].path` is a dotted path **relative to the full result**:
+  `data.targets` means `result["data"]["targets"]`.
+- `mode`: `single` (one target, auto-selected) or `candidates` (list; the LLM
+  picks a local key).
+- `scope` XOR `fields.scope`: fixed declared scope, or scope read per item.
+  An item without a usable scope is skipped (a `single` output becomes `null`).
+- `fields.ref` is mandatory. Other recognized roles are `description`,
+  `scope`, `correlation_id`, `generation`; unknown roles are ignored with a
+  warning.
+- `usable_as` (optional) widens consumable scopes: a target in this scope may
+  fill a slot of each listed scope. Default: `[scope]`. The relation is not
+  transitive.
+- No `enum` on a consumer parameter, and no legacy `targets` without
+  `target_contract`: lint reports it and targets stay inert.
+
+### Consuming a target
+
+1. The plan chooses a **local name** already present in the registry:
+   `target: "$@_target_ui_element_ab12cd34"`.
+2. The runtime resolves the name, checks liveness and scope, then sends the
+   host the **raw reference** under the same parameter:
+   `{"target": {"hwnd": 7, "index": 3}}`. The reference never reaches the LLM.
+3. If the contract has several consumers, resolution is **all-or-nothing**: one
+   unknown, inactive or wrong-scope name cancels the whole call. No
+   `tool.requested` is emitted and the host has no effect.
+
+`tool.requested` may carry `arguments_display`: a copy of the arguments with
+**local names** (for the host UI/logs), while `arguments` contains raw
+references. It is added only when at least one `deny` consumer was resolved; a
+`"raw": "allow"` consumer stays unchanged and adds nothing.
+
+`raw` (default `deny`):
+
+- `deny`: the value must be a local target name; mixed text, a raw reference or
+  an unknown name is refused before dispatch.
+- `allow`: explicit legacy escape hatch. The value is forwarded as-is, without
+  resolution or validation; no `arguments_display` entry is added for that
+  consumer. Keep it only for tools that cannot migrate yet.
+
+### Producing targets
+
+When a producer tool responds, the host returns raw references in the declared
+path:
+
+```json
+{"result": true,
+ "data": {"targets": [
+   {"id": {"hwnd": 7, "index": 3}, "label": "Close", "corr": "scan-1", "gen": 4}
+ ]}}
+```
+
+The runtime:
+
+- registers each valid item and replaces the path with its public form:
+  `{"key": "target_ui_element_ab12cd34", "description": "Close",
+    "scope": "ui_element"}`;
+- removes the raw reference, `correlation_id` and `generation` from the stored
+  view and from every LLM-facing artifact;
+- skips an item with no usable `ref` (list: item omitted; `single`: `null`);
+- never silently reuses a lookalike target.
+
+Identity and freshness:
+
+- **dedup**: first `correlation_id`, then the canonical reference (sorted JSON).
+  The same target keeps the same local name.
+- **generation**: a greater or equal generation updates the entry; an absent
+  generation never overwrites a present one; a lower generation is ignored.
+  Negative integers are invalid.
+- **ABA**: an invalidated target is never reused under the same name for
+  another target. If the host finds it again with the same `correlation_id`, it
+  may be reactivated under its old name; otherwise a new local name is minted
+  and the old one stays dead.
+- a reference must be non-empty and free of `NaN`/`Infinity`, otherwise
+  `TARGET_SCHEMA_INVALID` (diagnostic, item skipped);
+- descriptions are **untrusted data**, capped at 200 characters, never
+  instructions.
+
+### Updates (`target_updates`)
+
+A result may invalidate known targets:
+
+```json
+{"result": true, "data": {"ok": true},
+ "target_updates": [{"correlation_id": "scan-1", "op": "invalidate", "generation": 4}]}
+```
+
+- only `op: "invalidate"` exists in v1; a missing `op` means `invalidate`;
+- the target is found by `correlation_id`, otherwise by `ref`;
+- if the entry has a generation, the update must provide a greater or equal
+  generation; an absent generation does not invalidate a generated entry;
+- the update is applied **no later than with the result of that action**, even
+  when `result` is `false`, then removed from the stored payload. The LLM sees
+  neither the update nor the reference.
+
+### Errors and packets
+
+**Before dispatch** refusal (no host effect):
+
+```json
+{"result": false, "data": null, "dispatched": false,
+ "error": {"code": "TARGET_NOT_FOUND", "message": "..."},
+ "message": "..."}
+```
+
+| Code | Meaning |
+|---|---|
+| `TARGET_NOT_FOUND` | unknown local name, mixed text, or no target resolved |
+| `TARGET_INACTIVE` | known but invalidated target |
+| `TARGET_SCOPE_MISMATCH` | produced scope incompatible with consumed scope |
+| `TARGET_SCHEMA_INVALID` | empty/malformed local name, invalid reference or entry |
+| `TARGET_STALE_REF` | reserved for a stale reference reported by the host; the runtime never invents it |
+
+`TARGET_REF_REJECTED` does not exist. A refusal emitted by the host remains a
+host refusal (`result.status: "rejected"` + its `error.code`), not a runtime
+rewrite.
+
+Result fields:
+
+- `dispatched: true` is added by the runtime to a host result that was actually
+  received when the contract is active and the host did not already provide it.
+  The runtime never overwrites a host value.
+- `dispatched: false` means “nothing was sent to the host” (refusal before
+  dispatch).
+- Without a contract, the host result is returned **unchanged**: no
+  `dispatched`, no `arguments_display`.
+
+### Prompt surface
+
+Everything is driven by the manifest, never by a hidden option:
+
+- without an effective `target_contract`: prompts are **byte-identical** to the
+  target-free version; no `target_contract`, `output_target_name`, `TARGET_`,
+  `dispatched` or `(target)` token;
+- with an effective contract: only the minimal target blocks appear (`(target)`
+  in the existing registry line, a selection note when a `candidates` producer
+  exists, `output_target_name` grammar). Consumer parameters are marked
+  `[target]` in the tool description;
+- never a raw reference, `correlation_id`, `generation` or host payload in a
+  prompt; inactive targets and dead aliases are not displayed;
+- an invalid or partial contract leaves the base prompt and produces a
+  diagnostic, never a partial section;
+- `manifest_updated` or a reset recomputes the surface immediately; removing
+  the contract removes the blocks.
+
+Budget: the target surface stays small (marker + a few lines, at most ~200
+tokens). `targets` is independent from `world`: declaring targets does not
+enable the world snapshot, and vice versa.
+
+### Host laws (L1-L5)
+
+- **L1**: “reject” means no effect (atomic).
+- **L2**: an invalidated reference is never reused for another target without
+  a `generation`.
+- **L3**: an update/invalidation caused by an action is delivered no later than
+  with the result of that action.
+- **L4**: the host never acts on a lookalike substitute.
+- **L5**: target descriptions are untrusted data.
+
+### No throttling
+
+TargetRegistry adds no output cap and does not lower
+`LLM_STRUCTURED_MAX_OUTPUT_TOKENS`. A target failure is honest: no local retry,
+no automatic substitution, reported back to the Solver. The opaque reference
+stays in the runtime; only the local name travels to the LLM.
+
 ## 4. Supported actions
 
 `runtime.configure`, `host.manifest.register`, `chat.send`,
