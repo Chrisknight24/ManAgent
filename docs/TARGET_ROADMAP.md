@@ -1,6 +1,6 @@
 ﻿# TargetRegistry — Roadmap d'implémentation
 
-**Statut : S1 implémenté** (2026-10-21). Tests verts (537). S2 en attente de GO.
+**Statut : S2 implémenté** (2026-10-21). Tests verts (545). S3 en attente de GO.
 Ce document est la **source de vérité** du chantier ; il remplace
 `CHANTIER_TARGET.md` (archivé) et complète `TARGET_REGISTRY.md` (spec de
 conception, propriété de l'Expert).
@@ -389,7 +389,7 @@ d'intégration utilisent `HostSim`.
 
 Chaque étape = un commit indépendant, tests verts, aucun changement de
 comportement tant que `target_contract` est absent. La suite doit rester à
-**469 + nouveaux** tests.
+**545** tests après S2.
 
 ### S0 — Contrat + registre inerte (implémenté le 2026-10-20)
 
@@ -449,7 +449,7 @@ sur échec ; `dispatched:true` ajouté au résultat **uniquement** si un contrat
 actif existe ; exemption `enum` aux deux sites. 12 tests ajoutés (suite 537
 verte).
 
-### S2 — Membrane ingress
+### S2 — Membrane ingress (implémenté le 2026-10-21)
 
 - `executor` : projection **après** assets typés (:1083-1124), avant stockage
   (:1199) ; `node.result` projeté ; `target_updates` appliqué puis retiré.
@@ -459,6 +459,13 @@ verte).
 - Tests : T15, T18, T21-T23, T25, T26.
 - Acceptation : aucune ref dans `variable_registry`/historique ; updates avant
   l'étape suivante.
+
+**Implémentation** : `core/target_ingress.py` (projection par `ProducerSpec`,
+`apply_target_updates`, `strip_target_updates`) ; `TargetRegistry.find_by_correlation`
+et `find_by_ref` ; projection dans `executor` après les assets typés et avant
+stockage, `node.result` inclus ; updates appliquées même sur résultat en échec
+puis retirées du payload ; snapshot `register=False` (projection seule, cibles
+inconnues omises). 8 tests ajoutés (suite 545 verte).
 
 ### S3 — Sélection et méta-outils
 
@@ -612,3 +619,8 @@ verte).
   (noms) pour l'UI, erreurs fermées + `dispatched:false`, `dispatched:true`
   seulement si contrat actif, exemption enum aux deux sites. 12 tests ajoutés
   (suite 537 verte). Aucun prompt modifié.
+- 2026-10-21 : **S2 implémenté**. `core/target_ingress.py` (projection des
+  producteurs, updates), `find_by_correlation`/`find_by_ref`, projection dans
+  `executor` avant stockage et dans `node.result`, `target_updates` appliquées
+  puis retirées, snapshot en projection seule (`register=False`). 8 tests
+  ajoutés (suite 545 verte). Aucun prompt modifié.

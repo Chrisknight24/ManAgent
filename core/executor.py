@@ -1184,6 +1184,27 @@ class Executor:
                 except Exception as e:
                     Logger.warning(f"[Executor] Normalisation des charges typées impossible ({e}) — repli texte.")
 
+            # --- 1c. Membrane ingress cibles : refs -> noms locaux, updates.
+            # Sans contrat `target_contract` : rien n'est appele (inertie).
+            try:
+                _target_contract = (
+                    _tools_mgr.get_target_contract(step.tool_name)
+                    if _tools_mgr is not None and hasattr(_tools_mgr, "get_target_contract")
+                    else None
+                )
+                _target_registry = getattr(self.solver.runtime_state, "target_registry", None)
+                if _target_contract is not None and _target_registry is not None:
+                    from core.target_ingress import apply_target_updates, project_target_payload
+                    parsed_result, _target_count = project_target_payload(
+                        _target_registry, _target_contract, parsed_result, register=True
+                    )
+                    parsed_result, _updates_applied = apply_target_updates(
+                        _target_registry, parsed_result
+                    )
+                    actual_data = parsed_result.get("data", None)
+            except Exception as e:
+                Logger.warning(f"[Executor] Projection des cibles impossible ({e}) - donnees brutes conservees.")
+
             # --- 2. Description de données : dire ce qu'EST la donnée (pas d'où elle vient).
             if actual_data is not None:
                 data_description = (
@@ -1338,7 +1359,10 @@ class Executor:
             return True, formatted_output, error_reason_msg
 
         except json.JSONDecodeError:
-            Logger.warning(f"[Executor] Échec de parsing JSON pour l'outil {step.tool_name}. Contenu reçu : {hardware_result_str[:200]}")
+            Logger.warning(
+                f"[Executor] Échec de parsing JSON pour l'outil {step.tool_name}. "
+                f"Longueur reçue : {len(hardware_result_str or '')} caractères."
+            )
             return False, "", "Le retour de l'outil C++ ne respecte pas le format JSON strict."
 
     # =====================================================

@@ -306,6 +306,18 @@ class TargetRegistry:
     def get(self, local_name: str) -> Optional[TargetEntry]:
         return self._entries.get(local_name)
 
+    def find_by_correlation(self, correlation_id: str) -> Optional[TargetEntry]:
+        name = self._index.get_by_correlation(correlation_id)
+        return self._entries.get(name) if name is not None else None
+
+    def find_by_ref(self, ref: Any) -> Optional[TargetEntry]:
+        try:
+            canonical = TargetRef.from_value(ref).canonical
+        except TargetSchemaError:
+            return None
+        name = self._index.get_by_ref(canonical)
+        return self._entries.get(name) if name is not None else None
+
     def all(self, include_inactive: bool = False) -> List[TargetEntry]:
         entries = [
             entry for entry in self._entries.values()

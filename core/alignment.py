@@ -76,6 +76,20 @@ async def fetch_world_state_snapshot(runtime_state, max_chars: int = 800) -> str
             if not parsed.get("result", True):
                 Logger.info("[snapshot] snapshot.skip reason=source_failed.")
                 return ""
+            try:
+                contract = (
+                    tm.get_target_contract(source_tool)
+                    if hasattr(tm, "get_target_contract") else None
+                )
+                registry = getattr(runtime_state, "target_registry", None)
+                if contract is not None:
+                    from core.target_ingress import project_target_payload, strip_target_updates
+                    parsed, _projected = project_target_payload(
+                        registry, contract, parsed, register=False
+                    )
+                    parsed = strip_target_updates(parsed)
+            except Exception as e:
+                Logger.debug(f"[snapshot] target projection skipped ({e}).")
             data = parsed.get("data", parsed)
         else:
             data = parsed
