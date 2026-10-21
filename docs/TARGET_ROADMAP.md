@@ -1,6 +1,6 @@
 ﻿# TargetRegistry — Roadmap d'implémentation
 
-**Statut : S5 implémenté** (2026-10-21). Tests verts (564). S6 en attente de GO.
+**Statut : S6 implémenté** (2026-10-21). Tests verts (570). S7 en attente de GO.
 Ce document est la **source de vérité** du chantier ; il remplace
 `CHANTIER_TARGET.md` (archivé) et complète `TARGET_REGISTRY.md` (spec de
 conception, propriété de l'Expert).
@@ -538,12 +538,19 @@ surface de prompts et lois L1-L5. `docs/host.manifest.schema.json` et
 `candidates` et un consommateur valides. Aucun code runtime modifié ; suite
 inchangée à 564 tests.
 
-### S6 — Surface hôte
+### S6 — Surface hôte (implémenté le 2026-10-21)
 
 - `arguments_display`, `dispatched:false`, enveloppe `error`, ordre des events,
   `manifest_updated`, `target_updates` dans le résultat.
 - Tests : T17, T19, T24.
 - Acceptation : HostSim + un hôte réel minimal.
+- Implémentation : `tests/host_sim.py` (banc protocole minimal, vrais
+  `ToolsManager` / `TargetRegistry` / handlers de paquets de l'Orchestrateur,
+  sans LLM ni UI). Aucun code runtime modifié : la surface existante est
+  verrouillée par `tests/test_targets_s6.py` (6 tests). Suite : **570**.
+- Limite assumée : l'hôte externe CondiFlow n'est pas lancé en S6 ; le smoke
+  réel reste cadré par R1. Le HostSim complet (génération/ABA/rejets variés)
+  reste en S9.
 
 ### S7 — Recul / snapshot
 
