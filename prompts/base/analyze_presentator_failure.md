@@ -9,4 +9,4 @@ DÉTAIL DE L'ERREUR : {{ error_reason }}
 Instructions :
 1. Identifie un mot-clé de scope STABLE et étroit résumant la situation (ex: 'generation_rapport_echec', 'contexte_trop_long', 'donnees_manquantes').
 2. Propose 5 à 8 mots-clés LARGES de découvrabilité (types de mission, symptômes) qui permettront de retrouver cette leçon plus tard — pas plus, la liste est plafonnée côté code de toute façon.
-3. Produis une règle impérative courte (1-2 phrases), adressée directement au Presentator.
+3. Formule un conseil actionnable et court (1-2 phrases), adressé au Presentator, sous forme de piste pour éviter ce type d'échec à l'avenir.

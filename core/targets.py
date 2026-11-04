@@ -311,6 +311,39 @@ class TargetRegistry:
     def __init__(self) -> None:
         self._entries: Dict[str, TargetEntry] = {}
         self._index = CandidateIndex()
+        self._observer: Optional[Any] = None
+
+    def set_observer(self, observer: Optional[Any]) -> None:
+        """Branche un observateur synchrone `(event_name, payload)`.
+
+        L'observateur ne doit jamais bloquer ni lever : le registre reste
+        utilisable sans orchestrateur (tests, scripts, hôte minimal).
+        """
+        self._observer = observer
+
+    def _emit(self, event_name: str, payload: Dict[str, Any]) -> None:
+        observer = self._observer
+        if observer is None:
+            return
+        try:
+            observer(event_name, payload)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _entry_event(entry: TargetEntry, **extra: Any) -> Dict[str, Any]:
+        payload = {
+            "local_name": entry.local_name,
+            "scope": entry.scope,
+            "description": entry.description,
+            "correlation_id": entry.correlation_id,
+            "generation": entry.generation,
+            "ref": entry.ref.canonical,
+            "usable_as": list(entry.effective_usable_as),
+            "active": entry.active,
+        }
+        payload.update(extra)
+        return payload
 
     def __len__(self) -> int:
         return sum(1 for entry in self._entries.values() if entry.active)
@@ -347,12 +380,55 @@ class TargetRegistry:
     def resolve(self, local_name: str, scope: Optional[str] = None) -> TargetRef:
         entry = self._entries.get(local_name)
         if entry is None:
+            self._emit("target.resolve_failed", {
+                "local_name": local_name, "scope": scope, "reason": "unknown",
+            })
             raise TargetNotFound(local_name)
         if not entry.active:
+            self._emit("target.resolve_failed", {
+                "local_name": local_name, "scope": scope, "reason": "inactive",
+            })
             raise TargetInactive(local_name)
         if scope is not None and not entry.accepts_scope(scope):
+            self._emit("target.resolve_failed", {
+                "local_name": local_name, "scope": scope,
+                "reason": "scope_mismatch", "entry_scope": entry.scope,
+            })
             raise TargetScopeMismatch(local_name, scope)
+        self._emit("target.bound", self._entry_event(entry))
         return entry.ref
+
+    def note_discovered(
+        self,
+        *,
+        scope: str,
+        ref: Any,
+        correlation_id: Optional[str] = None,
+    ) -> None:
+        """Trace une cible brute vue dans un payload, avant enregistrement."""
+        try:
+            canonical = TargetRef.from_value(ref).canonical
+        except TargetSchemaError:
+            return
+        self._emit("target.discovered", {
+            "scope": scope,
+            "ref": canonical,
+            "correlation_id": _clean_correlation_id(correlation_id),
+        })
+
+    def note_selected(
+        self,
+        entry: TargetEntry,
+        *,
+        strategy: str = "single",
+        source: str = "",
+    ) -> None:
+        self._emit("target.selected", self._entry_event(
+            entry, strategy=strategy, source=source,
+        ))
+
+    def note_bound(self, entry: TargetEntry, *, alias: str = "") -> None:
+        self._emit("target.bound", self._entry_event(entry, alias=alias))
 
     def upsert(
         self,
@@ -412,6 +488,7 @@ class TargetRegistry:
                 self._index.remove_ref(old_canonical)
                 self._index.set_ref(ref_value.canonical, existing.local_name)
                 self._index.set_correlation(existing.correlation_id, existing.local_name)
+                self._emit("target.refreshed", self._entry_event(existing))
                 return existing
 
         name = requested_name or self._mint_name(scope_value)
@@ -430,6 +507,7 @@ class TargetRegistry:
         self._entries[name] = entry
         self._index.set_ref(ref_value.canonical, name)
         self._index.set_correlation(corr, name)
+        self._emit("target.registered", self._entry_event(entry, created=True))
         return entry
 
     def invalidate(
@@ -457,6 +535,9 @@ class TargetRegistry:
             return 0
         entry.active = False
         self._index.remove_ref(entry.ref.canonical)
+        self._emit("target.invalidated", self._entry_event(
+            entry, correlation_id=corr, generation=gen,
+        ))
         return 1
 
     def apply_updates(self, updates: Iterable[TargetUpdate]) -> int:
@@ -472,8 +553,13 @@ class TargetRegistry:
     def purge(self, *, all: bool = False, scope: Optional[str] = None) -> int:
         if all:
             count = len(self._entries)
+            names = sorted(self._entries)[:50]
             self._entries.clear()
             self._index.clear()
+            if count:
+                self._emit("target.purged", {
+                    "all": True, "count": count, "names": names,
+                })
             return count
         if scope is not None:
             scope_value = _clean_scope(scope)
@@ -490,6 +576,13 @@ class TargetRegistry:
             entry = self._entries.pop(name, None)
             if entry is not None:
                 self._index.remove(entry)
+        if doomed:
+            self._emit("target.purged", {
+                "all": False,
+                "scope": scope_value if scope is not None else None,
+                "count": len(doomed),
+                "names": sorted(doomed)[:50],
+            })
         return len(doomed)
 
     def clear(self) -> int:

@@ -8,7 +8,7 @@ aux données sous forme de DataAsset.
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Any, Dict
+from typing import List, Any, Dict, Optional
 from .data_asset import DataAsset
 
 class DataProvider(ABC):
@@ -45,3 +45,12 @@ class DataProvider(ABC):
     def get_metadata(self, target: str) -> Dict[str, Any]:
         asset = self.get_asset(target)
         return asset.metadata
+
+    def answer(self, question: str) -> Optional[str]:
+        """Réponse optionnelle en langage naturel à une question (P5).
+
+        Défaut `None` : un provider qui ne sait pas répondre n'est pas
+        obligé d'implémenter quoi que ce soit. Le routeur de scope saute
+        les providers qui renvoient `None`, il n'invente jamais.
+        """
+        return None

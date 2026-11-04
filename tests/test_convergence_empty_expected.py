@@ -1,6 +1,10 @@
-"""A4b : une abstract_task passe TOUJOURS par une ConvergenceDecision, même
-si `expected_result` est vide. Le bypass « vide = accepté » reste scopé aux
-étapes non-abstract_task (tool_call)."""
+"""Convergence et `expected_result` vide.
+
+Doctrine 2026-10-29 : pour un `tool_call`, `expected_result` vide/null vaut
+`"true"` **rigide**. Il n'existe plus de bypass « vide = accepté » : un outil
+qui échoue sans critère explicite reste un échec. L'`abstract_task` garde son
+critère sémantique, vide compris.
+"""
 import asyncio
 import os
 import sys
@@ -27,17 +31,24 @@ def test_abstract_task_empty_expected_goes_semantic():
     assert dec.is_convergent is False
 
 
-def test_tool_call_empty_expected_still_implicit():
+def test_tool_call_empty_expected_is_rigid_true():
     from core.executor import Executor
     ex = Executor.__new__(Executor)
 
     async def boom(*a, **k):
-        raise AssertionError("semantic ne doit pas être appelé pour un tool_call vide")
+        raise AssertionError("semantic ne doit pas être appelé pour un tool_call")
 
     ex._evaluate_semantic_convergence = boom
-    step = SimpleNamespace(type=StepType.TOOL_CALL, expected_result="", id="s1")
-    dec = asyncio.run(ex._check_convergence_inner(step, "result", action_success=True))
-    assert dec.is_convergent is True
+    step = SimpleNamespace(
+        type=StepType.TOOL_CALL, expected_result="", id="s1",
+        tool_name="get_world_state",
+    )
+    ok = asyncio.run(ex._check_convergence_inner(
+        step, "true", node=SimpleNamespace(raw_success_flag="true")))
+    ko = asyncio.run(ex._check_convergence_inner(
+        step, "false", node=SimpleNamespace(raw_success_flag="false")))
+    assert ok.is_convergent is True
+    assert ko.is_convergent is False
 
 
 def test_convergence_prompt_has_empty_expected_rule():

@@ -1,17 +1,17 @@
-Tu analyses une réussite INTERVENUE APRÈS UN ÉCHEC dans un moteur agentique.
+You analyze a success that happened AFTER A FAILURE in an agentic engine.
 
-ENTITÉ RESPONSABLE DE LA STRATÉGIE GAGNANTE : {{ entity_type }}
-RÔLE DE CETTE ENTITÉ : {{ role_description }}
+ENTITY RESPONSIBLE FOR THE WINNING STRATEGY: {{ entity_type }}
+ROLE OF THIS ENTITY: {{ role_description }}
 
-OBJECTIF DE LA SOUS-TÂCHE : {{ goal }}
+SUB-TASK GOAL: {{ goal }}
 
-SÉQUENCE D'EXÉCUTION QUI A RÉUSSI (prunée) :
+EXECUTION SEQUENCE THAT SUCCEEDED (pruned):
 {{ pruned_attempt }}
 
-PLAN PROPOSÉ POUR CETTE TENTATIVE RÉUSSIE :
+PROPOSED PLAN FOR THIS SUCCESSFUL ATTEMPT:
 {{ proposed_plan_desc }}
 
-Instructions (contraste implicite avec les échecs précédents) :
-1. Identifie un mot-clé de scope STABLE et étroit qui résume la STRATÉGIE GAGNANTE à l'origine de ce succès (ex: 'keyboard_win_r_alternative', 'vision_based_ui_navigation').
-2. Propose 5 à 8 mots-clés LARGES et variés.
-3. Produis une règle impérative courte (1-2 phrases), adressée directement à {{ entity_type }}, pour PRIVILÉGIER cette approche à l'avenir, en mentionnant en quoi elle est plus robuste que l'approche qui a échoué précédemment. Note : Les Skills qualifiés restent toujours prioritaires ; ne génère pas de règle préconisant l'abandon systématique de l'outil `execute_skill` ou des Skills.
+Instructions (implicit contrast with previous failures):
+1. Identify a STABLE, narrow scope keyword summarizing the WINNING STRATEGY at the origin of this success (e.g. 'keyboard_win_r_alternative', 'vision_based_ui_navigation').
+2. Propose 5 to 8 BROAD, varied keywords.
+3. Write a short actionable tip (1-2 sentences) addressed to {{ entity_type }}, as a lead for preferring this approach when the situation arises, explaining why it proved more robust than the failed approach. Prefer "it is often preferable to…" over "you must…". Note: Qualified Skills remain a priority; a rule advocating systematic abandonment of the `execute_skill` tool or Skills would probably be counterproductive.

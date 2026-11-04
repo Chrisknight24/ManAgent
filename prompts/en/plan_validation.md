@@ -38,9 +38,9 @@ Each step shows: id, type, tool, full arguments, outputs, `execute_if`, `expecte
 {% endif %}
 
 {% if novelty_assessment %}
-## COMPUTED NOVELTY (fact, not an opinion)
+## COMPUTED NOVELTY (a clue, to be checked against the plan)
 {{ novelty_assessment }}
-Trust this computation: modified arguments addressing the cause = a new plan, even with equal structure.
+This computation is a clue, not proof: modified arguments may indicate a new plan, even with equal structure, but they may also be cosmetic. Check them against the observed cause.
 {% endif %}
 
 ## HISTORY (`[failed]` = ran and failed, `[rejected]` = refused before running and never ran)
@@ -61,20 +61,40 @@ Trust this computation: modified arguments addressing the cause = a new plan, ev
 ## CONFORMANT (`is_conformant`)
 
 Answer `true` when all of these hold:
-- The plan reaches the GOAL as written, counting parts the world state shows already achieved.
+- The plan is safe and executable in the current world state.
+- It reaches the GOAL as written, counting parts the world state shows already achieved, OR it is partial but safe: set `is_partial=true` and list the missing parts in `partial_gaps`.
 - It uses only the available tools and skills. If nothing covers the need, an honest `direct_answer` finding is valid (`true`).
 - No rule in RULES is broken.
-- If an attempt failed WHEN RUN, the plan changes something that treats the cause.
+- If an attempt failed WHEN RUN, the plan proposes a change plausibly related to the observed cause.
 
 Answer `false` when:
 - A rule in RULES is broken.
-- The plan is identical to an EXECUTED failed attempt and the cause is untouched.
+- The plan is identical to an EXECUTED failed attempt, with no change or justification regarding the observed cause.
 - The plan hands GOAL to a sub-task with the same words, and does nothing else.
 - Its declared goal differs from GOAL.
+- The plan is partial with `critical` risk, an irreversible step, a required human confirmation, or gaps too vague to verify.
 
-Good signs: a fresh perception after a stale reference, a new tool, a new branch, a changed argument that fixes the cause, a verification step instead of redoing proven state.
-A plan with the same structure as an earlier one is valid when its arguments changed to fix the cause.
+Good signs (clues, not requirements): a fresh perception after a stale reference, a new tool, a new branch, a changed argument that addresses the observed cause, a verification step instead of redoing proven state.
+A plan with the same structure may be valid when its arguments or wait changed in response to the observed cause.
 A plan that is slower than needed is valid.
+
+## PARTIAL PLAN (`is_partial`)
+
+A partial plan is a SAFE plan that executes a useful part of the GOAL without pretending everything is done.
+It is better than a refusal only if the remaining parts can be done afterwards, without a critical or irreversible action.
+
+`is_partial=true` when:
+- the plan is conformant and safe;
+- it does not cover the whole GOAL;
+- the missing parts are concrete and verifiable;
+- risk stays `low` or `medium`;
+- no irreversible step and no human confirmation are required.
+
+`partial_gaps` must list the missing parts, not the steps already done.
+Example: `["file B is not verified yet", "the final result is not displayed"]`.
+
+NEVER use `is_partial` to excuse a risky, irreversible, or useless plan.
+If the plan is complete, `is_partial=false` and `partial_gaps=[]`.
 
 Waiting: the wait mechanism is `wait_ms` (per step). If absent, a default applies automatically (3000 ms, or the host-declared one). A plan is NEVER non-conformant for lack of waiting: never demand a separate `wait` step.
 
@@ -101,7 +121,9 @@ History of human decisions for this mission:
 
 Return JSON:
 - `is_conformant` (bool)
-- `reason` (string): short. When false, say what the Planner must change, and name the valid choice. Example: "step_2 uses $@_data_screen_capture. Use $@_data_step_1."
+- `reason` (string): short. When false, say what could be adjusted and name the valid choice. Example: "step_2 uses $@_data_screen_capture. A valid choice would be $@_data_step_1."
 - `risk_level` ("low", "medium", "critical")
 - `requires_human_confirmation` (bool)
 - `irreversibility_flags` (list of step ids)
+- `is_partial` (bool): true if the plan is safe but only reaches part of the goal
+- `partial_gaps` (list of strings): verifiable missing parts; empty when `is_partial=false`

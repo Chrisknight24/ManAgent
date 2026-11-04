@@ -1,4 +1,10 @@
-"""Anti faux-succes : any ne valide plus un echec + source_tool agnostique (rapide, sans LLM)."""
+"""Anti faux-succes : `any` accepte une valeur négative, source_tool agnostique.
+
+Doctrine 2026-10-29 : `any` = « je ne juge pas la valeur, je branche dessus ».
+Un `result=false` est une valeur négative légitime, pas un échec de plan. Un
+échec d'infrastructure (args invalides, JSON, exception) avorte avant la
+convergence. `true`/`false` restent stricts.
+"""
 import json
 import os
 import sys
@@ -27,14 +33,16 @@ def _pu_step(sid, args, expected="any"):
     )
 
 
-def test_any_with_false_flag_rejected():
+def test_any_with_false_flag_accepted():
+    # Valeur négative légitime : le plan branche dessus (ex : ouvrir Paint).
     ex = _ex()
-    ok, _why = ex._verify_rigid_outcome(
+    ok, why = ex._verify_rigid_outcome(
         expected="any", actual="true",
-        supplemental_data="Tool 'get_annotated_image' not recognized",
+        supplemental_data="Paint absent",
         raw_success_flag="false",
     )
-    assert ok is False
+    assert ok is True
+    assert "any" in why.lower() or "valeur" in why.lower()
 
 
 def test_any_with_true_flag_accepted():

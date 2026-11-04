@@ -28,9 +28,12 @@ def _contract(*params, scope="ui_element", raw=None):
 
 
 def _schema(*params):
+    # Ce fichier teste la membrane egress d'un hote qui consomme la reference
+    # BRUTE (objet). Le cas `type: "string"` (serialisation `kind:id`) est
+    # couvert par `test_targets_egress_wire_format.py`.
     return {
         "type": "object",
-        "properties": {param: {"type": "string"} for param in params},
+        "properties": {param: {"type": "object"} for param in params},
         "required": list(params),
     }
 

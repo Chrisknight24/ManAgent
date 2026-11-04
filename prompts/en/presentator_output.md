@@ -25,6 +25,18 @@ resolving it silently.
 - **Réponses accumulées** (le cas échéant) :
 {{ accumulated_response }}
 - **Statut final** : {{ mission_status }} (success ou failed)
+{% if plan_gaps %}
+- **Partial plan** : yes — the plan was accepted with known gaps.
+- **Known gaps (unproven)** :
+{{ plan_gaps }}
+- **Convergence reason** : {{ convergence_reason }}
+
+### KNOWN GAPS — IMPERATIVE RULE
+The gaps listed above were **not** proven by the mission. You must NOT write "mission accomplished", "successfully" or any full success report. You must:
+1. state what was actually done and verified;
+2. repeat the remaining gaps verbatim (do not minimise or invent them);
+3. explicitly label the result as **partial**.
+{% endif %}
 - **Contexte d'exécution** (traces utiles) :
 {{ final_context }}
 - **Registre des variables résolues** (usage interne) :

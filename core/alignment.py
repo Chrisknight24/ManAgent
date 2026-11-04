@@ -10,6 +10,8 @@ manifeste (champ outil optionnel `effects`) et des listes passées en args.
 
 from typing import Dict, List, Set, Tuple, Any, Optional
 from core.i18n import _
+import hashlib
+import json
 import re
 
 
@@ -26,6 +28,148 @@ WORLD_STATE_TOOL = "get_world_state"
 # coupées au milieu), ordre reçu respecté (c'est l'hôte qui trie).
 # Agnostique : toute liste, quelle que soit sa nature ou sa clé.
 WORLD_SNAPSHOT_MAX_ITEMS = 10
+
+# P2.1 : ordre de lecture du monde. Un modèle qui ne lit qu'un préfixe doit
+# voir d'abord le résumé, puis le focus, puis les fenêtres et les cibles.
+WORLD_SNAPSHOT_PRIORITY = (
+    "summary_text", "summary", "focus", "foreground", "foreground_title",
+    "active_window", "windows", "targets", "cibles",
+)
+
+
+def _scalar(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value).strip()
+
+
+def _fit_text(text: str, limit: int) -> str:
+    """Coupe au DERNIER séparateur : jamais au milieu d'un mot."""
+    text = str(text or "").strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:max(1, limit - 1)]
+    match = re.search(r"\S+$", cut)
+    if match and match.start() > 0:
+        cut = cut[:match.start()]
+    return cut.rstrip() + "…"
+
+
+def _compact_field(key: str, value: Any) -> str:
+    """Rendu lisible d'un champ quand le JSON complet ne tient pas."""
+    if isinstance(value, str):
+        return f"{key}: {value}"
+    if isinstance(value, (int, float, bool)):
+        return f"{key}: {_scalar(value)}"
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, dict):
+                head = item.get("title") or item.get("name") or item.get("id")
+                parts.append(_scalar(head))
+            else:
+                parts.append(_scalar(item))
+        return f"{key}: " + ", ".join(p for p in parts if p)
+    if isinstance(value, dict):
+        parts = [
+            f"{k}={_scalar(v)}" for k, v in value.items()
+            if not isinstance(v, (dict, list)) and _scalar(v)
+        ]
+        return f"{key}: " + ", ".join(parts)
+    return f"{key}: …"
+
+
+def render_world_snapshot(data: Any, limit: int = 800) -> str:
+    """Rend le world state en texte capé, sans jamais casser un mot.
+
+    Ordre de priorité : résumé > focus > fenêtres > cibles > reste. Les
+    champs entiers qui ne tiennent pas sont OMIS et comptés ; un champ seul
+    trop long est coupé au dernier séparateur. Fonction pure.
+    """
+    try:
+        limit = max(1, int(limit))
+    except Exception:
+        limit = 800
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        return _fit_text(data, limit)
+    if not isinstance(data, dict):
+        return _fit_text(json.dumps(data, ensure_ascii=False), limit)
+
+    # 1. Cap des listes : entrées entières + compteur (jamais d'élément coupé).
+    capped = dict(data)
+    omitted_entries: List[str] = []
+    for key, value in list(capped.items()):
+        if isinstance(value, list) and len(value) > WORLD_SNAPSHOT_MAX_ITEMS:
+            capped[key] = value[:WORLD_SNAPSHOT_MAX_ITEMS]
+            omitted_entries.append(
+                f"+{len(value) - WORLD_SNAPSHOT_MAX_ITEMS} entrées '{key}' non listées"
+            )
+
+    ordered = [k for k in WORLD_SNAPSHOT_PRIORITY if k in capped]
+    ordered += [k for k in capped if k not in ordered]
+
+    # 2. Champs entiers tant que le JSON tient ; sinon omis et comptés.
+    kept: Dict[str, Any] = {}
+    omitted_fields = 0
+    for key in ordered:
+        candidate = dict(kept)
+        candidate[key] = capped[key]
+        if len(json.dumps(candidate, ensure_ascii=False)) <= limit:
+            kept[key] = capped[key]
+        elif not kept:
+            # Le tout premier champ ne tient pas seul : rendu compact, coupé
+            # au dernier séparateur (aucun mot cassé).
+            return _fit_text(_compact_field(key, capped[key]), limit)
+        else:
+            omitted_fields += 1
+
+    text = json.dumps(kept, ensure_ascii=False) if kept else ""
+    if omitted_entries:
+        text += "\n(" + ", ".join(omitted_entries) + ", query PD pour le détail)"
+    if omitted_fields:
+        marker = f" (+{omitted_fields} champs omis)"
+        if len(text) + len(marker) <= limit:
+            text += marker
+    if len(text) > limit:
+        text = _fit_text(text, limit)
+    return text
+
+
+
+def _emit_world_snapshot_event(runtime_state, source_tool: str, text: str,
+                               truncated: bool) -> None:
+    """Trace chaque snapshot lu (mission, outil, taille, hash, troncature).
+
+    Sans cet event, l'export d'observabilité ne contient AUCUN world state :
+    impossible de distinguer un hôte muet d'un modèle qui n'a pas regardé.
+    """
+    try:
+        from utils.logger import Logger
+        ctx = getattr(runtime_state, "execution_context", None) or {}
+
+        def _get(key):
+            try:
+                if hasattr(ctx, "get"):
+                    return ctx.get(key)
+                return getattr(ctx, key, None)
+            except Exception:
+                return None
+
+        Logger.event(
+            "world_snapshot",
+            mission_id=_get("mission_id") or getattr(runtime_state, "mission_id", None),
+            solver_id=_get("solver_id"),
+            source_tool=source_tool,
+            chars=len(text),
+            truncated=bool(truncated),
+            hash=hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12],
+        )
+    except Exception:
+        pass
 
 
 async def fetch_world_state_snapshot(runtime_state, max_chars: int = 800) -> str:
@@ -95,19 +239,11 @@ async def fetch_world_state_snapshot(runtime_state, max_chars: int = 800) -> str
             data = parsed
         if data is None:
             return ""
-        omitted: List[str] = []
-        if isinstance(data, dict):
-            for key in list(data.keys()):
-                val = data[key]
-                if isinstance(val, list) and len(val) > WORLD_SNAPSHOT_MAX_ITEMS:
-                    data[key] = val[:WORLD_SNAPSHOT_MAX_ITEMS]
-                    omitted.append(f"+{len(val) - WORLD_SNAPSHOT_MAX_ITEMS} entrées '{key}' non listées")
-        text = data if isinstance(data, str) else _json.dumps(data, ensure_ascii=False)
-        text = str(text).strip()
-        if omitted:
-            text += "\n(" + ", ".join(omitted) + ", query PD pour le détail)"
-        if len(text) > limit:
-            text = text[:limit] + "…"
+        # P2.1 : rendu priorisé, champs entiers, coupe au dernier séparateur.
+        text = render_world_snapshot(data, limit)
+        _emit_world_snapshot_event(
+            runtime_state, source_tool, text, len(str(data)) > limit
+        )
         return text
     except Exception as e:
         try:

@@ -5,6 +5,7 @@ Stockage central de l'état runtime. Évite les variables globales
 et permet la configuration dynamique depuis le frontend Qt.
 """
 from core.i18n import _
+import os
 from typing import Dict, List, Optional, Any
 from core.execution_context import ExecutionContext
 from core.targets import TargetRegistry
@@ -49,11 +50,26 @@ class RuntimeState:
             "plan_rejected": False,
             "is_novel": False,
         }
+        self.perception_warnings_by_solver: Dict[str, List[str]] = {}
+        self.plan_warnings_by_solver: Dict[str, List[str]] = {}
+        # Avertissements de sortie non consommée (ex : `any` sans branche).
+        # Canal distinct de `world_warnings` et de `plan_gaps` : jamais un refus.
+        self.expected_warnings_by_solver: Dict[str, List[str]] = {}
 
         # --- DISCOVERY FRAMEWORK ---
         self.cache_manager = None
         self.discovery_llm = None
-        self.discovery_engine = None            
+        self.discovery_engine = None
+
+        # --- ROUTEUR DE SCOPE (P5, DETTE-3) ---
+        # Désactivé par défaut : off => section PD strictement inchangée.
+        # On => la PD est remplacée par l'outil `investigate` (langage naturel).
+        # Activation SANS toucher l'hôte : `MANAGENT_SCOPE_ROUTER=1`
+        # (même convention que `MANAGENT_EVENTS_SINK` / `MANAGENT_RECORD_PROMPTS`).
+        self.enable_scope_router = os.environ.get("MANAGENT_SCOPE_ROUTER", "").strip() == "1"
+        # Entité courante dont les DataProviders sont routés (posée par
+        # l'Executor avant l'appel de `investigate`, remise à None après).
+        self._scope_router_entity = None
         
         # --- SKILL & STORE MANAGEMENT (STACK INTEGRATION) ---
         self.skill_registry = None
@@ -76,6 +92,22 @@ class RuntimeState:
             "plan_rejected": False,
             "is_novel": False,
         }
+        try:
+            self.perception_warnings_by_solver = {}
+        except Exception:
+            pass
+        try:
+            self.plan_warnings_by_solver = {}
+        except Exception:
+            pass
+        try:
+            self.expected_warnings_by_solver = {}
+        except Exception:
+            pass
+        try:
+            self._scope_router_entity = None
+        except Exception:
+            pass
 
     def reset_target_registry(self) -> None:
         """Purge les liaisons de cibles (configure, reset, manifest update)."""

@@ -24,6 +24,7 @@ import os
 import re
 import sqlite3
 import sys
+import webbrowser
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -252,14 +253,23 @@ _ABSENCE_MARKERS = [
     "introuvable", "not visible", "not present", "not found",
     "no filter", "no sunglasses", "no products", "no results",
     "nothing visible", "nothing found", "aucune recherche",
+    "pas ouvert", "pas ouverte", "pas lancé", "pas lancée",
+    "n'est pas ouvert", "n'est pas ouverte",
+    "not open", "not running", "isn't open", "is not launched",
 ]
+
+# Marqueurs courts : comparés en mot entier pour éviter les faux positifs
+# (« non » dans « non seulement », « no » dans « node »).
+_ABSENCE_WORD_MARKERS = ("non", "no")
 
 
 def _analysis_reports_absence(text) -> bool:
     if not text:
         return False
     low = str(text).strip().lower()
-    return any(m in low for m in _ABSENCE_MARKERS)
+    if any(m in low for m in _ABSENCE_MARKERS):
+        return True
+    return any(re.search(rf"(?<!\w){re.escape(w)}(?!\w)", low) for w in _ABSENCE_WORD_MARKERS)
 
 
 def _call_text(call) -> str:
@@ -791,6 +801,15 @@ def attach_llm_calls_by_mission(episodes, llm_calls, events):
                 continue
             resp = call.get("response") or {}
             txt = f"{resp.get('data') or ''} {resp.get('message') or ''}"
+            # P3.1 : le `result` structuré fait foi. Les marqueurs de texte ne
+            # sont qu'un filet quand l'appel n'a pas de booléen exploitable.
+            structured = resp.get("result") if isinstance(resp, dict) else None
+            if call.get("tag") == "tools_manager_decision":
+                found = None
+            elif isinstance(structured, bool):
+                found = structured
+            else:
+                found = not _analysis_reports_absence(txt)
             analysis.append({
                 "tag": call.get("tag"),
                 "solver_id": c_sid,
@@ -799,12 +818,20 @@ def attach_llm_calls_by_mission(episodes, llm_calls, events):
                 "ts": call.get("ts"),
                 "_ts": _parse_ts(call.get("ts")) or 0,
                 "duration_ms": call.get("duration_ms"),
-                "found": (None if call.get("tag") == "tools_manager_decision" else (not _analysis_reports_absence(txt))),
+                "found": found,
                 "summary": str(resp.get("data") or resp.get("message") or "")[:220],
             })
         analysis.sort(key=lambda a: a["_ts"])
         ep["_analysis_calls"] = analysis
 
+        ep["_skills_summary"] = []
+
+    build_skill_summaries(episodes)
+    return unattached
+
+
+def build_skill_summaries(episodes):
+    for ep in episodes:
         grouped = {}
         for ev in (ep.get("_skill_lifecycle") or []):
             sk = ev.get("skill_id") or "unknown"
@@ -829,10 +856,19 @@ def attach_llm_calls_by_mission(episodes, llm_calls, events):
         summary.sort(key=lambda g: (-g["events"], g["skill_id"]))
         ep["_skills_summary"] = summary
 
-    return unattached
-
 
 CODE_VALIDATION_EVENTS = ("plan_validation_decision", "plan_rejected_validation", "plan_rejected_supervisor", "plan_validation_skipped", "skill_params_warning", "skill_params_refused")
+
+TARGET_EVENTS = (
+    "target.discovered",
+    "target.registered",
+    "target.refreshed",
+    "target.selected",
+    "target.bound",
+    "target.resolve_failed",
+    "target.invalidated",
+    "target.purged",
+)
 
 
 def attach_code_validation_events(episodes, events):
@@ -887,6 +923,28 @@ def attach_code_validation_events(episodes, events):
     return unattached
 
 
+def attach_world_snapshot_events(episodes, events):
+    """Attache les events `world_snapshot` à leur mission (P3.3).
+
+    Rattachement par `mission_id`, sinon par `solver_id`. Un event sans
+    mission connue est ignoré : jamais attribué à une mission au hasard.
+    """
+    ep_index = {ep["mission_id"]: ep for ep in episodes if ep.get("mission_id")}
+    solver_to_mission = build_solver_to_mission_map(episodes)
+    for ev in events or []:
+        if ev.get("event") != "world_snapshot":
+            continue
+        mid = ev.get("mission_id")
+        sid = ev.get("solver_id")
+        target_mid = mid if mid in ep_index else None
+        if target_mid is None and sid:
+            target_mid = solver_to_mission.get(sid)
+        ep = ep_index.get(target_mid) if target_mid else None
+        if ep is not None:
+            ep.setdefault("_world_snapshots", []).append(ev)
+    return None
+
+
 def attach_usage_summaries(episodes, llm_calls):
     """Cumule l'usage tokens par mission depuis les events llm_call.
 
@@ -932,6 +990,28 @@ def attach_usage_summaries(episodes, llm_calls):
             summ["real_calls"] += 1
         elif src == "estimated":
             summ["estimated_calls"] += 1
+
+    # P3.2 : total de SESSION = somme des missions de cette session. Distinct
+    # du total mission, sinon un header de mission affiche la session entière.
+    session_totals: Dict[str, Dict[str, Any]] = {}
+    for ep in episodes:
+        sid = ep.get("session_id")
+        usage = ep.get("_usage")
+        if not sid or not isinstance(usage, dict):
+            continue
+        st = session_totals.setdefault(sid, {
+            "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+            "calls": 0, "missions": 0,
+        })
+        st["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
+        st["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+        st["total_tokens"] += int(usage.get("total_tokens") or 0)
+        st["calls"] += int(usage.get("calls") or 0)
+        st["missions"] += 1
+    for ep in episodes:
+        st = session_totals.get(ep.get("session_id"))
+        if st:
+            ep["_session_usage"] = st
     return None
 
 
@@ -1010,6 +1090,7 @@ def build_data(
 
     unattached_llm_calls = attach_llm_calls_by_mission(episodes, llm_calls, events) or []
     unattached_code = attach_code_validation_events(episodes, events) or []
+    attach_world_snapshot_events(episodes, events)
 
     # Retrieval indexation par mission et par solver
     ep_index = {ep["mission_id"]: ep for ep in episodes if ep.get("mission_id")}
@@ -1044,6 +1125,19 @@ def build_data(
             solver_id = ev.get("solver_id")
             if solver_id:
                 solver_registries[solver_id] = ev.get("registry", {})
+        elif ev.get("event") in TARGET_EVENTS:
+            mid = ev.get("mission_id")
+            placed = False
+            if mid and mid in ep_index:
+                ep_index[mid].setdefault("_target_events", []).append(ev)
+                placed = True
+            if not placed:
+                sess = ev.get("session_id")
+                if sess:
+                    for cand in episodes:
+                        if cand.get("session_id") == sess:
+                            cand.setdefault("_target_events", []).append(ev)
+                            break
         elif ev.get("event") in ("skill_lifecycle", "skill_created", "skill_shadow_validated", "skill_transition", "skill_repaired", "skill_execution_metric"):
             mid = ev.get("mission_id")
             if mid and mid in ep_index:
@@ -1065,6 +1159,7 @@ def build_data(
     for ep in episodes:
         ep["_registries"] = solver_registries
 
+    build_skill_summaries(episodes)
     attach_usage_summaries(episodes, llm_calls)
 
     discovery_data = build_discovery_data(events, llm_calls)
@@ -1390,7 +1485,9 @@ body {
   border-bottom: 1px solid var(--border);
   gap: 12px;
   flex-shrink: 0;
-  z-index: 5;
+  position: sticky;
+  top: 0;
+  z-index: 20;
 }
 .tb-btn {
   font-size: 12px;
@@ -1618,7 +1715,8 @@ body {
 .badge--success { background: var(--success-bg); color: var(--success); border: 1px solid var(--success-border); }
 .badge--failed { background: var(--failure-bg); color: var(--failure); border: 1px solid var(--failure-border); }
 .badge--skipped { background: var(--warning-bg); color: var(--warning); border: 1px solid var(--warning-border); }
-.badge--pending { background: var(--surface-alt); color: var(--text-muted); border: 1px solid var(--border); }
+.badge--pending,
+.badge--neutral { background: var(--surface-alt); color: var(--text-muted); border: 1px solid var(--border); }
 .badge--primary { background: var(--primary-bg); color: var(--primary); border: 1px solid var(--primary-border); }
 .badge--purple { background: var(--purple-bg); color: var(--purple); border: 1px solid var(--purple-border); }
 
@@ -1992,6 +2090,7 @@ body {
 const DATA = JSON.parse(document.getElementById('data-island').textContent);
 
 // Global Registry for Discovery Sessions (Key -> Session)
+const COPY_REGISTRY = {};
 const DISCOVERY_REGISTRY = {};
 if (DATA.discovery_registry) {
   Object.assign(DISCOVERY_REGISTRY, DATA.discovery_registry);
@@ -2272,7 +2371,7 @@ function formatTimestamp(ts) {
   return d.toLocaleDateString('fr-FR', {month:'short', day:'numeric'}) + ' ' + d.toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
 }
 function formatDuration(ms) {
-  if (!ms || ms < 0) return '—';
+  if (ms === null || ms === undefined || ms < 0) return '—';
   if (ms < 1000) return Math.round(ms) + 'ms';
   const sec = ms / 1000;
   if (sec < 60) return sec.toFixed(1) + 's (' + Math.round(ms) + 'ms)';
@@ -2285,8 +2384,8 @@ function modelBadge(call) {
   return `<span class="badge badge--primary" style="font-size:10.5px;" title="Provider: ${p} — Modèle: ${m}">${p}/${m}</span>`;
 }
 function statusBadge(status) {
-  const cls = {success: 'success', failed: 'failed', skipped: 'skipped', pending: 'pending', cancelled: 'skipped', rejected: 'failed'}[status] || 'pending';
-  const label = {success: 'Succès', failed: 'Échec', skipped: 'Ignoré', pending: 'En cours', cancelled: 'Annulé', rejected: 'Rejeté'}[status] || (status || '?');
+  const cls = {success: 'success', failed: 'failed', skipped: 'skipped', pending: 'pending', cancelled: 'skipped', rejected: 'failed', partial: 'pending'}[status] || 'pending';
+  const label = {success: 'Succès', failed: 'Échec', skipped: 'Ignoré', pending: 'En cours', cancelled: 'Annulé', rejected: 'Rejeté', partial: 'Partiel'}[status] || (status || '?');
   return `<span class="badge badge--${cls}">${esc(label)}</span>`;
 }
 function findEpisode(missionId) {
@@ -2407,7 +2506,7 @@ function renderDiscoverySection(sessions, contextLabel, containerId) {
         </div>
         <span class="badge badge--primary" style="font-size:10.5px;">Progressive Disclosure</span>
       </div>
-      <div id="${id}" class="discovery-container-scroll" style="display:block;">
+      <div id="${id}" class="discovery-container-scroll">
         ${sessions.map(ds => {
           const key = ds.run_id || ds.signature || ('ds_' + Math.random().toString(36).substring(2, 8));
           DISCOVERY_REGISTRY[key] = ds;
@@ -2457,6 +2556,7 @@ function renderSessionThread(sessionId) {
     const isLongUMsg = uMsg.length > 320;
     const bubbleId = `ububble-${sessionId}-${i}`;
     const escUMsg = esc(uMsg);
+    COPY_REGISTRY[bubbleId] = uMsg;
 
     html += `<div class="chat-turn">
       <!-- User Message -->
@@ -2465,7 +2565,7 @@ function renderSessionThread(sessionId) {
         <div class="chat-bubble-user" id="${bubbleId}" style="cursor:pointer;" onclick="inspectUserTurn('${esc(sessionId)}', ${i})">
           <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:4px;">
             <span style="font-size:10.5px; text-transform:uppercase; font-weight:800; opacity:0.8; font-family:var(--mono);">Utilisateur</span>
-            <button class="btn-copy-bubble" onclick="event.stopPropagation(); copyTextToClipboard(this, ${JSON.stringify(uMsg)})" title="Copier le texte complet">📋 Copier</button>
+            <button class="btn-copy-bubble" data-copy-key="${esc(bubbleId)}" onclick="event.stopPropagation(); copyBubbleText(this)" title="Copier le texte complet">📋 Copier</button>
           </div>
           <div class="chat-bubble-user__content ${isLongUMsg ? 'collapsed-text' : ''}" id="ucontent-${bubbleId}">${escUMsg}</div>
           ${isLongUMsg ? `
@@ -2530,6 +2630,28 @@ function renderSessionThread(sessionId) {
 // ==========================================
 // MISSION DETAIL & HIERARCHICAL PIPELINE
 // ==========================================
+function renderCentralWorldSnapshots(ep) {
+  const snaps = ep._world_snapshots || [];
+  if (!snaps.length) return '';
+  let html = `<div style="margin-bottom:18px; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:14px 18px;">
+    <div style="font-size:13px; font-weight:800; text-transform:uppercase; letter-spacing:0.04em; color:var(--text-muted); margin-bottom:8px;">
+      🌍 World state (${snaps.length} lecture(s))
+    </div>`;
+  snaps.forEach(s => {
+    const badge = s.truncated
+      ? '<span class="badge badge--pending">tronqué</span>'
+      : '<span class="badge badge--success">complet</span>';
+    html += `<div style="display:flex; gap:10px; align-items:center; font-size:12px; font-family:var(--mono); color:var(--text-muted); padding:3px 0;">
+      <span>${esc(s.source_tool || '?')}</span>
+      <span>${s.chars || 0} chars</span>
+      ${badge}
+      <span>#${esc(s.hash || '')}</span>
+    </div>`;
+  });
+  html += `</div>`;
+  return html;
+}
+
 function renderMissionDetail(missionId) {
   const ep = findEpisode(missionId);
   const pane = document.getElementById('mission-tree-pane');
@@ -2539,7 +2661,7 @@ function renderMissionDetail(missionId) {
   }
 
   let html = `<div>
-    <button class="back-btn" onclick="backToSession()">← Retour au fil de discussion</button>
+    <button class="back-btn" onclick="backToPreviousMission()">← Retour</button>
     
     <!-- Mission Header Card -->
     <div style="background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:18px 22px; margin-bottom:18px; box-shadow:var(--shadow-xs);">
@@ -2560,7 +2682,8 @@ function renderMissionDetail(missionId) {
         <span>🕒 Début: ${formatTimestamp(ep.created_at)}</span>
         <span>🏁 Fin: ${formatTimestamp(ep.finished_at)}</span>
         <span>🌍 Env: <b>${esc(ep.environment || 'simulated')}</b></span>
-        ${ep._usage ? `<span>🔢 Tokens: <b>${ep._usage.total_tokens}</b> (in ${ep._usage.prompt_tokens} / out ${ep._usage.completion_tokens}, ${ep._usage.calls} appels${ep._usage.real_calls ? `, ${ep._usage.real_calls} real` : ''}${ep._usage.estimated_calls ? `, ${ep._usage.estimated_calls} estimés` : ''})</span>` : ''}
+        ${ep._usage ? `<span>🔢 Tokens mission: <b>${ep._usage.total_tokens}</b> (in ${ep._usage.prompt_tokens} / out ${ep._usage.completion_tokens}, ${ep._usage.calls} appels${ep._usage.real_calls ? `, ${ep._usage.real_calls} real` : ''}${ep._usage.estimated_calls ? `, ${ep._usage.estimated_calls} estimés` : ''})</span>` : ''}
+        ${ep._session_usage ? `<span>🧵 Session: <b>${ep._session_usage.total_tokens}</b> tokens (${ep._session_usage.missions} mission(s), ${ep._session_usage.calls} appels)</span>` : ''}
       </div>
     </div>`;
 
@@ -2581,6 +2704,12 @@ function renderMissionDetail(missionId) {
   // Panneau central : Skills cumulés résumés (groupés par skill, max 5 + voir plus).
   // Avant : même liste répétée sous chaque solver. Maintenant : 1 seul résumé central.
   html += renderCentralSkills(ep);
+
+  // Panneau central : cycle de vie des cibles (TargetRegistry).
+  html += renderCentralTargets(ep);
+
+  // Panneau central : world state lu (mission, taille, hash, troncature).
+  html += renderCentralWorldSnapshots(ep);
 
   // Appels LLM orphelins (ni mission ni solver reconnus, même session).
   // Avant : jetés silencieusement. Maintenant : visibles ici.
@@ -2680,6 +2809,39 @@ function renderCentralSkills(ep) {
       <span>⚡ Skills cumulés — résumé (${groups.length})</span><span>▼</span>
     </div>
     <div id="central-skills-${esc(ep.mission_id)}"><div class="discovery-container-scroll">${rows}${extra > 0 ? `<div style="font-size:11px; color:var(--text-faint);">+ ${extra} autre(s) — voir onglet Skills</div>` : ''}</div></div>
+  </div>`;
+}
+
+function renderCentralTargets(ep) {
+  const events = ep._target_events || [];
+  if (events.length === 0) return '';
+  const labelFor = (name) => ({
+    'target.discovered': '🔎 découverte',
+    'target.registered': '📌 enregistrée',
+    'target.refreshed': '♻️ rafraîchie',
+    'target.selected': '🎯 sélectionnée',
+    'target.bound': '🔗 liée',
+    'target.resolve_failed': '⛔ résolution échouée',
+    'target.invalidated': '🗑️ invalidée',
+    'target.purged': '🧹 purgée',
+  }[name] || name);
+  const rows = events.slice(0, 40).map((ev) => {
+    const who = ev.local_name || ev.ref || '?';
+    const scope = ev.scope ? ` · ${esc(ev.scope)}` : '';
+    const why = ev.reason ? ` (${esc(ev.reason)})` : '';
+    const strategy = ev.strategy ? ` · ${esc(ev.strategy)}` : '';
+    const count = ev.count != null ? ` · ${ev.count}` : '';
+    return `<div class="discovery-chip-compact" style="cursor:default;" title="${esc(String(who))}">
+      <span style="font-size:12px;">${labelFor(ev.event)} <code>${esc(String(who))}</code>${scope}${strategy}${why}${count}</span>
+      <span style="font-size:11px; color:var(--text-faint); font-family:var(--mono); white-space:nowrap;">${formatTimestamp(ev.ts)}</span>
+    </div>`;
+  }).join('');
+  const extra = events.length > 40 ? `<div style="font-size:11px; color:var(--text-faint);">+ ${events.length - 40} autre(s)</div>` : '';
+  return `<div style="margin-top:10px; margin-bottom:6px;">
+    <div class="discovery-accordion-header" onclick="toggleAccordion('central-targets-${esc(ep.mission_id)}')">
+      <span>🎯 Cibles — cycle de vie (${events.length})</span><span>▼</span>
+    </div>
+    <div id="central-targets-${esc(ep.mission_id)}"><div class="discovery-container-scroll">${rows}${extra}</div></div>
   </div>`;
 }
 
@@ -3160,16 +3322,18 @@ function renderSolverNodeModern(ep, treeNode, depth) {
     </div>`;
   }
 
-  html += renderSkillLifecycleImpact(ep, solverId);
+  html += renderSkillLifecycleImpact(ep, solverId, depth);
 
   html += `</div>`;
   return html;
 }
 
-function renderSkillLifecycleImpact(ep, solverId) {
+function renderSkillLifecycleImpact(ep, solverId, depth) {
   const allLifecycle = ep._skill_lifecycle || [];
   const sigs = ep.signatures || [];
   const cleanSid = solverId ? solverId.replace(/^solver_/, '') : '';
+  const isRoot = depth === 0 || solverId === ep.mission_id || solverId === 'root_solver';
+  const normSkillId = (value) => String(value || '').toLowerCase().replace(/\s+/g, '_');
   // FILTRE : avant, tout le cumul sous chaque solver (doublons).
   // Maintenant : seulement ce solver + events globaux sans solver.
   const lifecycleEvents = allLifecycle.filter(ev => {
@@ -3183,21 +3347,26 @@ function renderSkillLifecycleImpact(ep, solverId) {
   if (sigs.length > 0) {
     for (const s of sigs) {
       if (s.action && s.object) {
-        const expectedId = `desktop.${s.action}.${s.object}`.replace(/\s+/g, '_');
-        matchedSkill = (DATA.skills || []).find(sk => sk.skill_id === expectedId || sk.name === expectedId);
+        const expected = new Set([
+          normSkillId(`skill.${s.action}.${s.object}`),
+          normSkillId(`desktop.${s.action}.${s.object}`)
+        ]);
+        matchedSkill = (DATA.skills || []).find(sk =>
+          expected.has(normSkillId(sk.skill_id)) || expected.has(normSkillId(sk.name))
+        );
         if (matchedSkill) break;
       }
     }
   }
 
-  if (lifecycleEvents.length === 0 && (!matchedSkill || solverId !== 'root_solver') && skillCalls.length === 0) {
+  if (lifecycleEvents.length === 0 && (!matchedSkill || !isRoot) && skillCalls.length === 0) {
     return '';
   }
 
   let html = `<div style="margin-left:14px; margin-top:8px; margin-bottom:8px; background:var(--surface-alt); border:1px solid var(--border); border-left:4px solid #7c3aed; border-radius:8px; padding:10px 14px; font-size:12.5px;">`;
   html += `<div style="font-weight:800; color:var(--text); display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">`;
   html += `<span style="display:flex; align-items:center; gap:6px;">⚡ Impact Skill Engine & Évolution</span>`;
-  if (matchedSkill && solverId === 'root_solver') {
+  if (matchedSkill && isRoot) {
     let badgeColor = 'badge--success';
     if (matchedSkill.state === 'SHADOW') badgeColor = 'badge--primary';
     if (matchedSkill.state === 'QUARANTINE') badgeColor = 'badge--failed';
@@ -3269,7 +3438,7 @@ function renderSkillLifecycleImpact(ep, solverId) {
     if (hiddenCount > 0) {
       html += `<div style="margin-top:4px; font-size:11px; color:var(--text-faint);">+ ${hiddenCount} autre(s) — voir résumé central ci-dessus.</div>`;
     }
-  } else if (matchedSkill && solverId === 'root_solver') {
+  } else if (matchedSkill && isRoot) {
     const tp = matchedSkill.trust_profile || {};
     html += `<div style="margin-top:4px; color:var(--text-muted); font-size:12px;">`;
     html += `🚀 <b>Skill Qualifié en Production</b> : <code>${esc(matchedSkill.skill_id)}</code><br/>`;
@@ -3725,7 +3894,7 @@ function inspectStep(missionId, solverId, attemptNum, stepId) {
     if (!node) return;
     if (node.solver_id === solverId || (!solverId && node)) {
       const attempts = node.attempts || [];
-      const att = attempts[attemptNum] || attempts[0];
+      const att = attempts.find(a => (a.attempt_number ?? 0) === attemptNum) || attempts[0];
       if (att) {
         for (const stp of (att.nodes || [])) {
           if (stp.step_id === stepId) {
@@ -4092,6 +4261,7 @@ function renderLessonsView(filter) {
     <div class="lesson-box ${l.polarity === 'prefer' ? 'polarity-prefer' : 'polarity-avoid'}">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
         <span class="badge badge--purple">${esc(l.entity_type)} · ${esc(l.scope)}</span>
+        <span class="badge ${l.environment === 'real' ? 'badge--success' : 'badge--neutral'}">${esc(l.environment || 'simulated')}</span>
         <div style="display:flex; gap:6px;">
           ${l.is_consolidated ? '<span class="badge badge--primary">Consolidée</span>' : ''}
           <span class="badge ${l.polarity==='prefer'?'badge--success':'badge--failed'}">${esc(l.polarity)} (conf: ${(l.confidence||0).toFixed(2)})</span>
@@ -4267,6 +4437,13 @@ function renderSkillsView(filter) {
 // ==========================================
 // UTILITY & RESIZER FUNCTIONS
 // ==========================================
+function copyBubbleText(btn) {
+  const key = btn.getAttribute('data-copy-key');
+  const text = COPY_REGISTRY[key];
+  if (text === undefined) return;
+  copyTextToClipboard(btn, text);
+}
+
 function copyTextToClipboard(btn, text) {
   if (!navigator.clipboard) {
     const ta = document.createElement('textarea');
@@ -4433,7 +4610,7 @@ def render_html(data: Dict[str, Any]) -> str:
     json_blob = json.dumps(data, ensure_ascii=False, default=str)
     if not json_blob.endswith("}"):
         raise RuntimeError("JSON tronqué !")
-    json_blob = json_blob.replace("</script", "<\\/script")
+    json_blob = re.sub(r"</script", r"<\\/script", json_blob, flags=re.IGNORECASE)
     return HTML_TEMPLATE.replace("__DATA_JSON__", json_blob)
 
 def main():
@@ -4445,7 +4622,17 @@ def main():
     parser.add_argument("--mission", default=None, help="ID de la mission à cibler et afficher directement")
     parser.add_argument("--max-sessions", type=int, default=20, help="Nombre max de sessions récentes à charger (0 pour tout charger)")
     parser.add_argument("--session-only", action="store_true", help="N'exporter que les événements de la session demandée")
+    parser.add_argument("--open", action="store_true", help="Ouvrir le rapport dans le navigateur après génération")
     args = parser.parse_args()
+
+    if not os.path.exists(args.db):
+        print(f"Attention : base absente ({args.db}) — le rapport sera vide pour les missions/leçons.")
+    if not os.path.exists(args.events):
+        print(f"Attention : events absents ({args.events}) — le rapport sera vide pour les appels LLM.")
+
+    out_dir = os.path.dirname(os.path.abspath(args.out))
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
 
     data = build_data(
         db_path=args.db,
@@ -4463,6 +4650,8 @@ def main():
     print(f"Rapport généré : {args.out}")
     print(f"  {len(data['episodes'])} mission(s), {len(data['lessons'])} leçon(s), "
           f"{len(data['sessions'])} session(s).")
+    if args.open:
+        webbrowser.open("file://" + os.path.abspath(args.out))
 
 if __name__ == "__main__":
     main()

@@ -30,6 +30,7 @@ from __future__ import annotations
 import re
 from typing import List, Optional, Callable, Awaitable, Any, Dict, Set, Tuple
 from core.plan_models import Plan, PlanValidationDecision, RiskLevel, DepthEscalationDecision, StepType
+from core.plan_models import parse_tool_args_json as _tolerant_parse_args
 from core.execution_models import PlanAttempt
 from core.i18n import _
 from utils.logger import Logger
@@ -45,17 +46,17 @@ def _normalize_text(text: str) -> str:
 
 
 def _parse_step_args(raw: Any) -> Dict[str, Any]:
-    """Arguments d'étape en dict (jamais d'exception, jamais de secret filtré ici)."""
-    if isinstance(raw, dict):
-        return raw
-    if not isinstance(raw, str) or not raw.strip() or raw.strip() == "{}":
-        return {}
+    """Arguments d'étape en dict (jamais d'exception, jamais de secret filtré ici).
+
+    P-B (GO 03/11) : source unique = le parseur tolérant de plan_models
+    (`parse_tool_args_json`). Un str vide / indéfini reste {} ; un texte
+    illisible reste {} ici (aide, pas refus).
+    """
     try:
-        import json as _json
-        parsed = _json.loads(raw)
-        return parsed if isinstance(parsed, dict) else {}
+        parsed = _tolerant_parse_args(raw)
     except Exception:
         return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _short_value(value: Any, limit: int = 40) -> str:
@@ -122,13 +123,13 @@ def compare_plan_novelty(plan: Any, previous_attempts: Optional[List[Any]] = Non
 
         if not changes:
             blocks.append(
-                _("Tentative {n} : IDENTIQUE (même structure, mêmes arguments, mêmes textes) — vigilance maximale, refusez si la cause est ignorée.")
+                _("Tentative {n} : IDENTIQUE (même structure, mêmes arguments, mêmes textes) — à examiner avec vigilance ; refusez seulement si aucun changement ne répond à la cause observée.")
                 .format(n=att_num)
             )
         else:
             shown = "; ".join(changes[:6])
             blocks.append(
-                _("Tentative {n} : MÊME STRUCTURE mais ARGUMENTS MODIFIÉS ({changes}) — ceci PEUT répondre à la cause. Validez si ça la traite, refusez seulement si ça l'ignore.")
+                _("Tentative {n} : MÊME STRUCTURE mais ARGUMENTS MODIFIÉS ({changes}) — ces changements peuvent répondre à la cause. Validez s'ils la traitent, refusez s'ils semblent sans rapport.")
                 .format(n=att_num, changes=shown)
             )
 
@@ -160,9 +161,8 @@ def find_unknown_plan_tools(plan: Any, known_tool_names=None,
         if tname == "execute_skill" and production_skill_ids is not None:
             sid = ""
             try:
-                import json as _json
-                args = _json.loads(getattr(step, "tool_args_json", "{}") or "{}")
-                sid = str(args.get("skill_id", "") or "").strip()
+                args = _tolerant_parse_args(getattr(step, "tool_args_json", "{}") or "{}")
+                sid = str((args or {}).get("skill_id", "") or "").strip()
             except Exception:
                 sid = ""
             if not sid or sid not in prod:
@@ -170,27 +170,78 @@ def find_unknown_plan_tools(plan: Any, known_tool_names=None,
     return unknown
 
 
-def find_malformed_step_args(plan: Any) -> List[str]:
-    """Gate déterministe (fail-fast) : `tool_args_json` qui ne parse pas.
+def _malformed_step_args_details(plan: Any) -> List[Tuple[str, str, str]]:
+    """Détails des args d'étape réellement illisibles (P-A/B, GO 03/11).
 
-    Retourne les ids d'étapes fautives. Un JSON d'args malformé (clés
-    dupliquées, traîne) tuait l'executor avant tout appel hôte (Mission-1).
-    Fonction pure, sans LLM, testée vite.
+    Un args est illisible s'il ne parse pas MÊME avec le parseur tolérant
+    `parse_tool_args_json` (Cause 1 confirmée : fences, traîne, virgule
+    finale, échappements). Retourne une liste de tuples
+    `(step_id, erreur_rawjson, snippet_texte_fautif ≤ 80 chars)`
+    sans doublon d'id (ordre de première apparition). Fonction pure.
     """
+    details: List[Tuple[str, str, str]] = []
+    seen: Set[str] = set()
     import json as _json
-
-    bad: List[str] = []
     for step in getattr(plan, "steps", []) or []:
         raw = getattr(step, "tool_args_json", None)
         if raw is None or (isinstance(raw, str) and raw.strip() in ("", "{}")):
             continue
         if isinstance(raw, dict):
             continue
-        try:
-            _json.loads(raw)
-        except Exception:
-            bad.append(str(getattr(step, "id", "?")))
-    return bad
+        parsed = _tolerant_parse_args(raw)
+        if isinstance(parsed, dict):
+            continue
+        sid = str(getattr(step, "id", "") or "?")
+        if sid in seen:
+            continue
+        seen.add(sid)
+        err = ""
+        _snippet = str(raw).strip() if not isinstance(raw, str) else raw.strip()
+        if isinstance(raw, str) and raw.strip():
+            try:
+                _json.loads(raw)
+            except Exception as _e:
+                err = str(_e)
+        if len(_snippet) > 80:
+            _snippet = _snippet[:80] + "…"
+        details.append((sid, err, _snippet))
+    return details
+
+
+def find_malformed_step_args(plan: Any) -> List[str]:
+    """Gate déterministe (fail-fast) : `tool_args_json` qui ne parse pas.
+
+    P-B (GO 03/11) : la lisibilité est désormais jugée par le parseur
+    tolérant `parse_tool_args_json` — un JSON récupérable (fence de code,
+    commentaire qui traîne…) n'est PLUS un refus. Seul l'irrécupérable
+    refuse.
+
+    Retourne les ids d'étapes fautives, **sans doublon** (un id répété ne doit
+    pas produire N lignes identiques dans le message de rejet). Un JSON
+    d'args malformé (clés dupliquées, traîne) tuait l'executor avant tout
+    appel hôte (Mission-1). Fonction pure, sans LLM, testée vite.
+    """
+    return [sid for sid, _err, _snip in _malformed_step_args_details(plan)]
+
+
+def find_duplicate_step_ids(plan: Any) -> List[str]:
+    """Ids d'étapes apparaissant plus d'une fois (ordre de première apparition).
+
+    Deux étapes `step_1` écrasent silencieusement `bool_step_1` /
+    `data_step_1` dans le registre : la seconde lecture remplace la première.
+    Aucun hôte ne peut rattraper ça, donc c'est un refus déterministe.
+    Fonction pure.
+    """
+    counts: Dict[str, int] = {}
+    order: List[str] = []
+    for step in getattr(plan, "steps", []) or []:
+        sid = str(getattr(step, "id", "") or "").strip()
+        if not sid:
+            continue
+        if sid not in counts:
+            order.append(sid)
+        counts[sid] = counts.get(sid, 0) + 1
+    return [sid for sid in order if counts[sid] > 1]
 
 
 # Outils réservés au validateur/superviseur : le planner ne doit jamais
@@ -455,12 +506,20 @@ def find_target_plan_problems(plan: Any, tools_mgr: Any = None) -> List[str]:
 
         for path, consumer in consumer_specs.items():
             value = _read_arg_path(args, path)
-            if value is _MISSING or getattr(consumer, "raw_allow", False):
+            if value is _MISSING:
+                if getattr(consumer, "required", True):
+                    hits.append(
+                        f"{step_id}: {path} exige un nom local de cible "
+                        "($@_<nom>) produit avant l'action"
+                    )
+                continue
+            if getattr(consumer, "raw_allow", False):
                 continue
             if not isinstance(value, str) or not value.strip():
                 if getattr(consumer, "required", True):
                     hits.append(
-                        f"{step_id}: {path} exige un nom local de cible"
+                        f"{step_id}: {path} exige un nom local de cible "
+                        "($@_<nom>) produit avant l'action"
                     )
                 continue
             stripped = value.strip()
@@ -479,7 +538,7 @@ def find_target_plan_problems(plan: Any, tools_mgr: Any = None) -> List[str]:
     return hits
 
 
-def find_unresolved_plan_refs(plan: Any) -> List[str]:
+def find_unresolved_plan_refs(plan: Any, target_consumers: Optional[Dict[str, Any]] = None) -> List[str]:
     """Références devinées dans les args (gate anti-devinettes, 100% générique).
 
     Refuse, quel que soit l'outil ou le nom d'argument :
@@ -492,18 +551,22 @@ def find_unresolved_plan_refs(plan: Any) -> List[str]:
       par un step ANTÉRIEUR du même plan (résolution séquentielle : une
       sortie n'existe qu'après l'exécution de son step).
     Chaînes vides "" restent autorisées (défauts légitimes). Fonction pure.
+    `target_consumers` ({outil: {paramètres}}) oriente le message vers
+    `output_target_name` quand la référence non résolue alimente un
+    paramètre consommateur de cible.
     Retourne ["step_id: chemin.argument=valeur", ...].
     """
     hits: List[str] = []
     steps = list(getattr(plan, "steps", []) or [])
+    _targets = target_consumers if isinstance(target_consumers, dict) else {}
 
-    def _scan(value: Any, path: str, step_id: str, allowed: set) -> None:
+    def _scan(value: Any, path: str, step_id: str, allowed: set, target_params: set) -> None:
         if isinstance(value, dict):
             for key, sub in value.items():
-                _scan(sub, f"{path}.{key}" if path else str(key), step_id, allowed)
+                _scan(sub, f"{path}.{key}" if path else str(key), step_id, allowed, target_params)
         elif isinstance(value, list):
             for idx, sub in enumerate(value):
-                _scan(sub, f"{path}[{idx}]", step_id, allowed)
+                _scan(sub, f"{path}[{idx}]", step_id, allowed, target_params)
         elif isinstance(value, str):
             stripped = value.strip()
             if stripped.lower() == "null":
@@ -517,9 +580,19 @@ def find_unresolved_plan_refs(plan: Any) -> List[str]:
                 elif f"$@_{core}" in allowed:
                     pass
                 else:
+                    _leaf = path.rsplit(".", 1)[-1]
+                    if _leaf in target_params:
+                        _hint = _(
+                            "inconnu : déclarez ce nom via output_target_name "
+                            "sur l'outil producteur de cible (step antérieur)"
+                        )
+                    else:
+                        _hint = _(
+                            "inconnu : déclarez via output_variable_name "
+                            "d'un step antérieur"
+                        )
                     hits.append(
-                        f"{step_id}: {path}={_short_value(stripped)} "
-                        f"(inconnu : déclarez via output_variable_name d'un step antérieur)"
+                        f"{step_id}: {path}={_short_value(stripped)} ({_hint})"
                     )
 
     for idx, step in enumerate(steps):
@@ -527,7 +600,15 @@ def find_unresolved_plan_refs(plan: Any) -> List[str]:
         if stype != "tool_call":
             continue
         args = _parse_step_args(getattr(step, "tool_args_json", "{}"))
-        _scan(args, "", str(getattr(step, "id", "?")), _plan_declared_ref_names(steps, idx))
+        _tool = str(getattr(step, "tool_name", "") or "")
+        _target_params = set(_targets.get(_tool) or ())
+        _scan(
+            args,
+            "",
+            str(getattr(step, "id", "?")),
+            _plan_declared_ref_names(steps, idx),
+            _target_params,
+        )
     return hits
 
 
@@ -548,8 +629,7 @@ def find_skill_missing_params(plan: Any, skill_required_params: Optional[Dict[st
         if (getattr(step, "tool_name", None) or "").strip() != "execute_skill":
             continue
         try:
-            import json as _json
-            args = _json.loads(getattr(step, "tool_args_json", "{}") or "{}")
+            args = _tolerant_parse_args(getattr(step, "tool_args_json", "{}") or "{}")
         except Exception:
             continue
         if not isinstance(args, dict):
@@ -677,6 +757,64 @@ def find_unconsumed_perception_outputs(plan: Any, perception_tools: Any = None) 
         return []
 
 
+def find_unconsumed_any_outputs(plan: Any, perception_tools: Any = None) -> List[str]:
+    """Sorties `expected_result: "any"` jamais consommées (avertissement, jamais refus).
+
+    `any` sert à brancher sur une valeur : si aucune étape postérieure ne
+    référence la sortie (auto `$@_bool/data_<id>` ou nommée), le plan capture
+    une valeur qu'il n'exploite pas. On le signale à la convergence finale,
+    sans bloquer : la mission peut réussir sans réutiliser cette sortie.
+    Les étapes de perception sont exclues : `find_unconsumed_perception_outputs`
+    couvre déjà ce cas (pas de double avertissement).
+    Fonction pure. Retourne ["step_id: motif", ...].
+    """
+    try:
+        perc = set(perception_tools or []) | {"perceive_understand", "perceive_action"}
+        steps = list(getattr(plan, "steps", []) or [])
+        hits: List[str] = []
+        for idx, step in enumerate(steps):
+            stype = getattr(getattr(step, "type", None), "value", getattr(step, "type", None))
+            if stype != "tool_call":
+                continue
+            expected = str(getattr(step, "expected_result", "") or "").strip().lower()
+            if expected != "any":
+                continue
+            tname = (getattr(step, "tool_name", None) or "").strip()
+            if tname in perc:
+                continue
+            args_txt = str(getattr(step, "tool_args_json", "") or "")
+            if re.search(r'"mode"\s*:\s*"wait"|wait_mode|"wait"', args_txt):
+                continue
+            sid = str(getattr(step, "id", "?"))
+            needles = {f"$@_bool_{sid}", f"$@_data_{sid}"}
+            raw = getattr(step, "output_variable_name", None)
+            if raw and str(raw).strip():
+                r = str(raw).strip()
+                clean = re.sub(r"^(bool_|data_)+", "", r)
+                needles.update({f"$@_bool_{clean}", f"$@_data_{clean}", f"$@_{r}"})
+            later_text = " ".join(
+                " ".join([
+                    str(getattr(later, "tool_args_json", "") or ""),
+                    str(getattr(later, "response_text", "") or ""),
+                    str(getattr(later, "step_context", "") or ""),
+                    str(getattr(later, "execute_if", "") or ""),
+                    str(getattr(later, "description", "") or ""),
+                    str(getattr(later, "result_context", "") or ""),
+                ])
+                for later in steps[idx + 1:]
+            )
+            if any(n in later_text for n in needles):
+                continue
+            hits.append(
+                f"{sid} : sortie 'any' non lue — branchez dessus "
+                f"(ex : execute_if: \"$@_bool_{sid} == false\") ou retirez 'any'. "
+                f"Ce n'est pas un échec : la valeur n'est simplement pas exploitée."
+            )
+        return hits
+    except Exception:
+        return []
+
+
 def _tool_declares_media(tool_name: str, tool_returns: Any) -> bool:
     """L'outil déclare-t-il des charges médias (le validateur le sait) ?"""
     if not tool_returns or not isinstance(tool_returns, dict):
@@ -795,7 +933,7 @@ def repair_direct_perception_calls(plan: Any, perception_tool_names=None, tool_r
         if tname not in targets or _tool_declares_media(tname, tool_returns):
             continue
         try:
-            src_args = _json.loads(getattr(step, "tool_args_json", "{}") or "{}")
+            src_args = _tolerant_parse_args(getattr(step, "tool_args_json", "{}") or "{}")
             if not isinstance(src_args, dict):
                 src_args = {}
         except Exception:
@@ -886,6 +1024,8 @@ class PlanValidationOutcome:
         requires_human_confirmation: bool = False,
         human_confirmed: Optional[bool] = None,
         irreversibility_flags: Optional[List[str]] = None,
+        is_partial: bool = False,
+        partial_gaps: Optional[List[str]] = None,
     ):
         self.is_valid = is_valid
         self.reason = reason
@@ -893,6 +1033,8 @@ class PlanValidationOutcome:
         self.requires_human_confirmation = requires_human_confirmation
         self.human_confirmed = human_confirmed
         self.irreversibility_flags = irreversibility_flags or []
+        self.is_partial = is_partial
+        self.partial_gaps = partial_gaps or []
 
     def __bool__(self) -> bool:
         return self.is_valid
@@ -1272,8 +1414,13 @@ class PlanValidator:
             waiting_ms = getattr(step, "waiting_ms", None)
             wait_str = f" wait_ms={waiting_ms}" if waiting_ms is not None else ""
             out_var = f" -> {step.output_variable_name}" if getattr(step, "output_variable_name", None) else ""
+            out_target = (
+                f" target={step.output_target_name}"
+                if getattr(step, "output_target_name", None)
+                else ""
+            )
             exp = f" attend={step.expected_result}" if getattr(step, "expected_result", None) else ""
-            lines.append(f"- {step.id} [{step_type_str}]{tool} : {step.description}{args_str}{cond}{ctx_str}{world_str}{verify_str}{wait_str}{out_var}{exp}{marker}{reason}")
+            lines.append(f"- {step.id} [{step_type_str}]{tool} : {step.description}{args_str}{cond}{ctx_str}{world_str}{verify_str}{wait_str}{out_var}{out_target}{exp}{marker}{reason}")
         return "\n".join(lines)
 
     @staticmethod
@@ -1345,6 +1492,9 @@ class PlanValidator:
         mission_history_tree: Optional[Any] = None,
         world_snapshot: Optional[str] = None,
     ) -> PlanValidationOutcome:
+        # Signaux de convergence : jamais réutiliser ceux d'un plan précédent.
+        self._last_unconsumed_warnings = []
+        self._last_any_warnings = []
         # Collecter les signaux déterministes
         repeated_warning = self.detect_repeated_plan_pattern(plan, previous_attempts or [])
         recursion_warnings = self.detect_lazy_delegation_and_tree_recursion(
@@ -1387,15 +1537,33 @@ class PlanValidator:
             plan, self._available_tools, self._production_skills
         )
         malformed = find_malformed_step_args(plan)
+        duplicate_ids = find_duplicate_step_ids(plan)
         reserved = find_reserved_plan_tools(plan)
         direct_perception = find_direct_perception_calls(plan, self._perception_tools, self._tool_returns)
-        unresolved = find_unresolved_plan_refs(plan)
+        # Paramètres consommateurs de cible par outil : permet au message de
+        # rejet de nommer `output_target_name` (le bon champ) au lieu de
+        # `output_variable_name`.
+        _target_consumers: Dict[str, set] = {}
+        try:
+            _tm_tc = self._tools_manager
+            if _tm_tc is not None and hasattr(_tm_tc, "target_contract_names"):
+                for _tname in _tm_tc.target_contract_names():
+                    _contract = _tm_tc.get_target_contract(_tname)
+                    if _contract is not None:
+                        _params = set(_contract.consumer_param_names())
+                        if _params:
+                            _target_consumers[_tname] = _params
+        except Exception:
+            _target_consumers = {}
+        unresolved = find_unresolved_plan_refs(plan, _target_consumers)
         bad_sources = find_invalid_perceive_sources(plan, self._available_tools)
         incomplete_delegation = find_incomplete_delegated_args(plan, self._tools_manager)
         target_problems = find_target_plan_problems(plan, self._tools_manager)
         unconsumed = find_unconsumed_perception_outputs(plan, self._perception_tools)
+        any_unconsumed = find_unconsumed_any_outputs(plan, self._perception_tools)
         problems = [f"inconnu:{u}" for u in unknown]
         problems += [f"args illisibles étape:{s}" for s in malformed]
+        problems += [f"identifiant d'étape dupliqué : {s}" for s in duplicate_ids]
         problems += [f"outil réservé au validateur étape:{s}" for s in reserved]
         problems += [f"référence devinée {u} (jamais de null ni de joker : résolvez avant d'agir)" for u in unresolved]
         problems += [
@@ -1425,16 +1593,56 @@ class PlanValidator:
                 self._last_unconsumed_warnings = list(unconsumed[:8])
             except Exception:
                 pass
+        if any_unconsumed:
+            try:
+                from utils.logger import Logger as _Logger
+                _Logger.event(
+                    "any_unconsumed_warning",
+                    child_solver_id=child_solver_id,
+                    unconsumed=any_unconsumed[:8],
+                )
+            except Exception:
+                pass
+            try:
+                self._last_any_warnings = list(any_unconsumed[:8])
+            except Exception:
+                pass
         if problems:
-            details = ", ".join(problems[:8])
+            # P-A (GO 03/11) : déduplication en conservant l'ordre + conseils
+            # ciblés. Cause 3 partielle confirmée (runs 31/10) : le suffixe
+            # générique « N'utilisez que les outils listés » est toxique
+            # quand l'outil appelé ÉTAIT listé et que seul le JSON des args
+            # est fautif. On n'affiche que le conseil qui correspond au
+            # problème réel, et pour les args le texte fautif exact.
+            _seen_problems: Set[str] = set()
+            _unique_problems = [
+                p for p in problems if not (p in _seen_problems or _seen_problems.add(p))
+            ]
+            details = ", ".join(_unique_problems[:8])
+            advice_parts: List[str] = []
+            if unknown or reserved:
+                advice_parts.append(
+                    _("N'utilisez que les outils listés et les skills en PRODUCTION.")
+                )
+            if malformed:
+                malformed_details = _malformed_step_args_details(plan)
+                _snips = "; ".join(
+                    f"étape {sid} : {snip}" for sid, _err, snip in malformed_details[:3]
+                )
+                advice_parts.append(
+                    _("Réécrivez les arguments des étapes citées en un objet JSON "
+                      "valide. Texte fautif à remplacer : {snips}.").format(snips=_snips)
+                )
+            advice = " ".join(advice_parts) if advice_parts else _(
+                "N'utilisez que les outils listés et les skills en PRODUCTION, "
+                "avec des arguments JSON valides."
+            )
             return PlanValidationOutcome(
                 is_valid=False,
                 reason=_(
-                    "Plan refusé sans appel au juge : {details}. "
-                    "N'utilisez que les outils listés et les skills en PRODUCTION, "
-                    "avec des arguments JSON valides ; "
-                    "sinon terminez en réponse directe motivée."
-                ).format(details=details),
+                    "Plan refusé sans appel au juge : {details}. {advice} "
+                    "Sinon, terminez en réponse directe motivée."
+                ).format(details=details, advice=advice),
                 risk_level=RiskLevel.MEDIUM,
             )
 
@@ -1499,6 +1707,42 @@ class PlanValidator:
                 irreversibility_flags=decision.irreversibility_flags,
             )
 
+        # Plan partiel : accepté UNIQUEMENT s'il est sûr et récupérable.
+        # Les lacunes deviennent un warning pré-exécution, puis la convergence
+        # finale doit prouver qu'elles sont couvertes (ou devenues inutiles).
+        _partial = bool(getattr(decision, "is_partial", False))
+        _partial_gaps = [
+            str(g).strip()
+            for g in (getattr(decision, "partial_gaps", None) or [])
+            if str(g).strip()
+        ]
+        if not _partial:
+            _partial_gaps = []
+        if _partial:
+            _risk_value = getattr(decision.risk_level, "value", decision.risk_level)
+            _flags = list(getattr(decision, "irreversibility_flags", None) or [])
+            _unsafe_partial = (
+                _risk_value == RiskLevel.CRITICAL.value
+                or bool(_flags)
+                or bool(getattr(decision, "requires_human_confirmation", False))
+            )
+            if _unsafe_partial:
+                _gaps_text = "; ".join(_partial_gaps[:5]) or decision.reason
+                return PlanValidationOutcome(
+                    is_valid=False,
+                    reason=_(
+                        "Plan partiel refusé : une lacune n'est acceptable que si le risque "
+                        "est faible ou moyen, sans action irréversible et sans confirmation "
+                        "humaine. Complète ces parties : {gaps}"
+                    ).format(gaps=_gaps_text),
+                    risk_level=decision.risk_level,
+                    irreversibility_flags=_flags,
+                    is_partial=True,
+                    partial_gaps=_partial_gaps,
+                )
+            if not _partial_gaps:
+                _partial_gaps = [str(decision.reason or _("Lacunes non détaillées par le juge."))]
+
         # Gestion des politiques HITL (Human-in-the-loop) et validation implicite
         if decision.requires_human_confirmation:
             if self._hitl_policy == "autonomous":
@@ -1518,6 +1762,8 @@ class PlanValidator:
                 reason=decision.reason,
                 risk_level=decision.risk_level,
                 irreversibility_flags=decision.irreversibility_flags,
+                is_partial=_partial,
+                partial_gaps=_partial_gaps,
             )
 
         # Conforme, mais le juge exige une confirmation humaine.
@@ -1558,6 +1804,8 @@ class PlanValidator:
             requires_human_confirmation=True,
             human_confirmed=True,
             irreversibility_flags=decision.irreversibility_flags,
+            is_partial=_partial,
+            partial_gaps=_partial_gaps,
         )
 
 

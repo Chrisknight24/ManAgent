@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.solver import Solver  # noqa: F401 (import lourd mais partagé)
 from core.plan_models import (
     ExecutionStatus,
+    is_nonretryable_contract_failure,
     is_sterile_streak,
     normalize_failure_signature,
 )
@@ -29,6 +30,20 @@ def test_sterile_detecte():
     assert is_sterile_streak([("s", 0), ("s", 3)]) is False
     assert is_sterile_streak([("s", 0)]) is False
     assert is_sterile_streak([]) is False
+
+
+def test_nonretryable_contract_failure_cible_uniquement_le_pre_dispatch():
+    assert is_nonretryable_contract_failure(
+        "[pre-dispatch] TARGET_NOT_FOUND: unresolved target reference "
+        "'$@_pt_start' for consumer 'target'"
+    )
+    assert not is_nonretryable_contract_failure(
+        "TARGET_STALE_REF: la cible a bouge"
+    )
+    assert not is_nonretryable_contract_failure(
+        "TARGET_NOT_FOUND: unresolved target reference (dispatch effectif)"
+    )
+    assert not is_nonretryable_contract_failure("Rejet matériel : échec générique")
 
 
 def _runtime():
@@ -128,6 +143,23 @@ def test_sterile_resigns_after_two():
     assert s.calls["executions"] == 2
     assert "Abandon" in s.context
     assert s.calls["judge"] == 0
+
+
+def test_predispatch_unresolved_target_ref_aborts_after_one_execution():
+    """Une liaison runtime manquante ne se repare pas en replanifiant.
+
+    Les succes `target` repetes comptent comme proges materiel : sans ce
+    garde-fou dedie, `is_sterile_streak` laisserait bruler 2 ou 3 executions
+    avant de voir le meme mur.
+    """
+    s = _solver(
+        ["[pre-dispatch] TARGET_NOT_FOUND: unresolved target reference '$@_pt_start'"],
+        materials=[4, 4, 4],
+    )
+    res = asyncio.run(s.run())
+    assert res.status == ExecutionStatus.FAILED
+    assert s.calls["executions"] == 1
+    assert "Abandon" in s.context
 
 
 def test_different_failures_use_full_budget():

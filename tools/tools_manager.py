@@ -255,6 +255,59 @@ class ToolsManager(Entity):
             )
         except ImportError as e:
             Logger.warning(f"[ToolsManager] Impossible d'importer les outils internes : {e}")
+        # P5 : `investigate` n'existe que si le routeur de scope est activé.
+        self._sync_scope_router_tool()
+
+    # =====================================================
+    # ROUTEUR DE SCOPE (P5) — outil conditionnel
+    # =====================================================
+
+    def _scope_router_enabled(self) -> bool:
+        """Vrai si le routeur de scope est activé dans le RuntimeState."""
+        return bool(getattr(self.runtime_state, "enable_scope_router", False))
+
+    def _sync_scope_router_tool(self) -> None:
+        """Ajoute/retire `investigate` selon le flag, sans redémarrage.
+
+        Off : l'outil n'est ni connu, ni visible, ni exécutable — le
+        comportement est strictement celui d'avant P5. On : l'outil est
+        exposé aux entités et route la question vers les providers.
+        """
+        enabled = self._scope_router_enabled()
+        present = "investigate" in self._internal_tool_handlers
+        if enabled and not present:
+            try:
+                from tools.internal_tools import investigate
+            except Exception as exc:
+                Logger.warning(f"[ToolsManager] `investigate` indisponible : {exc}")
+                return
+            self.register_internal_tool(
+                name="investigate",
+                handler=investigate,
+                description=_(
+                    "Pose une question en langage naturel sur l'état du monde, "
+                    "les fichiers, l'historique, les skills ou le registre. "
+                    "Le routeur choisit la source. Aucune action n'est exécutée."
+                ),
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": _(
+                                "Ce que tu cherches, en langage naturel "
+                                "(ex: « Est-ce que Paint est ouvert ? »)."
+                            ),
+                        }
+                    },
+                    "required": ["question"],
+                },
+                capabilities=["investigation en langage naturel", "lecture seule"],
+            )
+        elif not enabled and present:
+            self._internal_tool_handlers.pop("investigate", None)
+            self._internal_tools_metadata.pop("investigate", None)
+            Logger.debug("[ToolsManager] Routeur de scope désactivé : `investigate` retiré.")
 
     def register_internal_tool(self, name: str, handler: Callable, description: str = "",
                                parameters_schema: dict = None, capabilities: List[str] = None) -> None:
@@ -275,6 +328,7 @@ class ToolsManager(Entity):
         Retourne la vue unifiée des outils internes : tool_manager et load_literal_data,
         avec une description compilée dynamiquement à partir des sous-outils gérés et de leurs capacités.
         """
+        self._sync_scope_router_tool()
         tool_summaries = []
         all_caps = []
         for tool_name, meta in self._internal_tools_metadata.items():
@@ -299,7 +353,7 @@ class ToolsManager(Entity):
             "Formulez simplement le besoin dans le paramètre 'request'."
         ).format(caps=compiled_caps_str, tools=compiled_tools_str)
 
-        return [
+        view = [
             {
                 "name": "perceive_understand",
                 "role": "Lecture du monde (méta-outil)",
@@ -374,9 +428,21 @@ class ToolsManager(Entity):
                 "source": "internal"
             }
         ]
+        if self._scope_router_enabled() and "investigate" in self._internal_tool_handlers:
+            meta = self._internal_tools_metadata.get("investigate", {})
+            view.append({
+                "name": "investigate",
+                "role": "Investigation multi-scope (méta-outil)",
+                "kind": "perception",
+                "description": meta.get("description", ""),
+                "parameters": meta.get("parameters", {}),
+                "source": "internal",
+            })
+        return view
 
     def _get_internal_tools_description(self) -> str:
         """Utilisé pour le prompt interne du ToolsManager (pour lui-même)."""
+        self._sync_scope_router_tool()
         lines = []
         for name, meta in self._internal_tools_metadata.items():
             lines.append(f"- **{name}** : {meta['description']}")
@@ -664,6 +730,7 @@ class ToolsManager(Entity):
 
         Sert au gate déterministe de validation des plans (fail-fast).
         """
+        self._sync_scope_router_tool()
         names = set(self._tools.keys())
         names.update(self._internal_tool_handlers.keys())
         try:
@@ -748,6 +815,7 @@ class ToolsManager(Entity):
         """
         Point d'entrée unique pour tous les outils.
         """
+        self._sync_scope_router_tool()
         # 1. Outil spécial "tool_manager" / "analyze_data" : analyse par LLM
         if tool_name in ("tool_manager", "analyze_data"):
             request = arguments.get("request", "")

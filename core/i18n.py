@@ -20,7 +20,18 @@ def setup_i18n(lang: str = "en") -> None:
     global _translation
     try:
         # Le dossier locale est à la racine du projet (un niveau au-dessus de core/)
-        locale_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "locale")
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        locale_dir = os.path.join(root, "locale")
+        # Chaîne réelle : sans .mo, gettext retombe silencieusement sur le
+        # texte source. On compile au démarrage si le catalogue est absent/ancien.
+        try:
+            from core.i18n_compiler import ensure_catalogs
+            ensure_catalogs(
+                locale_dir, root,
+                languages=tuple(dict.fromkeys((lang, "en", "fr"))),
+            )
+        except Exception:
+            pass
         _translation = gettext.translation(
             _DOMAIN,
             localedir=locale_dir,

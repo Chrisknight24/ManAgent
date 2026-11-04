@@ -8,8 +8,11 @@ stocke. Sans contrat, rien n'est appele : le comportement reste inchange.
 from __future__ import annotations
 
 import copy
+import re
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from core.i18n import _
 from core.target_contract import ProducerSpec, TargetContract
 from core.targets import (
     TargetEntry,
@@ -65,6 +68,49 @@ def _canonical_entry(entry: Any) -> Dict[str, str]:
     }
 
 
+_ALIAS_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def bind_target_alias(
+    registry: Optional[TargetRegistry],
+    variables: Any,
+    alias: Any,
+    entry: Any,
+) -> Optional[str]:
+    """Publie un alias de plan vers le nom local d'une cible.
+
+    Contrat runtime : `variables[alias]["value"] == entry.local_name`.
+    La reference brute n'est jamais exposee dans le registre de variables ;
+    la membrane egress la resout au dernier moment depuis `TargetRegistry`.
+    """
+    alias_value = alias.strip() if isinstance(alias, str) else ""
+    if not _ALIAS_RE.fullmatch(alias_value):
+        return f"nom local de cible invalide: {alias!r}"
+    if entry is None or not getattr(entry, "active", False):
+        return "cible absente ou inactive: liaison impossible"
+    if not isinstance(variables, dict):
+        return "registre de variables indisponible pour lier la cible"
+
+    description = getattr(entry, "description", "") or getattr(entry, "local_name", "")
+    variables[alias_value] = {
+        "value": entry.local_name,
+        "type": "target",
+        "kind": "target",
+        "scope": entry.scope,
+        "description": _("Cible '{desc}' ({scope})").format(
+            desc=description[:200], scope=entry.scope
+        ),
+        "source": "target_registry",
+        "timestamp": datetime.now().isoformat(),
+    }
+    if registry is not None:
+        try:
+            registry.note_bound(entry, alias=alias_value)
+        except Exception:
+            pass
+    return None
+
+
 def _lookup(registry: TargetRegistry, correlation_id: Any, ref: Any) -> Any:
     entry = None
     if isinstance(correlation_id, str) and correlation_id.strip():
@@ -115,6 +161,9 @@ def _project_item(
     if not register:
         return _lookup(registry, correlation_raw, ref_raw)
 
+    registry.note_discovered(
+        scope=scope, ref=ref_raw, correlation_id=correlation_raw,
+    )
     try:
         return registry.upsert(
             scope=scope,

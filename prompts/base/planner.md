@@ -7,7 +7,7 @@ Tu écris un plan : une liste d'étapes pour atteindre l'objectif.
 - **Stratégie conseillée (avis seulement)** : {{ strategy }}
 - **Déjà tenté + erreurs** : {{ context or "Aucun." }}
 {% if previous_failures %}
-- **ÉCHECS PASSÉS (ne rejoue jamais ça)** :
+- **ÉCHECS PASSÉS (à examiner avant de réessayer)** :
 {{ previous_failures }}
 {% endif %}
 - **Conseils des missions passées (pistes, pas des ordres)** :
@@ -31,7 +31,10 @@ Rapports de missions passées JUGÉES (le juge peut se tromper) : pistes suggest
 {% if targets_enabled %}
 ## CIBLES
 - Une cible se désigne par un nom local (`$@_<nom>`), jamais par une référence brute.
+- Toute action qui consomme une cible doit recevoir ce nom local, produit AVANT l'action. Si un paramètre cible est requis, son absence rend le plan invalide.
+- N'utilise pas un champ legacy (`cell`, `uia`, coordonnées) à la place d'un paramètre cible requis.
 - `output_target_name` : uniquement sur un producteur de cibles ou un méta-outil de sélection. Renseigne ensuite ce nom exact dans un argument consommateur.
+- Pour créer une cible, utilise l'outil dont le contrat déclare `produces` ; ne mets pas `output_target_name` sur un outil qui ne le déclare pas.
 {% if target_selection_enabled %}
 - Plusieurs candidates : le méta-outil de sélection choisit une clé locale. Ne fabrique jamais de clé.
 {% endif %}
@@ -89,7 +92,7 @@ Un `tool_call` exige un `tool_name` recopié de OUTILS. Une action = un `tool_ca
 5. Suis l'objectif exactement (cible, valeurs, langue). Garde la langue indiquée dans l'objectif pour `response_text`.
 6. Si aucun outil ne convient : `direct_answer` qui dit ce qui manque.
 7. Si l'objectif se contredit : `direct_answer` qui le signale.
-8. Si l'historique montre un échec, ta nouvelle stratégie doit changer d'approche (pas rejouer pareil).
+8. Si l'historique montre un échec, examine ce qui a échoué et propose une évolution lorsque cela se justifie. Si le même plan reste pertinent (état du monde changé, échec transitoire, attente trop courte), tu peux l'expliquer et le conserver ou l'ajuster ; évite de changer uniquement pour paraître différent.
 9. Tes plans doivent tenir dans la limite de sortie : descriptions brèves (une phrase), pas de répétition des args dans la description, 5 à 10 étapes typiquement. Au-delà : resserre l'objectif ou termine en `direct_answer` partiel honnête.
 
 {% if world_guidance is not defined or world_guidance %}
@@ -104,7 +107,7 @@ Le résultat `$@_data_step_N` EST la réponse quand la question la demande : n'a
 
 ## APRÈS UN REJET
 
-Tu reçois l'erreur, ton plan rejeté et la liste des noms valides. Corrige exactement l'erreur. Recopie un nom valide de la liste. Si le plan a raté à l'exécution, change d'approche.
+Tu reçois l'erreur, ton plan rejeté et la liste des noms valides. Propose une correction ciblée qui répond à l'erreur ; recopie un nom valide de la liste. Si le plan a raté à l'exécution, examine si l'approche, un paramètre ou l'attente doit évoluer.
 
 ---
 
@@ -124,10 +127,19 @@ Objectif : dis si la fenêtre Exemple est ouverte.
 - step_2, `direct_answer`, `La fenêtre Exemple est ouverte.`, `execute_if` = `$@_data_step_1 == "yes"`
 - step_3, `direct_answer`, `La fenêtre Exemple est fermée.`, `execute_if` = `$@_data_step_1 == "no"`
 
+{% if targets_enabled %}
+## EXEMPLE 3 : créer une cible puis l'utiliser
+
+Objectif : agir sur un contrôle précis nommé dans l'objectif.
+
+- step_1, `tool_call`, `{{ target_producer_tool | default("<un outil [produces] de OUTILS>") }}`, `{"label": "…"}`, `output_target_name` = `controle_nomme`
+- step_2, `tool_call`, `{{ target_consumer_tool | default("<un outil avec argument 'target' de OUTILS>") }}`, `{"action": "click", "target": "$@_controle_nomme"}`
+{% endif %}
+
 ## CHECKLIST
 
 - [ ] Chaque `tool_call` a un `tool_name` valide.
-- [ ] Chaque `$@_...` est un nom auto (`$@_data_step_N`, `$@_bool_step_N`) ou du registre.
+- [ ] Chaque `$@_...` est un nom auto (`$@_data_step_N`, `$@_bool_step_N`), du registre, ou un nom de cible déclaré à l'avance par l'outil qui la produit.
 - [ ] Chaque variable vient d'une étape antérieure.
 - [ ] Chaque `execute_if` suit une des deux formes.
 - [ ] Le monde est lu seulement avec `perceive_understand`.
@@ -135,6 +147,9 @@ Objectif : dis si la fenêtre Exemple est ouverte.
 - [ ] Pas d'analyse derrière `perceive_understand` sans raison.
 - [ ] Pas d'`abstract_task` pour une action seule ni pour inspecter une variable.
 - [ ] Pas d'`output_variable_name` dans `tool_args_json`.
+{% if targets_enabled %}
+- [ ] Toute action sur une cible consomme le nom EXACT déclaré par `output_target_name` d'un step antérieur (jamais un nom inventé).
+{% endif %}
 - [ ] Dernière étape = `direct_answer` dans la langue de l'objectif.
 
 {% include 'plan_grammar.md' %}

@@ -127,6 +127,9 @@ class Presentator(Entity):
         mission_status = kwargs.get("mission_status", "success")
         error_reason = kwargs.get("error_reason", None)
         mission_id = kwargs.get("mission_id", None)
+        plan_gaps = kwargs.get("plan_gaps", None)
+        is_partial = bool(kwargs.get("is_partial", False))
+        convergence_reason = kwargs.get("convergence_reason", None)
 
         output = await self.generate_mission_output(
             goal=goal,
@@ -135,7 +138,10 @@ class Presentator(Entity):
             accumulated_response=accumulated_response,
             mission_status=mission_status,
             error_reason=error_reason,
-            mission_id=mission_id
+            mission_id=mission_id,
+            plan_gaps=plan_gaps,
+            is_partial=is_partial,
+            convergence_reason=convergence_reason,
         )
         return output.user_report
 
@@ -190,8 +196,18 @@ class Presentator(Entity):
         mission_status: str,
         error_reason: Optional[str] = None,
         mission_id: Optional[str] = None,
+        plan_gaps: Optional[list] = None,
+        is_partial: bool = False,
+        convergence_reason: Optional[str] = None,
     ) -> PresentatorOutput:
         Logger.info(f"[Presentator] 📝 Génération structurée (rapport + résumé) pour statut: {mission_status}")
+
+        _gaps = [str(g).strip() for g in (plan_gaps or []) if str(g).strip()]
+        _convergence_reason = str(convergence_reason or "").strip()
+        if _gaps:
+            Logger.info(
+                f"[Presentator] ⚠️ Plan partiel : {len(_gaps)} lacune(s) transmise(s) au rapport."
+            )
 
         if mission_id is None and getattr(self, "runtime_state", None) is not None:
             try:
@@ -232,7 +248,10 @@ class Presentator(Entity):
             mission_status=mission_status,
             error_reason=error_reason or "",
             session_mood=mood or "neutre",
-            detail_level=detail_level
+            detail_level=detail_level,
+            plan_gaps="\n".join(f"- {g}" for g in _gaps[:8]),
+            is_partial=bool(is_partial or _gaps),
+            convergence_reason=_convergence_reason,
         )
 
         try:
@@ -247,11 +266,15 @@ class Presentator(Entity):
 
         except asyncio.TimeoutError as e:
             Logger.error(f"[Presentator] ⏰ Timeout lors de la génération structurée : {e}")
-            return self._build_fallback_output(goal, mission_status, error_reason, _("Timeout du service d'IA"))
+            return self._build_fallback_output(
+                goal, mission_status, error_reason, _("Timeout du service d'IA"), _gaps
+            )
 
         except Exception as e:
             Logger.error(f"[Presentator] ❌ Échec de la génération structurée : {e}")
-            return self._build_fallback_output(goal, mission_status, error_reason, str(e))
+            return self._build_fallback_output(
+                goal, mission_status, error_reason, str(e), _gaps
+            )
 
     # ============================================================
     # MÉTHODE UTILITAIRE : Vue normalisée du registre (avec types bool/data)
@@ -321,8 +344,51 @@ class Presentator(Entity):
     # FALLBACK
     # ============================================================
 
-    def _build_fallback_output(self, goal: str, mission_status: str, error_reason: Optional[str], error_detail: str) -> PresentatorOutput:
-        if mission_status == "success":
+    @staticmethod
+    def collect_plan_gaps(runtime_state: Any, solver_id: Optional[str], mission_id: Optional[str] = None) -> list:
+        """Lacunes du plan partiel accepté, lues dans le store runtime.
+
+        Le store est rempli par l'orchestrateur à l'acceptation du plan
+        (`plan_warnings_by_solver`). Repli sur l'identifiant de mission pour
+        les appelants qui ne connaissent pas l'id du solver. Jamais bloquant.
+        """
+        try:
+            store = getattr(runtime_state, "plan_warnings_by_solver", None)
+            if not isinstance(store, dict):
+                return []
+            for key in (solver_id, mission_id):
+                if not key:
+                    continue
+                raw = store.get(key, None)
+                if raw:
+                    return [str(g).strip() for g in raw if str(g).strip()]
+            return []
+        except Exception:
+            return []
+
+    def _build_fallback_output(
+        self,
+        goal: str,
+        mission_status: str,
+        error_reason: Optional[str],
+        error_detail: str,
+        plan_gaps: Optional[list] = None,
+    ) -> PresentatorOutput:
+        gaps = [str(g).strip() for g in (plan_gaps or []) if str(g).strip()]
+        if gaps:
+            # Un plan partiel ne doit JAMAIS produire un bilan de réussite,
+            # même quand le service d'IA est indisponible.
+            _gaps_text = "; ".join(gaps[:5])
+            user_report = _(
+                "⚠️ Mission '{goal}' : résultat PARTIEL. Les points suivants "
+                "n'ont pas été prouvés : {gaps}. Le rapport détaillé est "
+                "indisponible (service d'IA : {detail})."
+            ).format(goal=goal, gaps=_gaps_text, detail=error_detail)
+            summary = _(
+                "Mission '{goal}' : résultat partiel, lacunes non prouvées "
+                "({gaps}) ; rapport indisponible."
+            ).format(goal=goal, gaps=_gaps_text)
+        elif mission_status == "success":
             user_report = _("✅ Mission '{goal}' accomplie techniquement, mais le rapport détaillé n'a pas pu être généré en raison d'une indisponibilité du service d'IA (détail : {detail}). Veuillez consulter les logs pour plus d'informations.").format(goal=goal, detail=error_detail)
             summary = _("Mission '{goal}' : succès technique (rapport indisponible).").format(goal=goal)
         else:

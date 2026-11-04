@@ -30,7 +30,7 @@ from utils.logger import Logger
 
 # Nouveaux imports pour l'architecture HTN (Hierarchical Task Network)
 from .supervisor import Supervisor
-from .plan_models import Plan, ExecutionStatus, OrchestratorDecision, PlanValidationDecision, DepthEscalationDecision, AssetInjection, drop_unknown_injected_assets
+from .plan_models import Plan, ExecutionStatus, OrchestratorDecision, PlanValidationDecision, DepthEscalationDecision, AssetInjection, drop_unknown_injected_assets, build_plan_validation_payload
 from .plan_validator import PlanValidator, PlanValidationOutcome, review_depth_escalation, DepthEscalationOutcome, review_retry_extension, RetryExtensionOutcome
 from core.execution_models import PlanAttempt
 from .solver import Solver, build_mission_convergence_payload
@@ -120,6 +120,10 @@ class Orchestrator(Supervisor, Entity):
         self.runtime_state.skill_registry = self.skill_registry
         self.runtime_state.session_store = self.session_store
         self.runtime_state.lesson_store = self.lesson_store
+        try:
+            self.runtime_state.target_registry.set_observer(self._on_target_event)
+        except Exception as e:
+            Logger.warning(f"[Orchestrator] Observateur cibles indisponible : {e}")
         try:
             from memory.usage_store import UsageStore
             self.usage_store = UsageStore()
@@ -310,6 +314,11 @@ class Orchestrator(Supervisor, Entity):
                 await self.propagate_event(Events.LEARNER_ANALYZE_FINISHED, {"count": analyzed})
                 return ResponsePacket(type="response", status="success",
                                       payload={"message": f"Analyse terminée : {analyzed} épisodes traités."})
+            elif packet.action in (
+                Actions.LESSON_LIST, Actions.LESSON_GET, Actions.LESSON_CREATE,
+                Actions.LESSON_UPDATE, Actions.LESSON_DELETE, Actions.LESSON_CONSOLIDATE,
+            ):
+                return await self._handle_lesson_action(packet)
             elif packet.action == Actions.SET_SKILL_STATE:
                 skill_id = packet.payload.get("skill_id")
                 state = packet.payload.get("state")
@@ -1074,7 +1083,18 @@ class Orchestrator(Supervisor, Entity):
                     Logger.warning(f"[Orchestrator] Exception suppressed due to cancellation: {str(e)}")
                     return ResponsePacket(type="response", status="success",
                                          payload={"message": _("Action annulée")})
-                from providers.base_provider import ProviderQuotaExhaustedError, quota_friendly_message
+                from providers.base_provider import (
+                    ProviderQuotaExhaustedError,
+                    ProviderNetworkError,
+                    quota_friendly_message,
+                )
+                if isinstance(e, ProviderNetworkError):
+                    friendly = str(e) or _(
+                        "Connexion à l'IA impossible (réseau/DNS). Vérifie la connexion puis réessaie."
+                    )
+                    Logger.error(f"[Orchestrator] Provider réseau/DNS injoignable : {str(e)[:200]}")
+                    await self.propagate_event(Events.RUNTIME_ERROR, {"message": friendly})
+                    return ErrorPacket(type="error", message=friendly)
                 if isinstance(e, ProviderQuotaExhaustedError):
                     remaining = 0.0
                     try:
@@ -1846,6 +1866,26 @@ class Orchestrator(Supervisor, Entity):
 
             mission_status = "success" if result.status == ExecutionStatus.SUCCESS else "failed"
 
+            # Rapport honnête (F3) : un plan partiel ne doit jamais produire un
+            # bilan de réussite. Les lacunes viennent du store d'acceptation,
+            # le motif de la porte/juge de convergence.
+            try:
+                _root_id = getattr(self.root_solver, "id", None) if self.root_solver else None
+                _plan_gaps = Presentator.collect_plan_gaps(
+                    self.runtime_state,
+                    _root_id,
+                    mission_cache.mission_id if mission_cache else None,
+                )
+            except Exception:
+                _plan_gaps = []
+            try:
+                _convergence_reason = str(
+                    getattr(self.runtime_state, "last_convergence_reason", "") or ""
+                )
+            except Exception:
+                _convergence_reason = ""
+            _is_partial = bool(_plan_gaps)
+
             # --- NOUVEAU : Utiliser le RUM comme registre pour le Presentator ---
             rum = getattr(self.runtime_state, 'mission_rum', None)
             if rum:
@@ -1865,7 +1905,10 @@ class Orchestrator(Supervisor, Entity):
                     accumulated_response=result.response or "",
                     mission_status=mission_status,
                     error_reason=result.error_reason if mission_status == "failed" else None,
-                    mission_id=mission_cache.mission_id if mission_cache else None
+                    mission_id=mission_cache.mission_id if mission_cache else None,
+                    plan_gaps=_plan_gaps,
+                    is_partial=_is_partial,
+                    convergence_reason=_convergence_reason,
                 )
 
             final_response = output.user_report
@@ -1874,10 +1917,13 @@ class Orchestrator(Supervisor, Entity):
             if mission_cache:
                 mission_cache.summary = summary
                 mission_cache.presentator_result = {
-                    "status": "success",
+                    # Un plan partiel n'est jamais un succès plein et entier.
+                    "status": "partial" if _is_partial else mission_status,
                     "user_response": final_response,
                     "system_summary": summary,
-                    "error_reason": None
+                    "error_reason": None if mission_status != "failed" else result.error_reason,
+                    "plan_gaps": _plan_gaps,
+                    "convergence_reason": _convergence_reason,
                 }
 
         except Exception as e:
@@ -1901,7 +1947,11 @@ class Orchestrator(Supervisor, Entity):
 
             if mission_cache:
                 mission_cache.summary = summary
-                mission_cache.presentator_result = {"status": "failed", "error_reason": str(e)}
+                mission_cache.presentator_result = {
+                    "status": "failed",
+                    "generation_failed": True,
+                    "error_reason": str(e),
+                }
 
         # ============================================================
         # 9. SAUVEGARDE COMPLÈTE DE L'ÉPISODE (une seule fois, avec résumé)
@@ -1968,11 +2018,27 @@ class Orchestrator(Supervisor, Entity):
             _done_success = bool(mission_cache and mission_cache.status == "success")
         except Exception:
             _done_success = False
+        # Plan partiel : le détail ne doit pas annoncer « Mission accomplie ».
+        try:
+            _pr_done = getattr(mission_cache, "presentator_result", None) or {}
+            _partial_done = bool(_pr_done.get("plan_gaps"))
+        except Exception:
+            _partial_done = False
         # convergence.check de fin de mission : émis APRÈS le présentateur
         # pour que `full` contienne le vrai rapport (jamais jugé, popup hôte).
         try:
-            _cc_detail = _("Mission accomplie.") if _done_success else (
-                mission_cache.summary if mission_cache and mission_cache.summary else _("Mission échouée"))
+            if _done_success:
+                _cc_detail = (
+                    mission_cache.summary
+                    if _partial_done and mission_cache and mission_cache.summary
+                    else _("Mission accomplie.")
+                )
+            else:
+                _cc_detail = (
+                    mission_cache.summary
+                    if mission_cache and mission_cache.summary
+                    else _("Mission échouée")
+                )
             _cc_payload = build_mission_convergence_payload(
                 "pass" if _done_success else "fail", _cc_detail, final_response, mission_id)
             Logger.event("convergence.check", **_cc_payload)
@@ -2142,6 +2208,21 @@ class Orchestrator(Supervisor, Entity):
         except Exception:
             pass
 
+        # Sortie `any` non consommée : avertissement de convergence, jamais un
+        # refus. Canal distinct pour ne pas contaminer `world_warnings`.
+        try:
+            _any_warns = list(getattr(validator, "_last_any_warnings", None) or [])
+            _any_store = getattr(self.runtime_state, "expected_warnings_by_solver", None)
+            if not isinstance(_any_store, dict):
+                _any_store = {}
+                self.runtime_state.expected_warnings_by_solver = _any_store
+            if _any_warns:
+                _any_store[child_solver_id] = _any_warns
+            else:
+                _any_store.pop(child_solver_id, None)
+        except Exception:
+            pass
+
         # Réparation auto (pas de refus en boucle) : si le SEUL grief est de
         # la perception directe, on réécrit en perceive_understand et on
         # re-valide une fois. Le planner faible ne sait pas se corriger seul.
@@ -2177,6 +2258,32 @@ class Orchestrator(Supervisor, Entity):
                         world_snapshot=_judge_world,
                     )
 
+        # Plan partiel accepté : warning pré-exécution, vérifié par la
+        # convergence finale. Un plan complet accepté efface l'ancien warning.
+        try:
+            if outcome.is_valid:
+                _partial_gaps = list(getattr(outcome, "partial_gaps", None) or [])
+                _store = getattr(self.runtime_state, "plan_warnings_by_solver", None)
+                if not isinstance(_store, dict):
+                    _store = {}
+                    self.runtime_state.plan_warnings_by_solver = _store
+                if _partial_gaps:
+                    _store[child_solver_id] = _partial_gaps
+                    Logger.event(
+                        "plan_partial_accepted",
+                        solver_id=child_solver_id,
+                        risk_level=getattr(
+                            getattr(outcome, "risk_level", None),
+                            "value",
+                            getattr(outcome, "risk_level", None),
+                        ),
+                        gaps=_partial_gaps[:8],
+                    )
+                else:
+                    _store.pop(child_solver_id, None)
+        except Exception:
+            pass
+
         # Garde paramètres skills (avertissement, jamais rejet) : un execute_skill
         # sans ses paramètres requis recevra un refus net à l'exécution, autant
         # prévenir ici (event visible en HTML). Le plan reste valide.
@@ -2195,8 +2302,8 @@ class Orchestrator(Supervisor, Entity):
                     if (getattr(_st, "tool_name", None) or "").strip() != "execute_skill":
                         continue
                     try:
-                        import json as _json2
-                        _a = _json2.loads(getattr(_st, "tool_args_json", "{}") or "{}")
+                        from core.plan_models import parse_tool_args_json as _parse_args_tolerant
+                        _a = _parse_args_tolerant(getattr(_st, "tool_args_json", "{}") or "{}")
                     except Exception:
                         continue
                     _sid = str((_a.get("skill_id", "") or "")).strip() if isinstance(_a, dict) else ""
@@ -2221,29 +2328,16 @@ class Orchestrator(Supervisor, Entity):
             except Exception:
                 pass
 
-        Logger.event(
-            "plan_validation_decision",
-            solver_id=child_solver_id,
-            plan_id=plan_id,
-            is_valid=outcome.is_valid,
-            reason=outcome.reason,
-            risk_level=outcome.risk_level.value,
-            requires_human_confirmation=outcome.requires_human_confirmation,
-            human_confirmed=outcome.human_confirmed,
-            irreversibility_flags=outcome.irreversibility_flags,
+        # Payload unique (event + paquet) : `is_partial`/`partial_gaps` doivent
+        # être visibles côté front et observabilité, sinon un plan accepté avec
+        # lacunes est indiscernable d'un plan complet.
+        _validation_payload = build_plan_validation_payload(
+            outcome, child_solver_id, plan_id
         )
+        Logger.event("plan_validation_decision", **_validation_payload)
         # Relais paquet (le front ne lit que les paquets) : même contenu.
         try:
-            await self.propagate_event("plan_validation_decision", {
-                "solver_id": child_solver_id,
-                "plan_id": plan_id,
-                "is_valid": outcome.is_valid,
-                "reason": outcome.reason,
-                "risk_level": outcome.risk_level.value,
-                "requires_human_confirmation": outcome.requires_human_confirmation,
-                "human_confirmed": outcome.human_confirmed,
-                "irreversibility_flags": outcome.irreversibility_flags,
-            })
+            await self.propagate_event("plan_validation_decision", dict(_validation_payload))
         except Exception:
             pass
 
@@ -2574,6 +2668,128 @@ class Orchestrator(Supervisor, Entity):
     # =====================================================
     # PROPAGATION D'ÉVÉNEMENTS ET HEARTBEAT
     # =====================================================
+    async def _handle_lesson_action(self, packet):
+        """CRUD hôte des leçons, sans passer par un LLM."""
+        store = getattr(self, "lesson_store", None)
+        if store is None and getattr(self.runtime_state, "learner", None):
+            store = getattr(self.runtime_state.learner, "lesson_store", None)
+        if store is None:
+            return ErrorPacket(type="error", message="LessonStore indisponible.")
+        payload = dict(packet.payload or {})
+
+        try:
+            if packet.action == Actions.LESSON_LIST:
+                lessons = await asyncio.to_thread(
+                    store.list_lessons,
+                    environment=payload.get("environment"),
+                    entity_type=payload.get("entity_type"),
+                    scope=payload.get("scope"),
+                    polarity=payload.get("polarity"),
+                    include_inactive=bool(payload.get("include_inactive", False)),
+                    limit=payload.get("limit", 200),
+                    offset=payload.get("offset", 0),
+                )
+                return ResponsePacket(type="response", status="success",
+                                      payload={"lessons": lessons, "count": len(lessons)})
+
+            uid = str(payload.get("uid") or "").strip()
+            if packet.action == Actions.LESSON_GET:
+                if not uid:
+                    return ErrorPacket(type="error", message="uid requis.")
+                lesson = await asyncio.to_thread(store.get_lesson, uid)
+                if lesson is None:
+                    return ErrorPacket(type="error", message=f"Leçon introuvable : {uid}")
+                return ResponsePacket(type="response", status="success", payload={"lesson": lesson})
+
+            if packet.action == Actions.LESSON_CREATE:
+                for key in ("entity_type", "scope", "recommendation"):
+                    if not str(payload.get(key) or "").strip():
+                        return ErrorPacket(type="error", message=f"{key} requis.")
+                lesson = await asyncio.to_thread(
+                    store.create_lesson,
+                    entity_type=str(payload["entity_type"]).strip(),
+                    scope=str(payload["scope"]).strip(),
+                    recommendation=str(payload["recommendation"]).strip(),
+                    environment=payload.get("environment") or "simulated",
+                    polarity=payload.get("polarity") or "avoid",
+                    keywords=payload.get("keywords") or [],
+                    confidence=payload.get("confidence", 2 / 3),
+                    evidence_count=payload.get("evidence_count", 1),
+                    origin="manual",
+                    locked=bool(payload.get("locked", False)),
+                )
+                if lesson is None:
+                    return ErrorPacket(type="error", message="Création de leçon échouée.")
+                return ResponsePacket(type="response", status="success",
+                                      payload={"lesson": lesson, "message": "Leçon créée."})
+
+            if packet.action == Actions.LESSON_UPDATE:
+                if not uid:
+                    return ErrorPacket(type="error", message="uid requis.")
+                updates = {
+                    k: v for k, v in payload.items()
+                    if k not in ("uid", "expected_revision", "force")
+                }
+                lesson = await asyncio.to_thread(
+                    store.update_lesson, uid, updates,
+                    expected_revision=payload.get("expected_revision"),
+                    force=bool(payload.get("force", False)),
+                )
+                if lesson is None:
+                    return ErrorPacket(type="error", message=f"Leçon introuvable : {uid}")
+                return ResponsePacket(type="response", status="success",
+                                      payload={"lesson": lesson, "message": "Leçon mise à jour."})
+
+            if packet.action == Actions.LESSON_DELETE:
+                if not uid:
+                    return ErrorPacket(type="error", message="uid requis.")
+                deleted = await asyncio.to_thread(
+                    store.delete_lesson, uid,
+                    hard=bool(payload.get("hard", False)),
+                    force=bool(payload.get("force", False)),
+                )
+                if not deleted:
+                    return ErrorPacket(type="error", message=f"Leçon introuvable : {uid}")
+                return ResponsePacket(type="response", status="success", payload={
+                    "uid": uid,
+                    "deleted": True,
+                    "hard": bool(payload.get("hard", False)),
+                })
+
+            learner = getattr(self.runtime_state, "learner", None)
+            entity_learner = getattr(learner, "entity_learner", None) if learner else None
+            if entity_learner is None:
+                return ErrorPacket(type="error", message="EntityLearner indisponible.")
+            count = await entity_learner.consolidate_if_needed()
+            return ResponsePacket(type="response", status="success",
+                                  payload={"consolidated": count})
+        except PermissionError as e:
+            return ErrorPacket(type="error", message=str(e))
+        except ValueError as e:
+            return ErrorPacket(type="error", message=str(e))
+        except Exception as e:
+            Logger.error(f"[Orchestrator] Erreur action leçon {packet.action} : {e}")
+            return ErrorPacket(type="error", message=f"Erreur leçon : {e}")
+
+    def _on_target_event(self, event_name: str, payload: dict):
+        """Observateur synchrone du TargetRegistry -> event_bus.
+
+        Le registre est synchrone (appelé depuis executor/internal_tools),
+        donc on programme la propagation sur la boucle courante sans bloquer.
+        Hors boucle (tests, scripts), l'événement est simplement ignoré.
+        """
+        enriched = dict(payload or {})
+        if self.runtime_state.current_mission_id and "mission_id" not in enriched:
+            enriched["mission_id"] = self.runtime_state.current_mission_id
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        try:
+            loop.create_task(self.propagate_event(event_name, enriched))
+        except Exception:
+            pass
+
     async def propagate_event(self, event_name: str, payload: dict):
         """Propagation des événements vers le C++ (via event_bus)."""
         exec_ctx = self.runtime_state.execution_context

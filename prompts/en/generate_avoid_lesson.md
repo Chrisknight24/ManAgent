@@ -1,17 +1,17 @@
-Tu analyses l'échec d'une entité précise d'un moteur agentique.
+You analyze the failure of a specific entity in an agentic engine.
 
-ENTITÉ RESPONSABLE : {{ entity_type }}
-RÔLE DE CETTE ENTITÉ : {{ role_description }}
+RESPONSIBLE ENTITY: {{ entity_type }}
+ROLE OF THIS ENTITY: {{ role_description }}
 
-OBJECTIF DE LA SOUS-TÂCHE : {{ goal }}
-TYPE D'ERREUR : {{ failure_class }}
-DÉTAIL DE L'ERREUR : {{ failure_reason }}
+SUB-TASK GOAL: {{ goal }}
+ERROR TYPE: {{ failure_class }}
+ERROR DETAIL: {{ failure_reason }}
 
-SÉQUENCE D'EXÉCUTION (prunée) :
+EXECUTION SEQUENCE (pruned):
 {{ pruned_attempt }}
 
-Instructions :
-1. Identifie un mot-clé de scope STABLE et étroit qui résume la SITUATION précise à l'origine de l'échec (ex: 'keyboard_run_dialog_focus_loss'). Ce n'est pas forcément une application.
-2. Propose 5 à 8 mots-clés LARGES et variés (applications, actions, synonymes, outils impliqués) qui permettront de retrouver cette leçon depuis un but de mission différent.
-3. Produis une règle impérative courte (1-2 phrases), adressée directement à {{ entity_type }}, pour ÉVITER cette erreur à l'avenir compte tenu de son rôle ci-dessus. Note : Les Skills s'auto-guérissent via leur propre registre (SkillRegistry) ; ne génère pas de règle interdisant ou décourageant l'usage général de l'outil `execute_skill` ou des Skills.
-4. ANTI-ACHARNEMENT : si l'échec vient d'une ABSENCE d'outils ou de skills (rien de disponible dans l'environnement), la leçon doit dire de SIGNALER le manque et de refuser vite — jamais d'insister, jamais de « ne jamais refuser ».
+Instructions:
+1. Identify a STABLE, narrow scope keyword summarizing the precise SITUATION at the origin of the failure (e.g. 'keyboard_run_dialog_focus_loss'). It is not necessarily an application.
+2. Propose 5 to 8 BROAD, varied keywords (applications, actions, synonyms, involved tools) so this lesson can be found from a different mission goal.
+3. Write a short actionable tip (1-2 sentences) addressed to {{ entity_type }}, as a lead for avoiding this kind of error in the future, considering its role above. Prefer wording such as "it is often preferable to…" or "one lead is to…" over "you must…". Note: Skills self-heal through their own registry (SkillRegistry); a rule that forbade or discouraged general use of the `execute_skill` tool or Skills would probably be counterproductive.
+4. ANTI-PERSISTENCE: if the failure comes from a LACK of tools or skills (nothing available in the environment), a useful lead is to report the gap and stop quickly rather than insist. Conversely, an absolute rule such as "never refuse" would probably be excessive.

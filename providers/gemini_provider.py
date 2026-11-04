@@ -9,6 +9,7 @@ import os
 from typing import Type, List, Optional, Any, AsyncGenerator
 from pydantic import BaseModel
 import asyncio
+import time
 
 from google import genai
 from google.genai import types
@@ -21,6 +22,7 @@ from providers.base_provider import (
     ProviderServiceUnavailableError,
     ProviderError
 )
+from core.constants import LLM_CALL_TIMEOUT_SECONDS, LLM_FAILOVER_BUDGET_SECONDS
 from utils.logger import Logger
 from core.i18n import _
 
@@ -91,13 +93,33 @@ class GeminiProvider(BaseProvider):
     async def _execute_with_failover(self, func, *args, **kwargs):
         """
         Exécute une fonction SDK avec rotation transparente des clés en cas de 429/503.
+
+        Deux garde-fous anti-gel (incident du 27/10 : 296 s sans log) :
+        - `call_timeout_seconds` : aucun appel unitaire ne dépasse ce délai ;
+        - `failover_budget_seconds` : l'ensemble rotations + backoffs est borné.
+        Dépassement → ProviderServiceUnavailableError (erreur de service, pas
+        un quota épuisé : les clés ne sont pas forcément saturées).
+
         Lève ProviderQuotaExhaustedError si toutes les clés du pool sont saturées.
         """
         total_keys = max(1, len(self.api_keys_pool))
         attempts = 0
+        call_timeout = float(getattr(self, "call_timeout_seconds", LLM_CALL_TIMEOUT_SECONDS) or 0)
+        budget = float(getattr(self, "failover_budget_seconds", LLM_FAILOVER_BUDGET_SECONDS) or 0)
+        deadline = time.monotonic() + budget
 
         while attempts < total_keys:
             self.check_cancelled()
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                Logger.error(
+                    f"[Gemini Failover] ⏱️ Budget global épuisé ({budget:.0f}s) "
+                    f"après {attempts} rotation(s)."
+                )
+                raise ProviderServiceUnavailableError(
+                    _("[GeminiProvider] Budget d'appel épuisé ({budget}s) sans réponse du service.").format(budget=int(budget))
+                )
 
             current_key = self.get_active_api_key()
             if not current_key:
@@ -107,10 +129,21 @@ class GeminiProvider(BaseProvider):
 
             try:
                 await self._get_or_create_client()
-                result = await func(*args, **kwargs)
+                # Le timeout unitaire ne peut pas dépasser le budget restant :
+                # le pire cas total reste borné par `deadline`.
+                attempt_timeout = min(call_timeout, remaining) if call_timeout > 0 else remaining
+                result = await asyncio.wait_for(func(*args, **kwargs), timeout=attempt_timeout)
                 self.promote_key(current_key)
                 return result
 
+            except asyncio.TimeoutError as e:
+                Logger.error(
+                    f"[Gemini Failover] ⏱️ Appel sans réponse après "
+                    f"{attempt_timeout:.0f}s : abandon (pas de rotation aveugle)."
+                )
+                raise ProviderServiceUnavailableError(
+                    _("[GeminiProvider] Appel Gemini sans réponse après {seconds}s.").format(seconds=int(attempt_timeout))
+                ) from e
             except asyncio.CancelledError:
                 raise
             except APIError as e:
@@ -162,6 +195,44 @@ class GeminiProvider(BaseProvider):
     # =====================================================
     # GÉNÉRATION
     # =====================================================
+    @staticmethod
+    def finish_diagnostics(response: Any) -> dict:
+        """Diagnostic de fin d'appel : troncature et jetons de raisonnement.
+
+        L'incident du 27/10 n'a laissé aucun `usage` ni `thought` dans les logs,
+        donc impossible de distinguer une troncature de sortie (`MAX_TOKENS`)
+        d'un JSON mal formé. Fonction pure, robuste aux champs absents.
+        """
+        reason = None
+        try:
+            candidates = getattr(response, "candidates", None) or []
+            if candidates:
+                raw = getattr(candidates[0], "finish_reason", None)
+                if raw is not None:
+                    reason = (
+                        getattr(raw, "value", None)
+                        or getattr(raw, "name", None)
+                        or str(raw)
+                    )
+        except Exception:
+            reason = None
+
+        usage = getattr(response, "usage_metadata", None)
+
+        def _count(name: str):
+            try:
+                value = getattr(usage, name, None)
+                return int(value) if value is not None else None
+            except Exception:
+                return None
+
+        return {
+            "finish_reason": reason,
+            "truncated": str(reason or "").upper().endswith("MAX_TOKENS"),
+            "thoughts_tokens": _count("thoughts_token_count"),
+            "output_tokens": _count("candidates_token_count"),
+        }
+
     async def generate_response(self, user_message: str) -> str:
         async def _run():
             if not self.chat_session:
@@ -242,6 +313,18 @@ class GeminiProvider(BaseProvider):
                 self._set_last_usage(self.normalize_gemini_usage(getattr(response, "usage_metadata", None)))
             except Exception:
                 self._set_last_usage(None)
+
+            _diag = self.finish_diagnostics(response)
+            Logger.info(
+                f"[GeminiProvider] finish_reason={_diag['finish_reason']} "
+                f"thoughts={_diag['thoughts_tokens']} "
+                f"output={_diag['output_tokens']}"
+            )
+            if _diag["truncated"]:
+                Logger.warning(
+                    "[GeminiProvider] ⚠️ Réponse tronquée (MAX_TOKENS) : "
+                    "sortie structurée incomplète — le JSON peut être invalide."
+                )
 
             return response_schema.model_validate_json(response.text)
 

@@ -48,10 +48,31 @@ def dedupe_recommendations(lessons: list) -> list:
         out.append(lesson)
     return out
 
+def is_presentator_generation_failure(result: Any) -> bool:
+    """True uniquement si le RAPPORT n'a pas pu être généré.
+
+    `presentator_result["status"] == "failed"` signifie d'abord que la
+    MISSION a échoué : l'orchestrateur stocke alors `user_response` et
+    `system_summary`. Un vrai crash du Presentator ne stocke que
+    `{"status": "failed", "error_reason": ...}`, sans réponse rédigée.
+    """
+    if not isinstance(result, dict):
+        return False
+    if result.get("status") != "failed":
+        return False
+    if result.get("generation_failed") is True:
+        return True
+    return not (
+        result.get("user_response")
+        or result.get("user_report")
+        or result.get("system_summary")
+    )
+
+
 class ExtractedLesson(BaseModel):
     scope: str = Field(..., description="Identité STABLE et étroite de la leçon.")
     keywords: List[str] = Field(default_factory=list, description="Mots-clés LARGES de découvrabilité.")
-    recommendation: str = Field(..., description="Règle impérative et courte (1-2 phrases).")
+    recommendation: str = Field(..., description="Conseil actionnable et court (1-2 phrases), formulé comme une piste ou une préférence, pas comme un ordre.")
     polarity: str = Field(..., description="avoid ou prefer")
 
 # =====================================================
@@ -96,9 +117,9 @@ class Analyzer:
         try:
             result = json.loads(raw)
         except Exception: return
-        if not result or result.get("status") != "failed": return
+        if not is_presentator_generation_failure(result): return
 
-        error_reason = result.get("error_reason") or "Raison inconnue"
+        error_reason = result.get("error_reason") or _("Raison inconnue")
         environment = episode.get("environment", "simulated")
         mission_id = episode.get("mission_id")
 
@@ -120,7 +141,7 @@ class Analyzer:
         except Exception as e:
             Logger.error(f"[Analyzer] Échec LLM pour la leçon Presentator : {e}")
             scope = "presentator_generation_fallback"
-            recommendation = "La génération du rapport final a échoué. Vérifier la robustesse face à un contexte incomplet."
+            recommendation = _("La génération du rapport final a échoué ; une piste est de renforcer la robustesse face à un contexte incomplet.")
             keywords = []
 
         emb_text = f"{scope} {recommendation} {' '.join(keywords)}"
@@ -139,7 +160,11 @@ class Analyzer:
         Batch Analysis : n'analyse que le dernier échec (culmination du struggle) et l'éventuel succès qui a suivi.
         Blame Shifting : Si l'Executor échoue (mauvaise exécution d'outil), c'est la faute du Planner qui a mal paramétré.
         """
-        failed_attempts = [a for a in tree.attempts if a.outcome == "failed" and a.failure_class != FailureClass.USER_CANCELLED]
+        failed_attempts = [
+            a for a in tree.attempts
+            if a.outcome in ("failed", "rejected")
+            and a.failure_class != FailureClass.USER_CANCELLED
+        ]
         success_attempts = [a for a in tree.attempts if a.outcome == "success"]
 
         if failed_attempts:
@@ -164,7 +189,7 @@ class Analyzer:
                                mission_id: Optional[str] = None, has_previous_failure: bool = False) -> None:
         if attempt.failure_class == FailureClass.USER_CANCELLED: return
 
-        if attempt.outcome == "failed":
+        if attempt.outcome in ("failed", "rejected"):
             await self._generate_avoid_lesson(attempt, goal, environment, mission_id)
             return
 
@@ -174,8 +199,7 @@ class Analyzer:
 
     async def _generate_avoid_lesson(self, attempt: PlanAttempt, goal: str, environment: str,
                                  mission_id: Optional[str] = None) -> None:
-        entity_type = attempt.target_entity
-        if not entity_type: return
+        entity_type = attempt.target_entity or "Planner"
         if entity_type == "Validator":
             entity_type = "Planner"
 
@@ -222,20 +246,6 @@ class Analyzer:
         )
         await self._invalidate_advisor_cache(scope)
 
-        if failure_class in (FailureClass.EXECUTION_FAILURE, FailureClass.CONVERGENCE_FAILURE):
-            for node in attempt.nodes:
-                if node.status == "failed" and node.tool_name and node.tool_name != "execute_skill":
-                    tool_scope = f"{node.tool_name}:{failure_class.value}"
-                    tool_recommendation = f"Échec de l'outil {node.tool_name}. {recommendation}"
-                    if not is_anti_skill_lesson(tool_recommendation, tool_scope):
-                        self.lesson_store.upsert_lesson(
-                            entity_type=entity_type, scope=tool_scope, recommendation=tool_recommendation,
-                            environment=environment, keywords=list(set(keywords + [node.tool_name])),
-                            mission_id=mission_id, polarity="avoid", embedding=embedding
-                        )
-                        await self._invalidate_advisor_cache(scope)
-                    break
-                
     async def _generate_prefer_lesson(self, attempt: PlanAttempt, goal: str, environment: str,
                                   mission_id: Optional[str] = None) -> None:
         entity_type = attempt.target_entity or "Planner"
@@ -263,7 +273,7 @@ class Analyzer:
         except Exception as e:
             Logger.error(f"[Analyzer] Échec LLM prefer : {e}")
             scope = "success_contrast_fallback"
-            recommendation = "Privilégier une approche alternative en cas d'échec répété."
+            recommendation = _("En cas d'échec répété, une approche alternative peut être envisagée.")
             keywords = ["alternative", "retry", "success"]
 
         if is_anti_skill_lesson(recommendation, scope):
@@ -297,13 +307,13 @@ class Analyzer:
 
     def _generate_recommendation_fallback(self, failure_class: FailureClass, failure_reason: str) -> str:
         if failure_class == FailureClass.PLAN_REJECTED_VALIDATION:
-            return "Vérifiez les variables utilisées, les conditions et la syntaxe du plan généré."
+            return "Piste : vérifier les variables utilisées, les conditions et la syntaxe du plan généré."
         elif failure_class == FailureClass.PLAN_REJECTED_SUPERVISOR:
-            return "Assurez-vous que le plan converge vers l'objectif global et respecte les contraintes."
+            return "Piste : vérifier que le plan converge vers l'objectif global et respecte les contraintes."
         elif failure_class == FailureClass.EXECUTION_FAILURE:
-            return "Un outil a échoué lors de l'exécution. Vérifiez les arguments passés."
+            return "Un outil a échoué lors de l'exécution. Piste : vérifier les arguments passés."
         elif failure_class == FailureClass.CONVERGENCE_FAILURE:
-            return "La convergence sémantique n'a pas été atteinte. Reformulez l'expected_result."
+            return "La convergence sémantique n'a pas été atteinte. Piste : reformuler l'expected_result."
         elif failure_class == FailureClass.USER_CANCELLED:
             return "La mission a été annulée par l'utilisateur."
         elif failure_class == FailureClass.MAX_RETRIES_REACHED:
@@ -372,7 +382,7 @@ class Advisor:
         blocks = []
         avoid_items = by_polarity.get("avoid", {})
         if avoid_items:
-            avoid_lines = ["### 🚫 À éviter (Issus d'échecs passés)"]
+            avoid_lines = ["### 🧭 Pistes issues d'échecs passés (à évaluer selon le contexte)"]
             for entity, lessons in avoid_items.items():
                 title = section_titles.get(entity, entity)
                 avoid_lines.append(f"#### {title}")
@@ -384,7 +394,7 @@ class Advisor:
 
         prefer_items = by_polarity.get("prefer", {})
         if prefer_items:
-            prefer_lines = ["### ✅ À privilégier (Approches qui ont marché & Préférences récentes)"]
+            prefer_lines = ["### 💡 Pistes issues de réussites et préférences récentes (à confirmer selon le contexte)"]
             for entity, lessons in prefer_items.items():
                 title = section_titles.get(entity, entity)
                 prefer_lines.append(f"#### {title}")

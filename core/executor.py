@@ -416,7 +416,7 @@ class Executor:
                         return SolverResult(
                             status=ExecutionStatus.FAILED,
                             final_context=final_context,
-                            error_reason=_("Divergence détectée à l'étape {} : {} Change l'approche de cette étape, pas seulement l'attente.").format(step.id, convergence.reason),
+                            error_reason=_("Divergence détectée à l'étape {} : {}. Piste à évaluer : faire évoluer l'approche de cette étape, ou ajuster l'attente si le délai est plausible. Vérifie aussi une cause en amont si l'indice est ambigu.").format(step.id, convergence.reason),
                             failure_class=FailureClass.CONVERGENCE_FAILURE,
                             target_entity="Executor",
                             failure_bundle=getattr(node, "failure_bundle", None),
@@ -582,13 +582,30 @@ class Executor:
     # =====================================================
 
     def _format_registry_view(self, registry_view: dict) -> str:
+        """Résumé borné du registre pour le contexte final.
+
+        Le détail complet (description + source + value_hint par variable)
+        dupliquait la section registre compacte des prompts (planner,
+        presentator, feasibility) et croissait à chaque tentative : sur le run
+        Paint du 28/10, ce bloc représentait 8,7 Ko des 12,5 Ko du contexte du
+        5e plan et 14,5 Ko des 26,9 Ko du prompt Presentator. On ne garde donc
+        qu'un résumé : nombre d'entrées, répartition par type, aperçu borné des
+        noms, et renvoi vers la section registre du prompt.
+        """
         if not registry_view:
             return _("(registre vide)")
-        lines = []
-        for key, meta in registry_view.items():
-            lines.append(f"- {key} : {meta.get('description', '')} (source: {meta.get('source', '')}, type: {meta.get('type', '')})")
-            lines.append(f"  hint: {meta.get('value_hint', '')}")
-        return "\n".join(lines)
+        counts: dict = {}
+        for meta in registry_view.values():
+            typ = str(meta.get("type") or "?") if isinstance(meta, dict) else "?"
+            counts[typ] = counts.get(typ, 0) + 1
+        types_txt = ", ".join(f"{typ}: {n}" for typ, n in sorted(counts.items()))
+        names = [str(key) for key in registry_view.keys()]
+        preview = ", ".join(names[:12])
+        if len(names) > 12:
+            preview += ", …"
+        return _(
+            "{total} entrées ({types}). Détail dans la section registre du prompt. Aperçu : {preview}"
+        ).format(total=len(names), types=types_txt, preview=preview)
 
     # =====================================================
     # INTERPOLATION (MÉTHODE CENTRALE AMÉLIORÉE)
@@ -793,10 +810,19 @@ class Executor:
                 continue
             _matched_key, entry = self._find_var_in_registry(match.group(2))
             if not isinstance(entry, dict):
+                Logger.warning(
+                    f"[Executor] Référence cible non liée '{value.strip()}' "
+                    f"pour l'argument '{key}' — la membrane egress va refuser."
+                )
                 continue
             raw_value = entry.get("value")
             if isinstance(raw_value, str) and raw_value:
                 result[key] = raw_value
+            else:
+                Logger.warning(
+                    f"[Executor] Référence cible '{value.strip()}' liée à une "
+                    f"valeur inexploitable pour l'argument '{key}'."
+                )
         return result
 
     def _substitute_meta_targets(self, args: Any) -> Any:
@@ -1091,6 +1117,11 @@ class Executor:
                 tool_args_raw = dict(tool_args_raw)
                 tool_args_raw["_output_target_name"] = step.output_target_name
 
+        # P5 : le routeur de scope doit voir les DataProviders de l'entité
+        # courante (solver/planner), pas ceux d'un autre niveau.
+        if step.tool_name == "investigate":
+            self.solver.runtime_state._scope_router_entity = self.solver
+
         # Validation déterministe pré-exécution des arguments d'outil
         is_valid_args, validation_err = self._validate_tool_args(step.tool_name, tool_args_raw)
         if not is_valid_args:
@@ -1101,6 +1132,8 @@ class Executor:
 
         if step.tool_name == "tool_manager":
             self.solver.runtime_state._solver_registry_for_tools = None
+        if step.tool_name == "investigate":
+            self.solver.runtime_state._scope_router_entity = None
 
         if hardware_result_str:
             hardware_result_str = hardware_result_str.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
@@ -1110,7 +1143,42 @@ class Executor:
             is_success_flag = str(parsed_result.get("result", "")).strip().lower()
             actual_data = parsed_result.get("data", None)
             tool_error_reason = parsed_result.get("error_reason", None)
-            
+
+            # Les refus pre-dispatch de l'orchestrateur exposent
+            # `error: {code, message}` / `message`, mais pas `error_reason`
+            # (core/orchestrator.py:2579-2594). Sans ce repli, le planner ne
+            # voit qu'un echec generique et replanifie a l'identique.
+            if not tool_error_reason and str(is_success_flag).strip().lower() == "false":
+                _err = parsed_result.get("error")
+                if isinstance(_err, dict):
+                    _code = _err.get("code")
+                    _msg = _err.get("message")
+                elif isinstance(_err, str):
+                    _code, _msg = None, _err
+                else:
+                    _code, _msg = None, None
+                if not isinstance(_msg, str) or not _msg.strip():
+                    _raw_message = parsed_result.get("message")
+                    _msg = _raw_message if isinstance(_raw_message, str) else None
+                if _code and _msg:
+                    tool_error_reason = f"{_code}: {_msg}"
+                elif _msg:
+                    tool_error_reason = _msg
+
+            if tool_error_reason is not None and not isinstance(tool_error_reason, str):
+                tool_error_reason = str(tool_error_reason)
+            if (
+                tool_error_reason
+                and parsed_result.get("dispatched") is False
+                and not tool_error_reason.startswith("[pre-dispatch]")
+            ):
+                tool_error_reason = f"[pre-dispatch] {tool_error_reason}"
+            if tool_error_reason and str(is_success_flag).strip().lower() == "false":
+                Logger.warning(
+                    f"[Executor] Outil '{step.tool_name}' en echec a l'etape "
+                    f"[{step.id}] : {tool_error_reason}"
+                )
+
             error_reason_msg = None
             if tool_error_reason:
                 if len(tool_error_reason) >= 800:
@@ -1192,6 +1260,8 @@ class Executor:
 
             # --- 1c. Membrane ingress cibles : refs -> noms locaux, updates.
             # Sans contrat `target_contract` : rien n'est appele (inertie).
+            _target_contract = None
+            _target_registry = None
             try:
                 _target_contract = (
                     _tools_mgr.get_target_contract(step.tool_name)
@@ -1200,7 +1270,10 @@ class Executor:
                 )
                 _target_registry = getattr(self.solver.runtime_state, "target_registry", None)
                 if _target_contract is not None and _target_registry is not None:
-                    from core.target_ingress import apply_target_updates, project_target_payload
+                    from core.target_ingress import (
+                        apply_target_updates,
+                        project_target_payload,
+                    )
                     parsed_result, _target_count = project_target_payload(
                         _target_registry, _target_contract, parsed_result, register=True
                     )
@@ -1210,6 +1283,53 @@ class Executor:
                     actual_data = parsed_result.get("data", None)
             except Exception as e:
                 Logger.warning(f"[Executor] Projection des cibles impossible ({e}) - donnees brutes conservees.")
+
+            # Producteur direct (ex: `target`) : publie l'alias de plan dans
+            # le registre de variables, comme le font deja les meta-outils
+            # `perceive_*`. Sans cette liaison, `$@_alias` reste brut et la
+            # membrane egress le refuse. Un echec est fatal pour l'etape :
+            # continuer laisserait un alias fantome que `mouse` ne peut pas
+            # resoudre.
+            _alias = getattr(step, "output_target_name", None)
+            _is_meta = step.tool_name in ("perceive_understand", "perceive_action")
+            if (
+                _alias
+                and not _is_meta
+                and str(is_success_flag).strip().lower() == "true"
+            ):
+                _alias = str(_alias).strip()
+                if _target_contract is None or _target_registry is None:
+                    return False, "", _(
+                        "Cible non liée : contrat ou registre de cibles "
+                        "indisponible pour '{}'."
+                    ).format(_alias)
+                try:
+                    from core.target_ingress import (
+                        bind_target_alias,
+                        collect_projected_targets,
+                    )
+                    _projected_entries = collect_projected_targets(
+                        _target_registry, _target_contract, parsed_result
+                    )
+                    if len(_projected_entries) != 1:
+                        return False, "", _(
+                            "Cible non liée : le producteur '{}' devait retourner "
+                            "exactement une cible exploitable pour '{}' (reçu: {})."
+                        ).format(
+                            step.tool_name, _alias, len(_projected_entries)
+                        )
+                    _bind_err = bind_target_alias(
+                        _target_registry,
+                        self.solver.variable_registry,
+                        _alias,
+                        _projected_entries[0],
+                    )
+                except Exception as e:
+                    return False, "", _(
+                        "Cible non liée : liaison de '{}' impossible ({})."
+                    ).format(_alias, e)
+                if _bind_err:
+                    return False, "", _bind_err
 
             # --- 2. Description de données : dire ce qu'EST la donnée (pas d'où elle vient).
             if actual_data is not None:
@@ -1350,17 +1470,9 @@ class Executor:
                         + _("Arbitre : {}").format(_arbi_text[:300])
                     ).strip()
 
-            if is_success_flag == "true":
-                if actual_data is not None:
-                    safe_data = redact_binary_payloads(actual_data)
-                    if isinstance(safe_data, (dict, list)):
-                        formatted_output = json.dumps(safe_data, ensure_ascii=False, indent=2)
-                    else:
-                        formatted_output = str(safe_data)
-                else:
-                    formatted_output = "true"
-            else:
-                formatted_output = _("Erreur : {}").format(tool_error_reason or error_reason_msg or _("Échec de l'outil ({})").format(is_success_flag))
+            formatted_output = self._format_tool_output(
+                is_success_flag, actual_data, tool_error_reason or error_reason_msg
+            )
 
             return True, formatted_output, error_reason_msg
 
@@ -1439,20 +1551,17 @@ class Executor:
             Logger.warning(f"[Executor] Crédit skill sous-tâche impossible : {e}")
 
     async def _check_convergence_inner(self, step: PlanStep, actual_result: str, supplemental_data: Optional[str] = None, node: Optional[ExecutionNode] = None, action_success: Optional[bool] = None) -> ConvergenceDecision:
-        # A4b : le bypass « expected_result vide » est SCOPÉ aux étapes NON
-        # abstract_task (tool_call/direct_answer). Une abstract_task passe
-        # TOUJOURS par une vraie ConvergenceDecision, expected_result vide ou pas.
-        if step.type != StepType.ABSTRACT_TASK and not step.expected_result:
-            Logger.info(f"[Executor] Aucun critère défini pour [{step.id}]. Convergence implicite acceptée.")
-            return ConvergenceDecision(is_convergent=True, reason=_("Aucun critère d'output spécifié."))
-
+        # `expected_result` absent/null vaut "true" pour un tool_call (rigide).
+        # Aucun bypass « vide = accepté » : un outil qui échoue sans critère
+        # explicite reste un échec. L'abstract_task garde son critère sémantique.
         if step.type == StepType.DIRECT_ANSWER:
-            return ConvergenceDecision(is_convergent=True, reason="Les réponses directes sont toujours acceptées.")
+            return ConvergenceDecision(is_convergent=True, reason=_("Les réponses directes sont toujours acceptées."))
 
         if step.type == StepType.TOOL_CALL:
             Logger.info(f"[Executor] [Analyse Rigide] Évaluation déterministe pour l'outil '{step.tool_name}'...")
             raw_flag = getattr(node, "raw_success_flag", None) if node else None
-            is_valid, rigid_reason = self._verify_rigid_outcome(step.expected_result, actual_result, supplemental_data, raw_success_flag=raw_flag)
+            expected = (step.expected_result or "true")
+            is_valid, rigid_reason = self._verify_rigid_outcome(expected, actual_result, supplemental_data, raw_success_flag=raw_flag)
             return ConvergenceDecision(is_convergent=is_valid, reason=rigid_reason)
 
         # Tâche abstraite dont l'action a échoué : refus déterministe, pas
@@ -1507,22 +1616,42 @@ class Executor:
         ]
         return any(m in low for m in markers)
 
+    @staticmethod
+    def _format_tool_output(is_success_flag: str, actual_data: Any, error_reason: Optional[str]) -> str:
+        """Sortie textuelle d'un outil, y compris en échec.
+
+        Un résultat négatif qui porte une DONNÉE (ex : perception « non. On
+        voit… ») garde cette donnée : c'est elle que le plan peut brancher et
+        que la trace doit montrer. « Erreur : … » est réservé aux échecs sans
+        donnée (vrai échec d'infrastructure).
+        """
+        if actual_data is not None and str(actual_data).strip():
+            safe_data = redact_binary_payloads(actual_data)
+            if isinstance(safe_data, (dict, list)):
+                return json.dumps(safe_data, ensure_ascii=False, indent=2)
+            return str(safe_data)
+        if is_success_flag == "true":
+            return "true"
+        return _("Erreur : {}").format(
+            error_reason or _("Échec de l'outil ({})").format(is_success_flag)
+        )
+
     def _verify_rigid_outcome(self, expected: str, actual: str, supplemental_data: Optional[str] = None, raw_success_flag: Optional[str] = None) -> Tuple[bool, str]:
-        expected_clean = expected.strip().lower()
+        expected_clean = (expected or "").strip().lower()
 
         if expected_clean == "any":
-            # "any" accepte toute VALEUR, jamais un ÉCHEC.
-            # Un outil qui rend result=False reste un échec même si le plan dit "any".
-            if raw_success_flag:
-                flag_clean = raw_success_flag.strip().lower()
-                if flag_clean == "false":
-                    reason = _("Rejet matériel : L'outil a échoué, même si le plan acceptait toute valeur ('any').")
-                    if supplemental_data:
-                        reason += f" Raison de l'outil : {supplemental_data}"
-                    return False, reason
+            # "any" = le plan ne juge pas la VALEUR, il branche dessus.
+            # Un result=false est une valeur négative légitime (ex : perception
+            # qui répond « non »), pas un échec de plan. Les vrais échecs
+            # d'infrastructure (args invalides, JSON, exception) avortent AVANT
+            # la convergence et ne passent donc jamais par ici.
+            if raw_success_flag is not None and str(raw_success_flag).strip():
+                return True, _("Convergence acceptée : 'any' accepte la valeur retournée (statut outil : {}).").format(
+                    str(raw_success_flag).strip().lower()
+                )
             actual_clean = (actual or "").strip().lower()
             if actual_clean.startswith("erreur") or actual_clean.startswith("error"):
-                return False, _("Rejet matériel : L'outil a renvoyé une erreur, même si le plan acceptait toute valeur ('any').")
+                return False, _("Rejet matériel : L'outil a renvoyé une erreur non structurée, même si le plan acceptait toute valeur ('any').")
             return True, _("Convergence acceptée : Le plan accepte toute valeur de retour pour traitement conditionnel ultérieur.")
 
         if expected_clean not in ["true", "false"]:
@@ -1660,37 +1789,21 @@ class Executor:
     # =====================================================
 
     def _safe_json_loads(self, json_str: str) -> dict:
+        """Parse des args d'étape, désormais délégué au parseur tolérant
+        partagé (P-B, GO 03/11 : fences, traîne bénigne, échappements
+        invalides — ex-portage local conservé via `parse_tool_args_json`)."""
         try:
-            return json.loads(json_str)
-        except json.JSONDecodeError as e:
-            if "Invalid \\escape" not in str(e):
-                raise
-
-            result = []
-            i = 0
-            while i < len(json_str):
-                if json_str[i] == '\\' and i + 1 < len(json_str):
-                    nxt = json_str[i + 1]
-                    if nxt in ('"', '\\', '/', 'b', 'f', 'n', 'r', 't'):
-                        result.append(json_str[i])
-                        result.append(nxt)
-                        i += 2
-                        continue
-                    elif nxt == 'u':
-                        result.append(json_str[i])
-                        result.append(nxt)
-                        i += 2
-                        continue
-                    else:
-                        result.append('\\\\')
-                        result.append(nxt)
-                        i += 2
-                        continue
-                result.append(json_str[i])
-                i += 1
-
-            fixed_str = ''.join(result)
-            return json.loads(fixed_str)
+            from core.plan_models import parse_tool_args_json
+            parsed = parse_tool_args_json(json_str)
+        except Exception:
+            parsed = None
+        if parsed is None:
+            raise json.JSONDecodeError(
+                _("Arguments d'étape illisibles même après parseur tolérant"),
+                json_str if isinstance(json_str, str) else str(json_str),
+                0,
+            )
+        return parsed
 
     def _normalize_condition(self, expr: str) -> str:
         import re

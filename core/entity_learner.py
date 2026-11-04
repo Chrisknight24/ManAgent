@@ -8,7 +8,6 @@ from typing import Optional, List, Dict, Any
 from utils.logger import Logger
 from memory.lesson_store import LessonStore
 from core.constants import ENTITY_LEARNER_MIN_EVIDENCE
-from core.embedding_service import embed_managed
 
 class EntityLearner:
     def __init__(self, lesson_store: LessonStore, cache_manager=None, runtime_state=None):
@@ -45,8 +44,12 @@ class EntityLearner:
         Consolide un groupe spécifique.
         """
         brutes = self.lesson_store.get_brute_lessons_by_group(entity_type, scope, environment)
-        if len(brutes) < ENTITY_LEARNER_MIN_EVIDENCE:
-            Logger.debug(f"[EntityLearner] Groupe {scope}: moins de {ENTITY_LEARNER_MIN_EVIDENCE} brutes, skip.")
+        total_evidence = sum(int(b.get("evidence_count", 1) or 1) for b in brutes)
+        if total_evidence < ENTITY_LEARNER_MIN_EVIDENCE:
+            Logger.debug(
+                f"[EntityLearner] Groupe {scope}: preuves cumulées "
+                f"{total_evidence} < {ENTITY_LEARNER_MIN_EVIDENCE}, skip."
+            )
             return
 
         # Séparer par polarité
@@ -94,10 +97,11 @@ class EntityLearner:
             all_keywords.update(b.get("keywords", []))
             all_sources.update(b.get("source_episodes", []))
 
-        total_evidence = sum(b.get("evidence_count", 0) for b in brutes)
         total_contradiction = sum(b.get("contradiction_count", 0) for b in brutes)
 
-        # Générer le vecteur de la leçon consolidée (modèle actif de l'hôte)
+        # Générer le vecteur de la leçon consolidée (modèle actif de l'hôte).
+        # Import paresseux : importer EntityLearner ne doit pas charger torch.
+        from core.embedding_service import embed_managed
         emb_text = f"{scope} {winner['recommendation']} {' '.join(list(all_keywords))}"
         embedding = await embed_managed(
             self.runtime_state, emb_text,

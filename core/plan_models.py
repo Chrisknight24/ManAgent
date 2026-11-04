@@ -12,6 +12,7 @@ import json
 from enum import Enum
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
+from pydantic.json_schema import SkipJsonSchema
 try:
     from pydantic import model_validator
 except ImportError:
@@ -39,6 +40,129 @@ from core.execution_models import ExecutionTree, FailureClass
 from core.base_schema import BaseDiscoverySchema
 from utils.logger import Logger  # <-- NOUVEAU pour les warnings
 from core.discovery.models import DiscoveryRequest
+
+
+# =====================================================
+# PARSING TOLÉRANT DES ARGS D'OUTILS (P-B, décision GO 03/11)
+# =====================================================
+def parse_tool_args_json(raw: Any) -> Optional[Dict[str, Any]]:
+    """Parse tolérant (P-B) d'un `tool_args_json` en dict, sans jamais lever.
+
+    Cause 1 confirmée (runs 31/10) : le modèle écrit un JSON *dans une chaîne*
+    et se rate (fences de code, commentaire qui traîne après l'objet,
+    virgule finale, guillemets typographiques). `json.loads` strict rejette
+    tout → « args illisibles » → plan refusé → tentative brûlée.
+
+    Échelle déterministe, la plus conservatrice d'abord :
+      1. dict déjà parsé → tel quel ; str vide/"{}" → {} ;
+      2. `json.loads` strict (chemin rapide) ;
+      3. fences de code retirées (` ```json … ``` `) puis re-tentative ;
+      4. `json.JSONDecoder.raw_decode` depuis la première accolade : accepte
+         un commentaire qui traîne APRÈS l'objet, uniquement s'il ne contient
+         plus aucune accolade (aucune structure perdue) ;
+      5. virgules traînantes retirées, guillemets typographiques normalisés ;
+      6. réparation des séquences d'échappement invalides (portage de la
+         boucle historique de `executor._safe_json_loads`).
+
+    Retour : dict en cas de succès, sinon None (le signal « illisible »,
+    interprété par la validation/expédition). Aucune exception ne fuit.
+    """
+    if isinstance(raw, dict):
+        return dict(raw)
+    if raw is None:
+        return {}
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text or text == "{}":
+        return {}
+
+    # 2. Chemin strict (le cas sain majoritaire : zéro comportement changé).
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        pass
+
+    # 3. Fences de code (```json / ```).
+    fenced = text
+    if fenced.startswith("```"):
+        first_nl = fenced.find("\n")
+        fenced = fenced[first_nl + 1:] if first_nl != -1 else ""
+        if fenced.rstrip().endswith("```"):
+            fenced = fenced.rstrip()[:-3].rstrip()
+        if fenced:
+            try:
+                parsed = json.loads(fenced)
+                return parsed if isinstance(parsed, dict) else None
+            except Exception:
+                pass
+
+    # 4. Objet embarqué + commentaire traîne (sans accolade pendante).
+    # NB : brace_ix >= 0 aussi pour index 0 — le chemin strict a déjà
+    # échoué, donc un début par '{' peut cacher un commentaire traîne.
+    # INERTIE OBLIGATOIRE : la traîne ne doit contenir ni '{', ni '}', ni
+    # ':' ni '=' — `…} waiting_ms:1000` n'est pas un commentaire, c'est un
+    # champ qui a raté son endroit ; l'avaler ferait perdre un paramètre
+    # en silence (test régression test_malformed_args_report_the_offending_text).
+    brace_ix = text.find("{")
+    if brace_ix >= 0:
+        try:
+            parsed, end = json.JSONDecoder().raw_decode(text, brace_ix)
+            if isinstance(parsed, dict):
+                tail = text[end + 1:].strip()
+                if (tail and "{" not in tail and "}" not in tail
+                        and ":" not in tail and "=" not in tail):
+                    return parsed
+        except Exception:
+            pass
+
+    # 5. Assouplissements bénins : virgule traînante, guillemets typographiques.
+    relaxed = text
+    import re as _re
+    relaxed = _re.sub(r",\s*([}\]])", r"\1", relaxed)
+    for _bad, _good in (("\u201c", "\""), ("\u201d", "\""),
+                        ("\u00ab", "\""), ("\u00bb", "\"")):
+        relaxed = relaxed.replace(_bad, _good)
+    if relaxed != text:
+        try:
+            parsed = json.loads(relaxed)
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            pass
+
+    # 6. Séquences d'échappement invalides (ex : "\l", "\a").
+    try:
+        parsed = json.loads(_repair_invalid_escapes(text))
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+
+def _repair_invalid_escapes(json_str: str) -> str:
+    """Double les backslashes devant les échappements non JSON (portage
+    de la boucle historique de `Executor._safe_json_loads`).
+    """
+    result = []
+    i = 0
+    n = len(json_str)
+    while i < n:
+        ch = json_str[i]
+        if ch == '\\' and i + 1 < n:
+            nxt = json_str[i + 1]
+            if nxt in ('"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u'):
+                result.append(ch)
+                result.append(nxt)
+                i += 2
+                continue
+            result.append('\\\\')
+            i += 1
+            continue
+        result.append(ch)
+        i += 1
+    return "".join(result)
+
+
 # =====================================================
 # ÉNUMÉRATIONS
 # =====================================================
@@ -85,20 +209,33 @@ class PlanStep(BaseModel):
     id: str = Field(..., description=_("Identifiant unique de l'étape (ex: step_1)"))
     description: str = Field(..., description=_("Ce que cette étape est censée accomplir"))
     type: StepType = Field(..., description=_("Le type d'action à mener pour cette étape"))
-    
+
+    # P-C (GO 03/11) : `tool_name` + `tool_args_json` déclarés JUSTE APRÈS
+    # `type` — Cause 1 confirmée (runs 31/10) : en fin de schéma, le champ
+    # args était ignoré par le planner. L'ordre de déclaration Pydantic est
+    # l'ordre du schéma envoyé aux providers (identique pour tous).
+    tool_name: Optional[str] = Field(
+        None,
+        description=_("Nom EXACT de l'outil exécuté par ce step (celui de la liste des outils). Obligatoire non vide si type == 'tool_call'.")
+    )
+    tool_args_json: str = Field(
+        default="{}",
+        description=_("Arguments de l'outil, en JSON d'objet valide : {\"button\": \"left\"}. Une chaîne JSON, SANS commentaire ni texte avant/après. Pour les données du registre, référencer $@_nom. Pour perceive_understand : {\"question\": \"...\", \"source_tool\": \"...\"} ou {\"question\": \"...\", \"source_data\": \"...\"}.")
+    )
+
     step_context: str = Field(
         default="", 
         description=_("Le contexte local, données ou prérequis spécifiques nécessaires à l'exécution.")
     )
     
-    expected_result: str = Field(
-        ..., 
-        description=_("CRITIQUE : Si type == 'tool_call', doit valoir 'true', 'false' ou 'any' ('any' pour capturer le statut binaire sans faire crasher le plan en cas d'échec légitime). Si type == 'abstract_task', décrit sémantiquement l'état attendu.")
+    expected_result: Optional[str] = Field(
+        None,
+        description=_("Si type == 'tool_call' : 'true', 'false' ou 'any'. Omis/null = 'true' (rigide). 'any' = la valeur n'est pas jugée, le plan branche dessus (un résultat négatif est accepté). Si type == 'abstract_task', décrit sémantiquement l'état attendu.")
     )
 
     output_variable_name: Optional[str] = Field(
         None, 
-        description=_("Nom de la variable (ex: 'notepad_ouvert',) pour stocker le résultat (True/False ou Data) de CETTE étape dans le registre, quel que soit son type.")
+        description=_("Nom d'une VALEUR produite (booléen, texte, structure) à stocker dans le registre. Pour une CIBLE (fenêtre, élément, forme), utiliser 'output_target_name', pas ce champ.")
     )
     output_variable_desc: Optional[str] = Field(
         None,
@@ -107,7 +244,7 @@ class PlanStep(BaseModel):
 
     output_target_name: Optional[str] = Field(
         None,
-        description=_("Nom local de cible produit par cette etape (optionnel, sans prefixe data_/bool_).")
+        description=_("Nom local d'une CIBLE produite par cette étape (outil à contrat 'produces', sans préfixe data_/bool_). Les étapes suivantes la consomment comme argument 'target' via '$@_<nom>'. Ne pas confondre avec output_variable_name.")
     )
 
     execute_if: Optional[str] = Field(
@@ -173,7 +310,7 @@ class PlanStep(BaseModel):
             if str(self.tool_name).strip() == "perceive_understand":
                 raw_args = self.tool_args_json
                 try:
-                    parsed = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+                    parsed = parse_tool_args_json(raw_args)
                 except Exception:
                     parsed = None
                 if isinstance(parsed, dict):
@@ -222,17 +359,25 @@ class PlanStep(BaseModel):
             self.execute_if = re.sub(r'@\$_data_(?:data_)+', '@$_data_', self.execute_if)
         return self
 
-    response_text: Optional[str] = Field(None)
-    tool_name: Optional[str] = Field(None)
-    tool_args_json: str = Field(default="{}")
-    
-    status: ExecutionStatus = ExecutionStatus.PENDING
-    result_context: str = ""
+    response_text: Optional[str] = Field(
+        None,
+        description=_("Si type == 'direct_answer' : la réponse intégrale destinée à l'utilisateur, en langage naturel. Sinon None.")
+    )
+
+    # P-C (GO 03/11) : `tool_name` / `tool_args_json` n'apparaissent plus
+    # ici — leurs déclarations uniques vivent juste après `type` (en tête
+    # de classe), pour figurer TÔT dans le schéma envoyé aux providers.
+
+    # Champs purement internes (écrits par l'exécuteur, jamais par le modèle) :
+    # exclus du schéma JSON exposé au LLM pour ne pas payer ni suggérer un
+    # statut inventé. `model_dump()` et l'exécution restent inchangés.
+    status: SkipJsonSchema[ExecutionStatus] = ExecutionStatus.PENDING
+    result_context: SkipJsonSchema[str] = ""
 
     @property
     def get_parsed_args(self) -> dict:
         try:
-            return json.loads(self.tool_args_json)
+            return parse_tool_args_json(self.tool_args_json) or {}
         except Exception:
             return {}
     
@@ -593,6 +738,82 @@ def is_sterile_streak(history) -> bool:
         return True
 
 
+def is_nonretryable_contract_failure(reason: Any) -> bool:
+    """Erreur de contrat pré-dispatch que replanifier ne peut pas réparer.
+
+    Seul le cas d'une référence de cible non liée est visé : l'alias a bien
+    été déclaré (les gates structurelles l'ont accepté), mais le runtime ne
+    l'a pas publié. Rejouer le même plan ne peut pas réparer cette liaison.
+    """
+    text = str(reason or "").lower()
+    return "[pre-dispatch]" in text and "unresolved target reference" in text
+
+
+# Refus d'argument rendus par l'hôte APRÈS dispatch : le contrat d'appel est
+# en cause, pas la stratégie. Un seul essai de correction, puis abandon.
+HOST_TARGET_CONTRACT_CODES = ("TARGET_REQUIRED", "TARGET_SCHEMA_INVALID")
+HOST_REFUSAL_MAX_CORRECTIONS = 1
+
+
+def is_host_target_contract_refusal(reason: Any) -> bool:
+    """L'hôte a refusé l'argument cible (contrat), pas le monde.
+
+    Distinct de `TARGET_NOT_FOUND` (cible périmée : recréer peut réparer) :
+    ici l'argument envoyé viole le schéma déclaré par l'hôte, donc relancer
+    la même stratégie ne change rien. Fonction pure.
+    """
+    text = str(reason or "")
+    return any(code in text for code in HOST_TARGET_CONTRACT_CODES)
+
+
+def host_refusal_budget_exhausted(refusal_count: int) -> bool:
+    """Vrai quand le quota de corrections après refus hôte est épuisé.
+
+    `HOST_REFUSAL_MAX_CORRECTIONS = 1` : le premier refus autorise un nouvel
+    essai (le modèle peut corriger l'argument), le deuxième abandonne.
+    """
+    try:
+        return int(refusal_count) > HOST_REFUSAL_MAX_CORRECTIONS
+    except (TypeError, ValueError):
+        return False
+
+
+def build_plan_validation_payload(outcome: Any, solver_id: str, plan_id: Any) -> Dict[str, Any]:
+    """Payload de l'event `plan_validation_decision` (pur, testé vite).
+
+    Expose `is_partial` / `partial_gaps` : un plan accepté avec lacunes ne
+    doit pas être indiscernable d'un plan complet côté front/observabilité.
+    """
+    risk = getattr(outcome, "risk_level", None)
+    _raw_gaps = getattr(outcome, "partial_gaps", None) or []
+    if isinstance(_raw_gaps, str):
+        _raw_gaps = [_raw_gaps]
+    _gaps = []
+    try:
+        for _g in list(_raw_gaps)[:8]:
+            _text = str(_g).strip()
+            if _text:
+                _gaps.append(_text)
+    except Exception:
+        _gaps = []
+    return {
+        "solver_id": solver_id,
+        "plan_id": plan_id,
+        "is_valid": bool(getattr(outcome, "is_valid", False)),
+        "reason": getattr(outcome, "reason", ""),
+        "risk_level": getattr(risk, "value", risk),
+        "requires_human_confirmation": bool(
+            getattr(outcome, "requires_human_confirmation", False)
+        ),
+        "human_confirmed": bool(getattr(outcome, "human_confirmed", False)),
+        "irreversibility_flags": list(
+            getattr(outcome, "irreversibility_flags", None) or []
+        ),
+        "is_partial": bool(getattr(outcome, "is_partial", False)),
+        "partial_gaps": _gaps,
+    }
+
+
 class ConvergenceDecision(BaseDiscoverySchema):
     is_convergent: bool = Field(
         ..., 
@@ -642,6 +863,22 @@ class PlanValidationDecision(BaseDiscoverySchema):
             "Liste des identifiants d'étapes jugées irréversibles ou critiques par "
             "l'Orchestrateur — peut différer de ce que le Planner a déclaré via "
             "is_irreversible sur chaque PlanStep (l'Orchestrateur peut contester)."
+        )
+    )
+    is_partial: bool = Field(
+        default=False,
+        description=_(
+            "True si le plan est sûr mais n'atteint qu'une partie de l'objectif. "
+            "Les parties manquantes sont listées dans partial_gaps ; elles seront "
+            "vérifiées par la convergence finale. Une lacune critique ou irréversible "
+            "rend le plan non conforme."
+        )
+    )
+    partial_gaps: List[str] = Field(
+        default_factory=list,
+        description=_(
+            "Parties de l'objectif non couvertes par un plan partiel sûr. "
+            "Chaque entrée doit être assez précise pour être vérifiée après exécution."
         )
     )
 

@@ -43,6 +43,8 @@ Si un skill couvre l'objectif, la stratégie le priorise (`execute_skill`).
 {% if targets_enabled %}
 ## CIBLES
 - Les cibles sont des noms locaux (`$@_<nom>`), jamais des références brutes.
+- Toute action qui consomme une cible doit recevoir un nom local produit AVANT elle : prévois la perception/producteur de cible, puis l'action.
+- N'utilise pas un champ legacy (`cell`, `uia`, coordonnées) à la place d'un paramètre cible requis.
 - Une stratégie peut réutiliser une cible déjà nommée dans un argument consommateur.
 {% if target_selection_enabled %}
 - Plusieurs candidates : prévoir le méta-outil de sélection, qui choisit une clé locale.

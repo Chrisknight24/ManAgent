@@ -236,6 +236,29 @@ def test_s4_litteral_consommateur_refuse_sauf_raw_allow():
     assert find_target_plan_problems(raw, tm) == []
 
 
+def test_s4_consommateur_cible_requis_refuse_absence_et_champ_legacy():
+    tm = _manager()
+    legacy = _plan(_step("s1", "click", {"note": "x"}))
+    hits = find_target_plan_problems(legacy, tm)
+    assert any(
+        "target exige un nom local de cible" in hit
+        and "produit avant" in hit
+        for hit in hits
+    )
+
+    missing_raw = _plan(_step("s1", "click_raw", {}))
+    assert any(
+        "target exige un nom local de cible" in hit
+        for hit in find_target_plan_problems(missing_raw, tm)
+    )
+
+    empty = _plan(_step("s1", "click", {"target": "  "}))
+    assert any(
+        "target exige un nom local de cible" in hit
+        for hit in find_target_plan_problems(empty, tm)
+    )
+
+
 def test_s4_t31_prompts_cibles_autorises_et_sans_fuite():
     tm = _manager()
     flags = target_prompt_flags(types.SimpleNamespace(tools_manager=tm), [])
@@ -258,20 +281,33 @@ def test_s4_t31_prompts_cibles_autorises_et_sans_fuite():
         assert "ref-" not in planner
         assert "correlation_id" not in planner
         assert "generation" not in planner
+        planner_l = planner.lower()
+        if lang == "en":
+            assert "produced before" in planner_l
+            assert "legacy field" in planner_l
+        else:
+            assert "produit avant" in planner_l
+            assert "champ legacy" in planner_l
 
         feasibility = loader.load("feasibility.md", lang=lang, **context)
         assert "(target)" in feasibility
         assert "ref-" not in feasibility
+        feasibility_l = feasibility.lower()
+        assert "produced before" in feasibility_l or "produit avant" in feasibility_l
 
         grammar = loader.load(
             "plan_grammar.md", lang=lang, targets_enabled=True
         )
         assert "output_target_name" in grammar
         assert "$@_<" in grammar
+        grammar_l = grammar.lower()
+        assert "produced before" in grammar_l or "produit avant" in grammar_l
 
         off = loader.load("plan_grammar.md", lang=lang, targets_enabled=False)
         assert "output_target_name" not in off
         assert "(target)" not in off
+        assert "produit avant" not in off.lower()
+        assert "produced before" not in off.lower()
 
 
 def test_s4_descriptions_des_consommateurs_seulement():

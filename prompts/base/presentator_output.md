@@ -25,6 +25,18 @@ lieu de trancher en silence.
 - **Réponses accumulées** (le cas échéant) :
 {{ accumulated_response }}
 - **Statut final** : {{ mission_status }} (success ou failed)
+{% if plan_gaps %}
+- **Plan partiel** : oui — le plan a été accepté avec des lacunes connues.
+- **Lacunes connues (non prouvées)** :
+{{ plan_gaps }}
+- **Motif de convergence** : {{ convergence_reason }}
+
+### LACUNES CONNUES — RÈGLE IMPÉRATIVE
+Les lacunes listées ci-dessus n'ont **pas** été prouvées par la mission. Tu ne dois donc PAS écrire « mission accomplie », « avec succès » ni aucun bilan de réussite complet. Tu dois :
+1. dire ce qui a été réellement fait et vérifié ;
+2. reprendre les lacunes restantes telles quelles (sans les minimiser ni les inventer) ;
+3. qualifier explicitement le résultat de **partiel**.
+{% endif %}
 - **Contexte d'exécution** (traces utiles) :
 {{ final_context }}
 - **Registre des variables résolues** (usage interne) :

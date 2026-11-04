@@ -17,7 +17,11 @@ from typing import (
 )
 from pydantic import BaseModel
 from providers.provider_manager import ProviderManager, ModelRequirement
-from providers.base_provider import ProviderQuotaExhaustedError, ProviderError
+from providers.base_provider import (
+    ProviderQuotaExhaustedError,
+    ProviderError,
+    ProviderNetworkError,
+)
 from utils.logger import Logger
 from core.prompt_loader import get_prompt_loader
 from core.i18n import _
@@ -27,6 +31,40 @@ if TYPE_CHECKING:
     from core.entity import Entity
     from core.discovery.data_provider import DataProvider
     from core.discovery.models import DiscoveryRequest, RefinedContext
+
+
+_NETWORK_ERROR_MARKERS = (
+    "getaddrinfo failed",
+    "name or service not known",
+    "nodename nor servname",
+    "temporary failure in name resolution",
+    "network is unreachable",
+    "connection refused",
+    "connection reset",
+    "connection aborted",
+    "server disconnected",
+    "clientconnectorerror",
+    "connecterror",
+    "connect timeout",
+    "ssl",
+    "certificate",
+)
+
+
+def _is_network_error(exc: BaseException) -> bool:
+    """Classe une erreur réseau/DNS/TLS, y compris dans la chaîne de causes."""
+    seen = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        name = type(current).__name__.lower()
+        text = str(current).lower()
+        if name in ("clientconnectorerror", "connecterror", "connecttimeout"):
+            return True
+        if any(marker in text for marker in _NETWORK_ERROR_MARKERS):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 class Llm:
@@ -139,6 +177,48 @@ class Llm:
             return True
         return False
 
+    def _cancellation_requested(self, call_epoch: int) -> bool:
+        state = self.runtime_state
+        if state is None:
+            return False
+        if (
+            getattr(state, "cancel_requested", False)
+            or getattr(state, "cancel_requested_for_turn", False)
+        ):
+            return True
+        return getattr(state, "generation_epoch", call_epoch) != call_epoch
+
+    async def _await_cancellable(self, operation, call_epoch: int):
+        """Attend un appel provider en annulant réellement la requête en vol.
+
+        Les checks historiques ne s'exécutaient qu'APRÈS la réponse : un stop
+        pendant un appel LLM laissait la requête tourner jusqu'au bout. Ici le
+        flag cancel/epoch est surveillé toutes les 100 ms et la tâche HTTP est
+        annulée dès qu'il change.
+        """
+        task = asyncio.ensure_future(operation)
+        try:
+            while not task.done():
+                if self._cancellation_requested(call_epoch):
+                    task.cancel()
+                    try:
+                        await task
+                    except BaseException:
+                        pass
+                    Logger.warning(
+                        "[LLM] Appel interrompu en vol (cancel/epoch) — requête provider annulée."
+                    )
+                    raise asyncio.CancelledError("L'appel LLM a été annulé.")
+                await asyncio.wait({task}, timeout=0.1)
+            return task.result()
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except BaseException:
+                    pass
+
     def has_capability(self, capability: str) -> bool:
         """
         Interroge exclusivement la carte d'identité du modèle enregistrée pour savoir s'il supporte la capacité demandée.
@@ -236,6 +316,10 @@ class Llm:
         self._entity_role = None
         self._data_context = None
 
+    def _scope_router_enabled(self) -> bool:
+        """P5 : le routeur de scope remplace-t-il la PD classique ?"""
+        return bool(getattr(self.runtime_state, "enable_scope_router", False))
+
     def _build_discovery_section(self, schema: Type[BaseModel], blocked_data_types: set = None) -> str:
         """
         Construit la section Progressive Disclosure à injecter dans le prompt.
@@ -303,6 +387,19 @@ class Llm:
             if not data_types_info:
                 Logger.debug("[LLM] _build_discovery_section: aucun DataProvider exploitable trouvé.")
                 return ""
+
+            # P5 : routeur de scope actif => la PD complète (goals/targets de
+            # chaque provider) disparaît au profit d'UNE ligne. L'entité pose
+            # sa question en langage naturel via `investigate`.
+            if self._scope_router_enabled():
+                scopes = ", ".join(
+                    sorted(str(info.get("data_type") or name)
+                           for name, info in data_types_info.items())
+                )
+                return _(
+                    "Scopes disponibles : {scopes} — utilise l'outil "
+                    "`investigate` pour poser ta question."
+                ).format(scopes=scopes)
 
             try:
                 schema_desc = self._get_schema_description(schema)
@@ -385,7 +482,21 @@ class Llm:
             start_time = time.monotonic()
             call_epoch = getattr(self.runtime_state, "generation_epoch", 0) if self.runtime_state else 0
             try:
-                response = await provider.generate_response(user_message=full_prompt)
+                for _net_try in range(2):
+                    try:
+                        response = await self._await_cancellable(
+                            provider.generate_response(user_message=full_prompt),
+                            call_epoch,
+                        )
+                        break
+                    except Exception as e:
+                        if _is_network_error(e) and _net_try == 0:
+                            Logger.warning(
+                                f"[LLM] Erreur réseau transitoire ({type(e).__name__}: {e}) — nouvelle tentative."
+                            )
+                            await asyncio.sleep(0.8)
+                            continue
+                        raise
                 if self.runtime_state and (self.runtime_state.cancel_requested or getattr(self.runtime_state, "generation_epoch", 0) != call_epoch):
                     Logger.warning(f"[LLM] Résultat generate_text ignoré car la session/génération a été annulée (epoch {call_epoch} vs actuel {getattr(self.runtime_state, 'generation_epoch', 0)}).")
                     raise asyncio.CancelledError("L'appel LLM a été annulé.")
@@ -421,6 +532,18 @@ class Llm:
                     "success": False
                 }
                 Logger.event("llm_call", **event_fields)
+                if _is_network_error(e):
+                    Logger.error(f"[LLM] Provider injoignable (réseau/DNS/TLS) : {e}")
+                    Logger.event(
+                        "llm_network_error",
+                        provider_id=self.provider_id,
+                        model_id=self.model_id,
+                        error=str(e),
+                        error_type=type(e).__name__,
+                    )
+                    raise ProviderNetworkError(
+                        _("Connexion à l'IA impossible (réseau/DNS). Vérifie la connexion puis réessaie.")
+                    ) from e
                 raise
         
     async def stream(
@@ -521,6 +644,17 @@ class Llm:
         if not (with_discovery and (has_discovery_inheritance or has_discovery_field)):
             Logger.debug(f"[LLM] Schéma {schema.__name__} (PD active: {with_discovery}) -> Mode legacy.")
             return await self._generate_structured_legacy(prompt, schema, tag, mission_id, media_assets=media_assets)
+
+        # P5 : routeur de scope actif => pas de boucle de découverte. Une
+        # seule ligne indique les scopes ; l'entité passe par `investigate`.
+        if self._scope_router_enabled():
+            hint = self._build_discovery_section(schema, set())
+            full_prompt = (hint + "\n\n" + prompt) if hint else prompt
+            Logger.debug(f"[LLM] Routeur de scope actif (tag={tag}) : PD remplacée par 1 ligne.")
+            return await self._generate_structured_legacy(
+                full_prompt, schema, tag, mission_id,
+                media_assets=media_assets, max_output_tokens=max_output_tokens,
+            )
 
         discovery_history = self._discovery_history
         self._last_discovery_signature = None
@@ -930,12 +1064,15 @@ class Llm:
 
                 start_time = time.monotonic()
                 call_epoch = getattr(self.runtime_state, "generation_epoch", 0) if self.runtime_state else 0
-                result = await provider.generate_structured_output(
-                    prompt=prompt,
-                    response_schema=schema,
-                    context=ephemeral_context,
-                    media_assets=media_assets,
-                    max_output_tokens=max_output_tokens
+                result = await self._await_cancellable(
+                    provider.generate_structured_output(
+                        prompt=prompt,
+                        response_schema=schema,
+                        context=ephemeral_context,
+                        media_assets=media_assets,
+                        max_output_tokens=max_output_tokens
+                    ),
+                    call_epoch,
                 )
                 if self.runtime_state and (self.runtime_state.cancel_requested or getattr(self.runtime_state, "generation_epoch", 0) != call_epoch):
                     Logger.warning(f"[LLM] Résultat generate_structured ignoré car la session/génération a été annulée (epoch {call_epoch} vs actuel {getattr(self.runtime_state, 'generation_epoch', 0)}).")
@@ -1003,6 +1140,26 @@ class Llm:
 
             except Exception as e:
                 err_msg = str(e)
+                if _is_network_error(e):
+                    Logger.warning(
+                        f"[LLM] Provider injoignable (tentative {attempt+1}/{max_attempts}) "
+                        f"pour {schema.__name__} : {type(e).__name__}: {e}"
+                    )
+                    Logger.event(
+                        "llm_network_error",
+                        provider_id=self.provider_id,
+                        model_id=self.model_id,
+                        schema_name=schema.__name__,
+                        attempt=attempt + 1,
+                        error=str(e),
+                        error_type=type(e).__name__,
+                    )
+                    if attempt < max_attempts - 1:
+                        await asyncio.sleep(1.0)
+                        continue
+                    raise ProviderNetworkError(
+                        _("Connexion à l'IA impossible (réseau/DNS). Vérifie la connexion puis réessaie.")
+                    ) from e
                 if attempt < max_attempts - 1 and (
                     "Expecting value" in err_msg
                     or "JSONDecodeError" in type(e).__name__

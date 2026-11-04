@@ -25,6 +25,40 @@ from tools.tools_manager import ToolsManager
 from transport.packet_models import RequestPacket
 
 
+def host_target_gate(value: Any) -> Optional[dict]:
+    """Reproduit le gate d'entree C++ de `mouse` (rpahosttools.cpp:857-859).
+
+    Le vrai hote refuse un `target` qui n'est pas une chaine non vide :
+    `args.value("target").toString()` renvoie `""` sur un `QJsonObject`,
+    d'ou `TARGET_REQUIRED` (rpahosttools.cpp:944-951). Le banc d'essai doit
+    refuser la meme chose, sinon il valide un protocole que l'hote rejette.
+
+    Retourne un resultat d'echec, ou None si la cible est acceptable.
+    """
+    if value is None:
+        return {
+            "result": False,
+            "data": None,
+            "message": "Action refusee : une cible nommee est obligatoire.",
+            "error_reason": "TARGET_REQUIRED",
+        }
+    if isinstance(value, dict):
+        return {
+            "result": False,
+            "data": None,
+            "message": "Action refusee : une cible nommee est obligatoire.",
+            "error_reason": "TARGET_REQUIRED",
+        }
+    if isinstance(value, str) and value.strip():
+        return None
+    return {
+        "result": False,
+        "data": None,
+        "message": "Action refusee : une cible nommee est obligatoire.",
+        "error_reason": "TARGET_REQUIRED",
+    }
+
+
 class _Runtime(SimpleNamespace):
     """Etat runtime minimal, avec la purge officielle des cibles."""
 

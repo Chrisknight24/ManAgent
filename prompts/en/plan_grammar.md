@@ -12,6 +12,8 @@ Each step N automatically produces two channels:
 - Copy names EXACTLY; never invent a suffix.
 {% if targets_enabled %}
 - `output_target_name` names a target produced by the step (no `data_`/`bool_` prefix). Reuse it as `$@_<name>` only in a target consumer argument.
+- Any action that consumes a target must receive a local name produced before it; a missing required target parameter makes the plan invalid.
+- To create a target, use a tool whose contract declares `produces`; a tool without `produces` cannot carry `output_target_name`.
 - Never a raw reference, host identifier or invented key.
 {% endif %}
 
@@ -30,10 +32,7 @@ Each step N automatically produces two channels:
 ### Analyzing data or an image
 `llm_analyze_data` handles ONLY an already-produced variable (`source: "$@_data_xxx"`). There is no magic source (`current_screen`). For visuals: first a capture tool → `output_variable_name`, then pass `$@_data_...` to `llm_analyze_data` (declared image: `$@_data_<step>_<field>`). Never an `abstract_task` to inspect a variable: direct `tool_call`.
 
-### Checklist (before answering)
-- [ ] Every `tool_call` has an exact, non-empty `tool_name`.
-- [ ] Every `$@_...` comes from an earlier step (or the registry) and is copied exactly.
-- [ ] Every `execute_if` follows one of the two forms.
-- [ ] No `abstract_task` to inspect a variable.
-- [ ] No `output_variable_name` inside `tool_args_json`.
-- [ ] Last step = `direct_answer`.
+{# P-D (GO 03/11): the final checklist now lives in the separate include
+   `plan_checklist.md` (anti-duplicate — the planner prompt has its own
+   dedicated CHECKLIST and does NOT load this include;
+   skill_repair / skill_synthesis include it explicitly). #}

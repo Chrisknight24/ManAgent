@@ -103,7 +103,7 @@ def test_planner_constructs_without_world_by_default():
     assert 'register_data_provider("world"' in src_solver
 
 
-def _retry_planner(enable_world_pd):
+def _retry_planner(enable_world_pd, pd_enabled=False):
     from types import SimpleNamespace
     from core.planner import Planner
     from core.plan_models import Plan, PlanStep, StepType
@@ -133,9 +133,15 @@ def _retry_planner(enable_world_pd):
     p = Planner.__new__(Planner)
     Planner.__init__(p, name="t", llm=llm, runtime_state=rs)
     import asyncio
-    plan = asyncio.run(p.propose_plan(
-        goal="g", context="", strategy="s", variable_registry={},
-        enable_world_pd=enable_world_pd))
+    import core.planner as planner_mod
+    _old_pd = planner_mod.PLANNER_PD_ENABLED
+    planner_mod.PLANNER_PD_ENABLED = bool(pd_enabled)
+    try:
+        plan = asyncio.run(p.propose_plan(
+            goal="g", context="", strategy="s", variable_registry={},
+            enable_world_pd=enable_world_pd))
+    finally:
+        planner_mod.PLANNER_PD_ENABLED = _old_pd
     return p, plan, seen
 
 
@@ -149,7 +155,19 @@ def test_planner_first_pass_no_world():
 
 
 def test_planner_retry_gets_world():
+    # P-E (GO 03/11) : PLANNER_PD_ENABLED est le gate de l'entité. Par
+    # défaut (mixé False dans core/planner.py), le retry ne porte PLUS la
+    # PD même si enable_world_pd=True : plus d'injection discovery_injection
+    # « en douceur » (runs 31/10 : PD sur 4/6 call Plan, flag désactivé).
     p, plan, seen = _retry_planner(True)
+    assert "world" in p.get_data_providers()
+    assert seen["with_discovery"] is False
+
+
+def test_planner_retry_pd_flag_on_carries_pd():
+    # P-E : avec PLANNER_PD_ENABLED=True, le contrat retry d'origine est
+    # rétabli : enable_world_pd=True → with_discovery=True.
+    p, plan, seen = _retry_planner(True, pd_enabled=True)
     assert "world" in p.get_data_providers()
     assert seen["with_discovery"] is True
 

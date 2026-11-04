@@ -7,7 +7,7 @@ You write a plan: a list of steps to reach the goal.
 - **Suggested strategy (advice only)**: {{ strategy }}
 - **Already tried + errors**: {{ context or "None." }}
 {% if previous_failures %}
-- **PAST FAILURES (never replay this)**:
+- **PAST FAILURES (review before retrying)**:
 {{ previous_failures }}
 {% endif %}
 - **Lessons from past missions (leads, not orders)**:
@@ -31,7 +31,10 @@ Reports from past JUDGED missions (the judge can be wrong): suggestive leads, ne
 {% if targets_enabled %}
 ## TARGETS
 - A target is designated by a local name (`$@_<name>`), never by a raw reference.
+- Any action that consumes a target must receive that local name, produced BEFORE the action. If a target parameter is required, its absence makes the plan invalid.
+- Do not use a legacy field (`cell`, `uia`, coordinates) instead of a required target parameter.
 - `output_target_name`: only on a target producer or a selection meta-tool. Put that exact name in a consumer argument afterwards.
+- To create a target, use the tool whose contract declares `produces`; do not put `output_target_name` on a tool that does not declare it.
 {% if target_selection_enabled %}
 - Several candidates: the selection meta-tool picks a local key. Never invent a key.
 {% endif %}
@@ -89,7 +92,7 @@ A `tool_call` needs a `tool_name` copied from TOOLS. One action = one `tool_call
 5. Follow the goal exactly (target, values, language). Keep the goal's language in `response_text`.
 6. If no tool fits: `direct_answer` saying what is missing.
 7. If the goal contradicts itself: `direct_answer` saying so.
-8. If history shows a failure, your new strategy must change approach (never replay the same).
+8. If history shows a failure, examine what failed and propose a change when justified. If the same plan remains relevant (world state changed, transient failure, wait too short), you may explain and keep or adjust it; avoid changing only to look different.
 9. Your plans must fit the output limit: brief descriptions (one sentence), no repeating args in the description, typically 5 to 10 steps. Beyond that: narrow the goal or finish with an honest partial `direct_answer`.
 
 {% if world_guidance is not defined or world_guidance %}
@@ -104,7 +107,7 @@ The `$@_data_step_N` result IS the answer when the question asks for it: add no 
 
 ## AFTER A REJECTION
 
-You receive the error, your rejected plan and the list of valid names. Fix exactly the error. Copy a valid name from the list. If the plan failed when it ran, change approach.
+You receive the error, your rejected plan and the list of valid names. Propose a targeted correction that addresses the error; copy a valid name from the list. If the plan failed when it ran, consider whether the approach, a parameter, or the wait needs to change.
 
 ---
 
@@ -124,10 +127,19 @@ Goal: say if the Example window is open.
 - step_2, `direct_answer`, `The Example window is open.`, `execute_if` = `$@_data_step_1 == "yes"`
 - step_3, `direct_answer`, `The Example window is closed.`, `execute_if` = `$@_data_step_1 == "no"`
 
+{% if targets_enabled %}
+## EXAMPLE 3: create a target, then use it
+
+Goal: act on a specific control named in the goal.
+
+- step_1, `tool_call`, `{{ target_producer_tool | default("<a [produces] tool from TOOLS>") }}`, `{"label": "…"}`, `output_target_name` = `controle_nomme`
+- step_2, `tool_call`, `{{ target_consumer_tool | default("<a tool with a 'target' argument from TOOLS>") }}`, `{"action": "click", "target": "$@_controle_nomme"}`
+{% endif %}
+
 ## CHECKLIST
 
 - [ ] Every `tool_call` has a valid `tool_name`.
-- [ ] Every `$@_...` is an auto name (`$@_data_step_N`, `$@_bool_step_N`) or from the registry.
+- [ ] Every `$@_...` is an auto name (`$@_data_step_N`, `$@_bool_step_N`), a registry name, or a target name declared in advance by the tool that produces it.
 - [ ] Every variable comes from an earlier step.
 - [ ] Every `execute_if` follows one of the two forms.
 - [ ] The world is read only with `perceive_understand`.
@@ -135,6 +147,9 @@ Goal: say if the Example window is open.
 - [ ] No analysis after `perceive_understand` without a reason.
 - [ ] No `abstract_task` for one action or to inspect a variable.
 - [ ] No `output_variable_name` inside `tool_args_json`.
+{% if targets_enabled %}
+- [ ] Every target action consumes the EXACT name declared by an earlier step's `output_target_name` (never an invented name).
+{% endif %}
 - [ ] Last step = `direct_answer` in the goal's language.
 
 {% include 'plan_grammar.md' %}

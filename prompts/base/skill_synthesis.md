@@ -45,6 +45,8 @@ Tu dois analyser ces arbres d'exécution et générer un Skill Manifest complet 
 ## GRAMMAIRE ET CONVENTIONS
 {% include 'plan_grammar.md' %}
 
+{% include 'plan_checklist.md' %}
+
 **RÈGLES SUPPLÉMENTAIRES POUR LES SKILLS** :
 - Si tu crées un paramètre dynamique (ex: `target_name`), son nom dans le Méta-Plan **DOIT** être référencé sous la forme `@$_param_target_name` (ex: `"text": "@$_param_target_name"`).
 - Les étapes de type `abstract_task` doivent être évitées au maximum dans un Méta-Plan, car un Skill vise à être directement exécutable (`tool_call`).

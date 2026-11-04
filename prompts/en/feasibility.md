@@ -44,6 +44,8 @@ If a skill covers the goal, the strategy prioritizes it (`execute_skill`).
 {% if targets_enabled %}
 ## TARGETS
 - Targets are local names (`$@_<name>`), never raw references.
+- Any action that consumes a target must receive a local name produced BEFORE it: plan the perception/target producer, then the action.
+- Do not use a legacy field (`cell`, `uia`, coordinates) instead of a required target parameter.
 - A strategy may reuse an already named target in a consumer argument.
 {% if target_selection_enabled %}
 - Several candidates: plan the selection meta-tool, which picks a local key.

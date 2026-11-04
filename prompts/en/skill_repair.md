@@ -27,3 +27,5 @@ Voici les outils enregistrés dans le runtime ManAgent avec leurs descriptions e
 3. Respecte STRICTEMENT la grammaire des méta-plans (voir ci-dessous).
 
 {% include 'plan_grammar.md' %}
+
+{% include 'plan_checklist.md' %}

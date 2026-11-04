@@ -170,6 +170,55 @@ Pour que le cerveau sache « où il est » sans deviner :
 - Points de lecture : avant faisabilité, avant chaque plan, avant chaque convergence (jamais jugé comme preuve, que du contexte).
 - Convention `get_world_state` documentée ici : retour texte brut ou `{summary_text, full}` (résumé dans le prompt, détail via PD).
 
+### 3g.1 `get_world_state` déclare `produces: targets` (P2.2)
+
+Un hôte qui expose des cibles opaques peut déclarer, dans le contrat de
+`get_world_state`, les chemins qui produisent des cibles :
+
+```json
+{
+  "get_world_state": {
+    "kind": "perception",
+    "produces": [
+      {"path": "windows[].target", "scope": "ui_element"},
+      {"path": "focus", "scope": "ui_element"}
+    ]
+  }
+}
+```
+
+**Décision runtime (2026-10-31)** : la photo du monde reste **descriptive**.
+`fetch_world_state_snapshot` projette les cibles (`project_target_payload`)
+avec `register=False` : elle les nomme pour que le modèle comprenne l'état,
+mais **ne les inscrit pas** au registre. Pour agir sur une cible vue dans la
+photo, l'entité doit passer par une étape de perception/target normale
+(`perceive_understand` / outil `produces`), qui l'inscrit explicitement.
+Raison : une photo peut être périmée entre sa lecture et l'action ; le gate
+déterministe doit refuser une référence que le plan n'a pas réellement
+produite. Aucune « adoption implicite » n'est faite par le harnais.
+
+### 3g.2 Outil auxiliaire `window_control` (P2.3, doc seulement)
+
+Pour les hôtes qui veulent exposer le contrôle de fenêtres sans multiplier
+les outils, convention optionnelle :
+
+```json
+{
+  "window_control": {
+    "kind": "action",
+    "parameters": {
+      "target": {"type": "string"},
+      "action": {"type": "string", "enum": ["foreground", "hide", "close"]}
+    },
+    "consumes": [{"param": "target", "scope": "ui_element", "required": true}]
+  }
+}
+```
+
+Le cerveau ne code **rien** de spécifique : c'est un outil normal à contrat
+de cibles (`target` consommateur, `action` à valeurs fermées). Un hôte qui ne
+le déclare pas ne voit aucune différence.
+
 ## 3h. Attente active par appel (optionnel)
 
 Pour les gestes dont l'effet met du temps (lancer une appli puis taper

@@ -206,6 +206,14 @@ contrat verrait des champs qu'il ne peut pas produire. En S4, un plan qui utilis
   sur `base`) ; T31 tourne sur les trois.
 - Budget : surface cible ≤ ~200 tokens **et** ≤ ~3 % du prompt de l'entité ;
   au-delà, tronquer la vue (jamais les instructions critiques).
+  **Mesure 2026-10-29** (bloc propre, inclusions déduites) : Planner
+  **~304 tokens**, Feasibility **~126**, `plan_grammar` **~131**. Le
+  Planner dépasse 200 à cause de l'exemple travaillé de la chaîne cible
+  (F5) ; le plafond appliqué est donc **320 tokens** (`BUDGET_TOKENS` dans
+  `tests/test_targets_prompt_surface.py`). La clause « ≤ 3 % » n'est pas
+  applicable aux prompts courts (Feasibility : 126 tokens ≈ 7 % de
+  1 753 chars) ; elle est remplacée par un plafond absolu par entité.
+  Toute hausse doit être justifiée et mise à jour ici.
 
 #### Règles d'implémentation
 
@@ -379,9 +387,61 @@ d'intégration utilisent `HostSim`.
 | T29 | concurrence (S8) : méthodes de registre atomiques / pas de coroutine |
 | T30 | sans capacité déclarée → prompts de **toutes** les entités byte-identiques |
 | T31 | `targets` actif → blocs autorisés seulement ; zéro ref ; budget respecté |
-| T32 | contrat invalide/partiel → prompt de base + diagnostic, jamais partiel |
-| T33 | fraîcheur : cibles inactives/ABA absentes de la vue ; pas de nom mort |
+| T32 | contrat invalide/partiel → prompt de base + diagnostic, jamais partiel || T33 | fraîcheur : cibles inactives/ABA absentes de la vue ; pas de nom mort |
 | T34 | flags indépendants : `targets` n'implique pas `world`, et inversement |
+
+> **Couverture T30-T32 (2026-10-29)** : `tests/test_targets_prompt_surface.py`
+> étend le scan à **toutes** les entités × 3 langues. T30 scanne aussi le
+> vocabulaire du **mécanisme** cible (`cell`, `uia`, `grid`, `grille`,
+> `ribbon`, `ruban`, `zoom`, `drag`, `glisser`) et les verbes d'action UI
+> pour `planner`/`feasibility`/`plan_grammar` ; T30bis vérifie
+> « absent = off » à l'octet près ; T31 mesure le budget ; T32 compare le
+> rendu contrat invalide au rendu sans contrat, entité par entité.
+
+### 5.1 Traçabilité (vérifiée)
+
+Une matrice n'est utile que si elle est auditable : « T1-T34 exécutés » ne se
+vérifie pas en relisant dix fichiers. `tests/test_targets_traceability.py`
+porte la table `MATRIX` (T-ID → fichiers + fonctions) et vérifie à chaque
+suite que :
+
+- les **34 IDs** sont déclarés exactement une fois ;
+- chaque **fonction citée existe réellement** (échec si un test est renommé
+  ou supprimé) ;
+- la table ne s'appuie pas sur un seul fichier.
+
+Répartition actuelle :
+
+| Fichier | IDs |
+|---|---|
+| `test_targets_contract.py` | T1, T6 |
+| `test_targets_egress.py` | T2, T3, T4, T5, T7, T8, T20, T27 |
+| `test_targets_selection.py` | T9, T10, T11, T12, T16 |
+| `test_targets_ingress.py` | T15, T18, T21, T22, T23, T25, T26 |
+| `test_targets_s4.py` | T31, T32, T33, T34 |
+| `test_targets_s6.py` | T17, T19, T24 |
+| `test_targets_s7.py` | T13 |
+| `test_targets_s8.py` | T29 |
+| `test_targets_inertie.py` | T14 |
+| `test_targets_prompt_surface.py` | T28, T30, T31, T32 |
+
+La table fait foi côté code ; ce tableau n'est qu'un index de lecture. Toute
+modification de `MATRIX` doit être répercutée ici.
+
+### 5.2 Tests P0-P5 (2026-10-29/31)
+
+Ces tests ne portent pas d'ID T : ils verrouillent des règles de vérité
+(attentes, rendu, i18n, routeur) indépendantes du registre de cibles.
+
+| Fichier | Ce qui est verrouillé |
+|---|---|
+| `test_any_conditional_plan.py` | `any` accepte `result=false` ; `null` = `"true"` rigide ; warning de sortie non consommée, jamais un refus |
+| `test_target_rejection_message.py` | indice `output_target_name` émis une fois ; variables inconnues groupées ; budget < 1 200 chars |
+| `test_world_snapshot_render.py` | pas de coupe en plein mot ; priorité summary > focus > windows > targets ; cap d'entrées |
+| `test_observability_truth.py` | badge `found` sur `result` structuré ; tokens mission/session ; event `world_snapshot` |
+| `test_lessons_dedupe.py` | pas de préfixe français ; pas de double écriture au même embedding |
+| `test_i18n_pipeline.py` | extraction `_()` → `.po` → `.mo` chargeable ; msgstr vides non compilés |
+| `test_scope_router.py` | routage NL → provider ; refus explicite ; flag off byte-identique ; flag on = 1 ligne ; aucune action dispatchée |
 
 ---
 
@@ -591,6 +651,9 @@ inchangée à 564 tests.
   `test_targets_selection.py`, `test_targets_registry.py`, `test_targets_s4.py`,
   `test_targets_s6.py`, `test_targets_s7.py`, `test_targets_s8.py` ; S9 ajoute
   les scénarios de bout en bout manquants. Suite : **579**.
+  Depuis le 2026-10-29, la répartition est **vérifiée automatiquement**
+  (`tests/test_targets_traceability.py`, §5.1) : plus d'ID orphelin ni de
+  test renommé sans mise à jour de la matrice.
 - Limite maintenue : le smoke réel CondiFlow reste R1 ; aucun nom d'hôte/outil
   en dur, aucun contrat = inertie.
 
@@ -725,3 +788,57 @@ inchangée à 564 tests.
   rejet partiel producteur. Couverture T1-T34 consolidée ; suite **579** verte.
   Le pilote réel CondiFlow reste R1 (smoke externe), rien n'est promis au-delà
   de la surface testée.
+- 2026-10-29 : **T30-T32 durcis**. Constat : le scan T30 ne cherchait que les
+  5 jetons du registre, ce qui a laissé passer des règles prescriptives à
+  vocabulaire computer-use (grille, ruban, zoom, glisser) dans le Planner.
+  `tests/test_targets_prompt_surface.py` ajoute 5 tests : vocabulaire du
+  mécanisme cible absent sur **toutes** les entités × 3 langues, « absent =
+  off » byte-identique, absence d'internes du registre capacité active,
+  budget mesuré par entité, contrat invalide ≡ sans contrat. Le Planner perd
+  une ligne de règle redondante avec `plan_grammar.md` (surface 359 → 304
+  tokens). Suite **686** verte. Rien de runtime modifié.
+- 2026-10-29 : **Traçabilité T1-T34**. Constat : 20 IDs seulement apparaissaient
+  dans un nom de test ; « T1-T34 exécutés » (S9) n'était pas auditable.
+  `tests/test_targets_traceability.py` porte la table `MATRIX` et vérifie que
+  les 34 IDs sont déclarés une fois et que chaque fonction citée existe.
+  §5.1 ajouté (index de lecture par fichier). Suite **689** verte.
+- 2026-10-31 : **P0-P5 (plan ultime)**. P0 : `any` accepte `result=false`,
+  `null`/absent = `"true"` rigide, warning `expected_warnings` (jamais un
+  refus). P1 : descriptions de champs + message de rejet groupé (< 1 200
+  chars). P2 : rendu du world state priorisé, champs entiers, coupe au dernier
+  séparateur. P3 : badge `found` sur `result`, tokens mission/session, event
+  `world_snapshot`. P4 : double leçon supprimée, i18n réelle (extraction AST,
+  `.po`/`.mo` sans dépendance). P5 : routeur de scope en langage naturel
+  (`investigate`, flag off par défaut). Suite **740** verte.
+
+---
+
+## 12. Monde en targets (P2)
+
+- `get_world_state` peut déclarer `produces: targets` : la photo est
+  **projetée** (`register=False`) mais **non inscrite** au registre. Pour agir,
+  une étape de perception/target normale doit produire la cible. Décision
+  détaillée : `docs/HOST_CONTRACT.md` §3g.1.
+- `world_snapshot.max_chars` reste déclaré par l'hôte (max 4000). Le rendu
+  (`core/alignment.py::render_world_snapshot`) ne coupe jamais un mot :
+  priorité summary > focus > windows > targets, champs entiers omis et
+  comptés (`+N champs omis`), listes capées à 10 entrées avec compteur.
+- `window_control(target, action)` est un outil hôte **optionnel**, documenté
+  uniquement (`HOST_CONTRACT.md` §3g.2) : aucun code spécifique au cerveau.
+
+## 13. Routeur de scope (P5, DETTE-3)
+
+- `core/scope_router.py` : `ScopeRouter.candidates()` expose une vue courte
+  (`data_type` + `get_scope_description()`) ; un méta-LLM renvoie
+  `{providers, reason}` ; `answer()` interroge les providers retenus via
+  `DataProvider.answer(question)` (défaut `None`).
+- Outil `investigate({question})` : **langage naturel uniquement**, aucune
+  action dispatchée. Refus explicite
+  (`Aucun scope ne peut traiter cette demande : <question>`) : ce n'est pas un
+  rejet de plan.
+- Flag `runtime_state.enable_scope_router`, défaut **off**. Off : PD
+  byte-identique, `investigate` ni connu ni visible ni exécutable. On : la PD
+  complète est remplacée par **une ligne** (`Scopes disponibles : …`) et la
+  boucle de découverte est court-circuitée ; l'entité passe par `investigate`.
+- Activation après R1/R2 (mesure du delta tokens/appel et du taux de refus).
+

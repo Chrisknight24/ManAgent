@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from core.prompt_loader import get_prompt_loader
 from core.target_ingress import (
     apply_target_updates,
+    bind_target_alias,
     project_target_payload,
     selection_from_payload,
 )
@@ -729,6 +730,15 @@ def _target_registry(runtime_state):
     return getattr(runtime_state, "target_registry", None)
 
 
+def _note_target_selected(runtime_state, entry: TargetEntry, *, strategy: str, source: str = "") -> None:
+    registry = _target_registry(runtime_state)
+    if registry is not None and entry is not None:
+        try:
+            registry.note_selected(entry, strategy=strategy, source=source)
+        except Exception:
+            pass
+
+
 def _project_meta_result(runtime_state, tools_mgr, tool_name: str, parsed: Any):
     """Projection ingress d'un meta-outil (qui contourne l'executor)."""
     contract = _target_contract(tools_mgr, tool_name)
@@ -760,25 +770,10 @@ def _target_error(code: str, message: str) -> Dict[str, Any]:
 
 def _bind_target_alias(runtime_state, alias: str, entry: TargetEntry) -> Optional[str]:
     """Lie un nom de variable de plan au nom local de la cible (jamais la ref)."""
-    alias = (alias or "").strip()
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", alias):
-        return f"nom local de cible invalide: {alias!r}"
     variables = getattr(runtime_state, "_solver_registry_for_tools", None)
     if not isinstance(variables, dict):
         return "registre de variables indisponible pour lier la cible"
-    description = entry.description or entry.local_name
-    variables[alias] = {
-        "value": entry.local_name,
-        "type": "target",
-        "kind": "target",
-        "scope": entry.scope,
-        "description": _("Cible '{desc}' ({scope})").format(
-            desc=description[:200], scope=entry.scope
-        ),
-        "source": "target_registry",
-        "timestamp": datetime.now().isoformat(),
-    }
-    return None
+    return bind_target_alias(_target_registry(runtime_state), variables, alias, entry)
 
 
 async def _choose_target_with_llm(
@@ -954,12 +949,18 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
         _selection = selection_from_payload(_registry, _contract, parsed)
         if _selection.kind == "single":
             _selected_target = _selection.entries[0]
+            _note_target_selected(
+                runtime_state, _selected_target, strategy="single", source="perceive_understand"
+            )
         elif _selection.kind == "candidates" and _output_alias:
             _selected_target, _sel_err = await _choose_target_with_llm(
                 _selection, question, runtime_state, tag="perceive_understand"
             )
             if _sel_err:
                 return _sel_err
+            _note_target_selected(
+                runtime_state, _selected_target, strategy="llm", source="perceive_understand"
+            )
         elif _selection.kind == "none" and _output_alias:
             return _target_error(
                 "TARGET_NOT_FOUND",
@@ -977,13 +978,13 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
         # Format strict SEULEMENT en cas de succès : sur une cible absente, on
         # veut une DESCRIPTION de ce qui est visible (canal de repli), pas un
         # « no » nu qui perd l'information pour le replan.
-        query = (
-            f"{question}\n"
-            f"Si tu TROUVES ce qui est demandé : réponds UNIQUEMENT avec le format "
-            f"strict suivant : {format_response}. Rien d'autre.\n"
-            f"Sinon (cible absente/introuvable) : décris en une phrase ce que tu VOIS "
-            f"à la place (écran, éléments présents, texte) et mets success=false."
-        )
+        query = _(
+            "{question}\n"
+            "Si tu TROUVES ce qui est demandé : réponds UNIQUEMENT avec le format "
+            "strict suivant : {format_response}. Rien d'autre.\n"
+            "Sinon (cible absente/introuvable) : décris en une phrase ce que tu VOIS "
+            "à la place (écran, éléments présents, texte) et mets success=false."
+        ).format(question=question, format_response=format_response)
     if media_assets:
         _out = await _run_llm_analysis(raw_data, query, runtime_state, tag="perceive_understand", media_assets=media_assets)
     else:
@@ -1112,6 +1113,9 @@ async def perceive_action(args: Dict[str, Any], runtime_state) -> Dict[str, Any]
             )
         if selection.kind == "single":
             _selected_target = selection.entries[0]
+            _note_target_selected(
+                runtime_state, _selected_target, strategy="single", source="perceive_action"
+            )
         else:
             _selected_target, _sel_err = await _choose_target_with_llm(
                 selection, target_hint or question, runtime_state,
@@ -1119,6 +1123,9 @@ async def perceive_action(args: Dict[str, Any], runtime_state) -> Dict[str, Any]
             )
             if _sel_err:
                 return _sel_err
+            _note_target_selected(
+                runtime_state, _selected_target, strategy="llm", source="perceive_action"
+            )
         target_ref = _selected_target.ref.value
         result_target = _canonical_target(_selected_target)
 
@@ -1154,3 +1161,38 @@ async def perceive_action(args: Dict[str, Any], runtime_state) -> Dict[str, Any]
             return _target_error("TARGET_SCHEMA_INVALID", _bind_err)
         _out["target_name"] = _output_alias
     return _out
+
+
+async def investigate(args: Dict[str, Any], runtime_state) -> Dict[str, Any]:
+    """Pose une question en LANGAGE NATUREL ; un méta-LLM route vers le bon scope.
+
+    P5 (DETTE-3) : l'entité ne choisit pas un `scope` technique. Elle dit ce
+    qu'elle cherche, le routeur sélectionne les DataProviders capables de
+    répondre, puis agrège leurs réponses. Aucune action n'est dispatchée :
+    uniquement des lectures. Le refus (« aucun scope ») est une réponse
+    normale, jamais un rejet de plan.
+
+    Args:
+        args: {"question": str} — rien d'autre. Pas d'enum de scope.
+    """
+    question = _text(args.get("question"))
+    if not question:
+        msg = _("Le paramètre 'question' est requis.")
+        return {"result": False, "data": None, "error_reason": msg, "message": msg}
+
+    if not bool(getattr(runtime_state, "enable_scope_router", False)):
+        msg = _("Le routeur de scope est désactivé (enable_scope_router=false).")
+        return {"result": False, "data": None, "error_reason": msg, "message": msg}
+
+    try:
+        from core.scope_router import ScopeRouter
+        llm = await _get_tools_llm(runtime_state)
+        router = ScopeRouter(
+            runtime_state,
+            llm=llm,
+            entity=getattr(runtime_state, "_scope_router_entity", None),
+        )
+        return await router.answer(question)
+    except Exception as exc:
+        msg = _("Le routeur de scope a échoué : {err}").format(err=exc)
+        return {"result": False, "data": None, "error_reason": msg, "message": msg}

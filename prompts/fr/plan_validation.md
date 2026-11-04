@@ -38,9 +38,9 @@ Chaque étape montre : id, type, outil, arguments complets, sorties, `execute_if
 {% endif %}
 
 {% if novelty_assessment %}
-## NOUVEAUTÉ CALCULÉE (fait, pas une opinion)
+## NOUVEAUTÉ CALCULÉE (indice, à confronter au plan)
 {{ novelty_assessment }}
-Fais confiance à ce calcul : des arguments modifiés pour traiter la cause = un plan nouveau, même à structure égale.
+Ce calcul est un indice, pas une preuve : des arguments modifiés peuvent indiquer un plan nouveau, même à structure égale, mais ils peuvent aussi être cosmétiques. Confronte-les à la cause observée.
 {% endif %}
 
 ## HISTORIQUE (`[failed]` = exécutée et échouée, `[rejected]` = refusée avant exécution, jamais exécutée)
@@ -61,20 +61,40 @@ Fais confiance à ce calcul : des arguments modifiés pour traiter la cause = un
 ## CONFORME (`is_conformant`)
 
 `true` quand tout ceci tient :
-- Le plan atteint l'OBJECTIF écrit, en comptant les parties que l'état monde montre déjà accomplies.
+- Le plan est sûr et exécutable dans l'état monde actuel.
+- Il atteint l'OBJECTIF écrit, en comptant les parties que l'état monde montre déjà accomplies, OU il est partiel mais sûr : tu le déclares alors `is_partial=true` et tu listes les parties manquantes dans `partial_gaps`.
 - Il n'utilise que les outils et skills dispos. Si rien ne couvre le besoin, un constat honnête en `direct_answer` est valide (`true`).
 - Aucune règle des RÈGLES n'est cassée.
-- Si une tentative a raté À L'EXÉCUTION, le plan change quelque chose qui traite la cause.
+- Si une tentative a raté À L'EXÉCUTION, le plan propose un changement plausible au regard de la cause observée.
 
 `false` quand :
 - Une règle des RÈGLES est cassée.
-- Le plan est identique à une tentative EXÉCUTÉE et ratée, cause intacte.
+- Le plan est identique à une tentative EXÉCUTÉE et ratée, sans changement ni justification face à la cause observée.
 - Le plan redonne l'objectif tel quel à une sous-tâche, sans rien faire d'autre.
 - Son objectif déclaré diffère de l'OBJECTIF.
+- Le plan est partiel avec un risque `critical`, une étape irréversible, une confirmation humaine requise, ou des lacunes trop vagues pour être vérifiées.
 
-Bons signes : perception fraîche après référence périmée, nouvel outil, nouvelle branche, argument modifié qui corrige la cause, étape de vérification au lieu de refaire un état prouvé.
-Un plan à structure égale est valide quand ses arguments ont changé pour corriger la cause.
+Bons signes (indices, pas obligations) : perception fraîche après référence périmée, nouvel outil, nouvelle branche, argument modifié qui répond à la cause observée, étape de vérification au lieu de refaire un état prouvé.
+Un plan à structure égale peut être valide quand ses arguments ou son attente ont changé pour répondre à la cause observée.
 Un plan plus lent que nécessaire est valide.
+
+## PLAN PARTIEL (`is_partial`)
+
+Un plan partiel est un plan SÛR qui exécute une partie utile de l'OBJECTIF, sans prétendre avoir tout fini.
+Il est préférable à un refus seulement si les parties restantes peuvent être faites ensuite, sans action critique ou irréversible.
+
+`is_partial=true` quand :
+- le plan est conforme et sûr ;
+- il ne couvre pas tout l'OBJECTIF ;
+- les parties manquantes sont concrètes et vérifiables ;
+- le risque reste `low` ou `medium` ;
+- aucune étape irréversible et aucune confirmation humaine ne sont nécessaires.
+
+`partial_gaps` doit lister les parties manquantes, pas les étapes déjà faites.
+Exemple : `["le fichier B n'est pas encore vérifié", "le résultat final n'est pas affiché"]`.
+
+N'utilise JAMAIS `is_partial` pour excuser un plan risqué, irréversible ou qui ne fait rien d'utile.
+Si le plan est complet, `is_partial=false` et `partial_gaps=[]`.
 
 Attente : le mécanisme d'attente est `wait_ms` (par étape). S'il est absent, un défaut s'applique automatiquement (3000 ms, ou celui déclaré par l'hôte). Un plan n'est JAMAIS non conforme faute d'attente : n'exige jamais une étape `wait` séparée.
 
@@ -101,7 +121,9 @@ Arbitrages humains de cette mission :
 
 JSON :
 - `is_conformant` (bool)
-- `reason` (string) : court. Si `false`, dis ce que le Planner doit changer et nomme le choix valide. Ex : "step_2 utilise $@_data_screen_capture. Utilise $@_data_step_1."
+- `reason` (string) : court. Si `false`, indique ce qui pourrait être ajusté et nomme le choix valide. Ex : "step_2 utilise $@_data_screen_capture. Un choix valide serait $@_data_step_1."
 - `risk_level` ("low", "medium", "critical")
 - `requires_human_confirmation` (bool)
 - `irreversibility_flags` (liste d'ids)
+- `is_partial` (bool) : true si le plan est sûr mais n'atteint qu'une partie de l'objectif
+- `partial_gaps` (liste de strings) : parties manquantes vérifiables ; vide si `is_partial=false`

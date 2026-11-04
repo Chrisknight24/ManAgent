@@ -7,6 +7,7 @@ reste utilisable mais inerte quand le contrat est invalide.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -31,6 +32,9 @@ class ConsumerSpec:
     scope: Optional[str] = None
     required: bool = True
     raw_allow: bool = False
+    # Type JSON declare par le manifeste pour ce parametre (ex: "string").
+    # `None` = non declare : la reference brute est transmise telle quelle.
+    wire_type: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -101,6 +105,42 @@ def producer_specs(contract: TargetContract) -> Tuple[ProducerSpec, ...]:
 _REFERENCE_TOKEN_RE = re.compile(r"(\$@_|@\$_)[A-Za-z0-9_-]+")
 
 
+def _wire_value(value: Any, wire_type: Optional[str]) -> Any:
+    """Adapte une reference brute au type declare par le manifeste.
+
+    Certains hotes declarent le parametre consommateur en `type: "string"`
+    tout en renvoyant une reference objet (`{kind, id}`) : envoyer l'objet
+    contredit leur propre schema (gate `TARGET_REQUIRED`, mission 008bcdba).
+    La forme `"<kind>:<id>"` est acceptee par `s_parseTargetRef`
+    (rpahosttools.cpp:290-298). Tout le reste est transmis inchange.
+    """
+    if wire_type != "string" or isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        kind = value.get("kind")
+        ident = value.get("id")
+        if (
+            isinstance(kind, str)
+            and kind.strip()
+            and isinstance(ident, (str, int))
+            and not isinstance(ident, bool)
+            and str(ident).strip()
+        ):
+            return f"{kind.strip()}:{str(ident).strip()}"
+        try:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            return str(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        try:
+            return json.dumps(list(value), ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            return str(value)
+    return value
+
+
 def resolve_consumer_arguments(
     registry: Any,
     contract: Optional[TargetContract],
@@ -135,6 +175,16 @@ def resolve_consumer_arguments(
                 "message": f"consumer '{param}' expects a local target name",
             }
         if _REFERENCE_TOKEN_RE.search(value):
+            stripped = value.strip()
+            if _REFERENCE_TOKEN_RE.fullmatch(stripped):
+                return arguments, None, {
+                    "code": "TARGET_NOT_FOUND",
+                    "message": (
+                        f"unresolved target reference {stripped!r} for consumer "
+                        f"'{param}': no local target binding (producer must publish "
+                        "output_target_name)"
+                    ),
+                }
             return arguments, None, {
                 "code": "TARGET_NOT_FOUND",
                 "message": (
@@ -150,7 +200,7 @@ def resolve_consumer_arguments(
             ref = registry.resolve(value, consumer.scope)
         except TargetError as exc:
             return arguments, None, {"code": exc.code, "message": exc.message}
-        resolved[param] = ref.value
+        resolved[param] = _wire_value(ref.value, consumer.wire_type)
     return resolved, display, None
 
 
@@ -291,6 +341,8 @@ def _parse_consumer(
         else:
             scope = scope.strip()
 
+    wire_type: Optional[str] = None
+
     required = item.get("required", True)
     if not isinstance(required, bool):
         error(f"consumes[{index}].required must be a boolean")
@@ -323,12 +375,16 @@ def _parse_consumer(
                         error(
                             f"consumer parameter '{param}' must not declare enum"
                         )
+                    declared_type = spec.get("type")
+                    if isinstance(declared_type, str) and declared_type.strip():
+                        wire_type = declared_type.strip()
 
     return ConsumerSpec(
         param=param,
         scope=scope,
         required=required,
         raw_allow=raw_allow,
+        wire_type=wire_type,
     )
 
 

@@ -83,7 +83,9 @@ def test_feedback_cible_nomme_etape(monkeypatch):
     assert ok is False
     assert "step_3" in why
     assert "clique bouton lecture" in why
-    assert "Change l'approche" in why
+    assert "possiblement concernée" in why
+    assert "Piste à évaluer" in why
+    assert "pas seulement l'attente" not in why
 
 
 def test_feedback_sans_noeud_reel_reste_propre(monkeypatch):

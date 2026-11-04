@@ -15,6 +15,12 @@ class Actions:
     # NOUVEAU : Quand le C++ a fini d'exécuter un outil physique et renvoie le résultat
     TOOL_RESULT = "tool.result" 
     LEARNER_ANALYZE = "learner.analyze"   # <--- NOUVEAU
+    LESSON_LIST = "lesson.list"
+    LESSON_GET = "lesson.get"
+    LESSON_CREATE = "lesson.create"
+    LESSON_UPDATE = "lesson.update"
+    LESSON_DELETE = "lesson.delete"
+    LESSON_CONSOLIDATE = "lesson.consolidate"
     HOST_MANIFEST_REGISTER = "host.manifest.register"  # <--- Enregistrement dynamique du HostManifest
     SYSTEM_WARMUP = "system.warmup"
     SYSTEM_RESET_DATA = "system.reset_data"
@@ -68,6 +74,16 @@ class Events:
     PLAN_ABANDONED = "plan.abandoned" # NOUVEAU : Signal qu'un plan généré a échoué et va être remplacé
     HEARTBEAT = "heartbeat"
     PLANNER_RETRY = "planner.retry"
+
+    # Cycle de vie des cibles (TargetRegistry)
+    TARGET_DISCOVERED = "target.discovered"
+    TARGET_REGISTERED = "target.registered"
+    TARGET_REFRESHED = "target.refreshed"
+    TARGET_SELECTED = "target.selected"
+    TARGET_BOUND = "target.bound"
+    TARGET_RESOLVE_FAILED = "target.resolve_failed"
+    TARGET_INVALIDATED = "target.invalidated"
+    TARGET_PURGED = "target.purged"
 
     LEARNER_ANALYZE_STARTED = "learner.analyze_started"
     LEARNER_ANALYZE_FINISHED = "learner.analyze_finished"
@@ -194,6 +210,11 @@ LLM_STRUCTURED_MAX_ATTEMPTS = 2      # Nombre maximal de retries en cas d'erreur
 LLM_DISCOVERY_MAX_ITERATIONS = 5     # Nombre maximal d'itérations pour la Progressive Disclosure LLM
 DISCOVERY_LOOP_HARD_MAX = 20         # Plafond absolu : l'hôte peut monter jusqu'ici, jamais au-delà
 LLM_STRUCTURED_MAX_OUTPUT_TOKENS = 8192  # Plafond de sortie structurée (fail-fast : un plan tient en quelques Ko)
+# Garde-fous anti-gel (incident du 27/10 : 296 s sans log pendant un appel
+# Gemini). Un appel unitaire ne peut pas dépasser ce délai, et l'ensemble du
+# failover multi-clés (rotations + backoffs) est borné par un budget global.
+LLM_CALL_TIMEOUT_SECONDS = 90.0       # Timeout d'un appel HTTP Gemini
+LLM_FAILOVER_BUDGET_SECONDS = 180.0   # Budget total d'une opération (toutes clés)
 CONTEXT_MAX_TOTAL_TOKENS = 12000     # Budget total maximal de tokens pour l'Orchestrateur
 CONTEXT_MAX_RECENT_TOKENS = 4000     # Budget de tokens pour les messages récents verbatim
 CONTEXT_MAX_ASSETS_TOKENS = 2000     # Budget de tokens pour le manifeste des DataAssets

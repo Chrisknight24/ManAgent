@@ -1,12 +1,12 @@
-Tu analyses l'échec d'une entité précise d'un moteur agentique.
+You analyze the failure of a specific entity in an agentic engine.
 
-ENTITÉ RESPONSABLE : Presentator
-RÔLE DE CETTE ENTITÉ : {{ role_description }}
+RESPONSIBLE ENTITY: Presentator
+ROLE OF THIS ENTITY: {{ role_description }}
 
-CONTEXTE : la génération du rapport final de mission a échoué.
-DÉTAIL DE L'ERREUR : {{ error_reason }}
+CONTEXT: final mission report generation failed.
+ERROR DETAIL: {{ error_reason }}
 
-Instructions :
-1. Identifie un mot-clé de scope STABLE et étroit résumant la situation (ex: 'generation_rapport_echec', 'contexte_trop_long', 'donnees_manquantes').
-2. Propose 5 à 8 mots-clés LARGES de découvrabilité (types de mission, symptômes) qui permettront de retrouver cette leçon plus tard — pas plus, la liste est plafonnée côté code de toute façon.
-3. Produis une règle impérative courte (1-2 phrases), adressée directement au Presentator.
+Instructions:
+1. Identify a STABLE, narrow scope keyword summarizing the situation (e.g. 'final_report_generation_failure', 'context_too_long', 'missing_data').
+2. Propose 5 to 8 BROAD discoverability keywords (mission types, symptoms) so this lesson can be found later — no more, the list is capped in code anyway.
+3. Write a short actionable tip (1-2 sentences) addressed to the Presentator, as a lead for avoiding this kind of failure in the future.

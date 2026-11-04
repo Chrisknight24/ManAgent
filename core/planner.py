@@ -137,6 +137,11 @@ class Planner(Entity):
         enable_world_pd: bool = False,
         previous_failures: str = "",
     ) -> Plan:
+        # Reset AVANT tout await : si la génération ou la validation échoue,
+        # `_last_proposed_plan` doit décrire CE plan-là (ou None), jamais un
+        # plan périmé d'une tentative précédente. C'est ce champ que le Solver
+        # relit pour afficher le plan rejeté dans le feedback de retry (F1).
+        self._last_proposed_plan = None
         if hasattr(self.runtime_state, 'orchestrator') and self.runtime_state.orchestrator:
             await self.runtime_state.orchestrator.propagate_event(Events.STATUS_UPDATE, {"message": "planning"})
         Logger.info("[Planner] 🧠 Traduction de la stratégie en plan d'action structuré...")
@@ -172,6 +177,38 @@ class Planner(Entity):
                 "targets_enabled": False,
                 "target_selection_enabled": False,
             }
+
+        # P-D (GO 03/11) : EXEMPLE 3 du prompt reçoit les VRAIS noms d'outils
+        # cibles, lus depuis le manifeste hôte au moment du rendu. Agnostique
+        # par construction : aucun nom d'hôte codé en dur, ses cartes d'outils
+        # (contrats 'produces' / consommateur 'target') font foi. Si un nom
+        # manque, fallback = consigne d'indirection (même style qu'EXEMPLE 1).
+        target_producer_tool = _("<un outil [produces] de OUTILS>")
+        target_consumer_tool = _("<un outil avec argument 'target' de OUTILS>")
+        if target_flags["targets_enabled"]:
+            try:
+                _tm_tt = getattr(self.runtime_state, "tools_manager", None)
+                if _tm_tt is not None:
+                    _producer_tool_done = False
+                    _consumer_tool_done = False
+                    for _tt_name in _tm_tt.target_contract_names():
+                        _tt_contract = _tm_tt.get_target_contract(_tt_name)
+                        if _tt_contract is None or not getattr(_tt_contract, "is_effective", False):
+                            continue
+                        if (not _producer_tool_done) and (getattr(_tt_contract, "producers", ()) or ()):
+                            target_producer_tool = _tt_name
+                            _producer_tool_done = True
+                        if (not _consumer_tool_done) and "target" in (
+                            _tt_contract.consumer_param_names()
+                        ):
+                            target_consumer_tool = _tt_name
+                            _consumer_tool_done = True
+                        if _producer_tool_done and _consumer_tool_done:
+                            break
+            except Exception as _tt_err:
+                Logger.debug(
+                    f"[Planner:{self.name}] Outils cibles EXEMPLE 3 indisponibles : {_tt_err}"
+                )
         # Monde vivant : UNIQUEMENT en retry (premier passage inchangé :
         # rapide, pas cher). Le solver active après le 1er échec.
         if enable_world_pd and self.runtime_state.discovery_engine:
@@ -290,13 +327,21 @@ class Planner(Entity):
             unsupported_modalities=unsupported_modalities,
             targets_enabled=target_flags["targets_enabled"],
             target_selection_enabled=target_flags["target_selection_enabled"],
+            target_producer_tool=target_producer_tool,
+            target_consumer_tool=target_consumer_tool,
         )
 
         proposed_plan: Plan = await self.llm.generate_structured(
             prompt=prompt,
             schema=Plan,
             tag="Plan",
-            with_discovery=enable_world_pd,
+            # P-E (GO 03/11) : PLANNER_PD_ENABLED est désormais le vrai gate
+            # de l'entité. Jusqu'ici il ne commandait que l'enregistrement du
+            # DataProvider : l'injection `discovery_injection.md` (4,25 Ko)
+            # partait quand même sur les retries (enable_world_pd, attempt>1)
+            # — incohérence confirmée sur les runs 31/10 (PD sur 4/6 calls
+            # Plan avec flag désactivé).
+            with_discovery=bool(enable_world_pd and PLANNER_PD_ENABLED),
             max_output_tokens=LLM_STRUCTURED_MAX_OUTPUT_TOKENS
         )
 
@@ -332,11 +377,25 @@ class Planner(Entity):
         errors = []
         warnings = []
         all_steps_by_id = {step.id: step for step in plan.steps}
+        try:
+            from core.plan_validator import find_duplicate_step_ids
+            _dup_ids = find_duplicate_step_ids(plan)
+        except Exception:
+            _dup_ids = []
+        if _dup_ids:
+            errors.append(
+                _("Identifiants d'étape dupliqués : {ids}. Chaque étape doit avoir un id unique (les ids servent de nom de variable : $@_data_<id>, $@_bool_<id>).")
+                .format(ids=", ".join(_dup_ids))
+            )
         steps_seen_so_far = set()
         # Pistes de correction : (variable demandée, variables connues à ce point).
         # Le feedback doit montrer la sortie, pas seulement l'erreur, sinon un
         # modèle faible rejoue la même variable inconnue en boucle.
         unknown_hints = []
+        # Références exécutables inconnues : var -> [step_ids consommateurs].
+        # Regroupées en UNE piste après la boucle (P1.3).
+        unknown_refs: Dict[str, List[str]] = {}
+        unknown_target_refs: set = set()
 
         def _produced_names(st) -> set:
             """Noms produits par une étape (pour exempter sa propre prose)."""
@@ -355,6 +414,31 @@ class Planner(Entity):
                     used.update(matches)
             return used
 
+        def _used_as_target_arg(st, raw_var: str) -> bool:
+            """Vrai si la référence inconnue alimente un argument nommé 'target'."""
+            try:
+                from core.plan_models import parse_tool_args_json
+                args = parse_tool_args_json(getattr(st, "tool_args_json", "") or "{}")
+                if not isinstance(args, dict):
+                    return False
+            except Exception:
+                return False
+            wanted = {f"$@_{raw_var}", f"@$_{raw_var}"}
+
+            def _scan(value) -> bool:
+                if isinstance(value, dict):
+                    for key, sub in value.items():
+                        if (str(key).lower() == "target"
+                                and isinstance(sub, str) and sub.strip() in wanted):
+                            return True
+                        if _scan(sub):
+                            return True
+                elif isinstance(value, list):
+                    return any(_scan(sub) for sub in value)
+                return False
+
+            return _scan(args)
+
         def _check_var(raw_var: str, known: set, step, step_idx: int, is_prose: bool = False) -> None:
             # Doctrine : exécutable (execute_if, args) = rigide (erreur, ça planterait).
             # Prose (description, response_text, step_context) = souple (avertissement
@@ -369,9 +453,15 @@ class Planner(Entity):
             is_available = False
             if raw_var in known or canonical_var in known:
                 is_available = True
-            elif f"bool_{clean_root}" in known or f"data_{clean_root}" in known or clean_root in known:
+            elif clean_root in known:
+                # Nom nu légitime : `output_variable_name` ou `output_target_name`
+                # déclaré tel quel par une étape antérieure.
                 is_available = True
-            elif clean_root in all_steps_by_id and clean_root in steps_seen_so_far:
+            elif is_prose and clean_root in all_steps_by_id and clean_root in steps_seen_so_far:
+                # Prose SEULEMENT : tolérance de style, jamais un canal exécutable.
+                # `$@_step_7` nu n'existe pas à l'exécution (seuls `bool_<id>` /
+                # `data_<id>` sont auto-publiés) : le Supervisor le refuse, donc
+                # le Planner doit le refuser aussi (F2).
                 is_available = True
 
             if not is_available:
@@ -403,6 +493,19 @@ class Planner(Entity):
                             _("L'étape '{}' tente d'utiliser la variable '{}' provenant de l'étape future '{}' (erreur de causalité : l'étape n'a pas encore été exécutée).")
                             .format(step.id, var, matched_step_id)
                         )
+                    elif not (is_bool_ref or is_data_ref):
+                        # `$@_step_2` nu : ce canal n'existe pas (seuls
+                        # `bool_<id>` / `data_<id>` sont auto-publiés). Nommer
+                        # le bon canal évite une tentative brûlée (F2).
+                        dest.append(
+                            _("L'étape '{}' référence '{}' sans préfixe : ce nom n'existe pas. Écrivez '{}' pour la valeur ou '{}' pour le succès de l'étape '{}'.")
+                            .format(
+                                step.id, var,
+                                f"$@_data_{matched_step_id}",
+                                f"$@_bool_{matched_step_id}",
+                                matched_step_id,
+                            )
+                        )
                     else:
                         dest.append(
                             _("L'étape '{}' tente d'utiliser la variable '{}' issue de l'étape '{}' qui n'a pas produit de données valides.")
@@ -414,12 +517,26 @@ class Planner(Entity):
                         .format(step.id, var, future_step.id)
                     )
                 else:
-                    dest.append(
-                        _("L'étape '{}' tente d'utiliser la variable inconnue '{}' qui n'a été produite par aucune étape antérieure ni par le contexte.")
-                        .format(step.id, var)
-                    )
-                    if not is_prose:
-                        unknown_hints.append((var, sorted(set(known))))
+                    if is_prose:
+                        # Prose : avertissement seul, jamais un rejet.
+                        dest.append(
+                            _("L'étape '{}' mentionne la variable inconnue '{}' qui n'a été produite par aucune étape antérieure ni par le contexte.")
+                            .format(step.id, var)
+                        )
+                    else:
+                        # Référence exécutable inconnue : regroupée en une seule
+                        # piste après la boucle (pas un mur de texte répété).
+                        unknown_refs.setdefault(var, [])
+                        if step.id not in unknown_refs[var]:
+                            unknown_refs[var].append(step.id)
+                        if _used_as_target_arg(step, raw_var):
+                            unknown_target_refs.add(var)
+                        else:
+                            # Pas de piste « Vouliez-vous dire » pour une cible :
+                            # le message « Cibles non déclarées » ci-dessous est
+                            # le bon, et `difflib` enverrait vers `$@_data_step_N`
+                            # (mauvais canal, tentative brûlée).
+                            unknown_hints.append((var, sorted(set(known))))
 
         for step_idx, step in enumerate(plan.steps):
             # 1. Champs exécutables : antériorités seules (strict, erreur = rejet).
@@ -458,20 +575,29 @@ class Planner(Entity):
 
             # 4. Vérifications d'intégrité tool_args_json
             if step.type == StepType.TOOL_CALL and step.tool_args_json:
-                try:
-                    args = json.loads(step.tool_args_json)
-                    if isinstance(args, dict):
-                        forbidden_keys = ["output_variable_name", "output_var", "var_name", "variable_name"]
-                        for key in forbidden_keys:
-                            if key in args:
-                                errors.append(
-                                    _("L'étape '{}' définit '{}' dans tool_args_json, ce qui est interdit. "
-                                    "Utilisez uniquement le champ output_variable_name de l'étape pour nommer des variables.")
-                                    .format(step.id, key)
-                                )
-                                break
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                # P-B (GO 03/11) : le parseur tolérant rattrape les cas bénins
+                # (fence de code, commentaire traîne, échappement invalide) ;
+                # le rejet n'est plus réservé qu'à l'irrécupérable, avec le
+                # texte fautif (sinon le modèle réécrit la même traîne).
+                from core.plan_models import parse_tool_args_json
+                args = parse_tool_args_json(step.tool_args_json)
+                if args is None:
+                    _raw_args = step.tool_args_json.strip() if isinstance(step.tool_args_json, str) else ""
+                    _snippet = _raw_args if len(_raw_args) <= 80 else (_raw_args[:80] + "…")
+                    errors.append(
+                        _("L'étape '{}' a des args illisibles. Texte fautif : {}")
+                        .format(step.id, _snippet)
+                    )
+                if isinstance(args, dict):
+                    forbidden_keys = ["output_variable_name", "output_var", "var_name", "variable_name"]
+                    for key in forbidden_keys:
+                        if key in args:
+                            errors.append(
+                                _("L'étape '{}' définit '{}' dans tool_args_json, ce qui est interdit. "
+                                "Utilisez uniquement le champ output_variable_name de l'étape pour nommer des variables.")
+                                .format(step.id, key)
+                            )
+                            break
 
         try:
             from core.plan_validator import find_target_plan_problems
@@ -483,23 +609,45 @@ class Planner(Entity):
                 _("Validation des cibles indisponible : {err}").format(err=e)
             )
 
+        if unknown_refs:
+            refs_txt = ", ".join(
+                f"$@_{var} ({', '.join(sorted(set(sids))[:4])})"
+                for var, sids in list(unknown_refs.items())[:8]
+            )
+            errors.append(
+                _("Références inconnues : {refs}. Aucune étape antérieure ne produit ces noms.")
+                .format(refs=refs_txt)
+            )
+        if unknown_target_refs:
+            # Indice émis UNE seule fois, quel que soit le nombre de cibles.
+            errors.append(
+                _("Cibles non déclarées : {vars}. Ces variables alimentent l'argument 'target' : déclarez chaque cible via 'output_target_name' sur l'étape qui la crée (outil producteur), et non via 'output_variable_name'.")
+                .format(vars=", ".join(f"$@_{v}" for v in sorted(unknown_target_refs)[:8]))
+            )
+
         if unknown_hints:
-            # Une seule piste par variable : proches + disponibles (capé).
-            # Sans ça, un modèle faible ne voit pas la sortie et rejoue pareil.
-            seen_vars = set()
+            # UNE piste groupée : liste des variables disponibles une seule fois,
+            # puis les suggestions par variable. Pas de bloc répété par référence.
+            grouped: Dict[str, List[str]] = {}
             for bad_var, known_list in unknown_hints:
-                if bad_var in seen_vars:
-                    continue
-                seen_vars.add(bad_var)
-                suggestions = difflib.get_close_matches(bad_var, known_list, n=2, cutoff=0.6)
-                available = ", ".join(f"$@_{k}" for k in known_list[:12])
-                hint = _("Variables disponibles à ce point : {available}.").format(
+                grouped.setdefault(bad_var, known_list)
+            first_known = next(iter(grouped.values())) if grouped else []
+            available = ", ".join(f"$@_{k}" for k in first_known[:10])
+            parts = [
+                _("Variables disponibles à ce point : {available}.").format(
                     available=available or _("(aucune — produisez d'abord une étape)"))
+            ]
+            guesses = []
+            for bad_var, known_list in grouped.items():
+                suggestions = difflib.get_close_matches(bad_var, known_list, n=2, cutoff=0.6)
                 if suggestions:
-                    hint += " " + _("Vouliez-vous dire {guess} ?").format(
-                        guess=" ou ".join(f"$@_{s}" for s in suggestions))
-                errors.append(
-                    _("Piste pour '{var}' : {hint}").format(var=bad_var, hint=hint))
+                    guesses.append(
+                        f"$@_{bad_var} → " + " / ".join(f"$@_{s}" for s in suggestions)
+                    )
+            if guesses:
+                parts.append(
+                    _("Vouliez-vous dire : {guess} ?").format(guess=" ; ".join(guesses)))
+            errors.append(" ".join(parts))
 
         if not errors:
             return True, warnings

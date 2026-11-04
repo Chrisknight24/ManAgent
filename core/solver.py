@@ -29,7 +29,7 @@ from core.constants import (
     MAX_INSIGHTS_PER_TARGET,
 )
 from .supervisor import Supervisor
-from .plan_models import FeasibilityDecision, Plan, SolverResult, ExecutionStatus, MissionSignature, CompactedAdvice, normalize_failure_signature, is_sterile_streak, is_quota_streak
+from .plan_models import FeasibilityDecision, Plan, SolverResult, ExecutionStatus, MissionSignature, CompactedAdvice, normalize_failure_signature, is_sterile_streak, is_quota_streak, is_nonretryable_contract_failure, is_host_target_contract_refusal, host_refusal_budget_exhausted
 from .planner import Planner
 from .executor import Executor
 from core.llm import Llm
@@ -66,6 +66,48 @@ def build_mission_convergence_payload(verdict: str, detail: str, full_report: st
         "full": str(full_report or detail or ""),
         "mission_id": mission_id,
     }
+
+
+def gap_convergence_refusal(
+    gaps: Any,
+    perception_proofs: Any,
+    perception_tools_available: bool = True,
+) -> Optional[str]:
+    """Refus déterministe quand des lacunes acceptées ne sont pas prouvées.
+
+    Un plan partiel est accepté sous conditions (`plan_validator`), à charge
+    pour la convergence finale de prouver que les lacunes sont couvertes. Le
+    juge LLM ne le fait pas de façon fiable (mission `ee848a24` : deux
+    lacunes, zéro perception, verdict « Mission accomplie »). Cette porte
+    pure tranche avant l'appel LLM :
+
+    - aucune lacune -> None (comportement historique) ;
+    - hôte sans outil de perception -> None (porte impossible à satisfaire) ;
+    - au moins une preuve de perception NON VIDE -> None (le juge tranche) ;
+    - sinon -> raison de refus explicite.
+
+    Retourne la raison du refus, ou None si le juge doit être consulté.
+    """
+    try:
+        clean_gaps = [str(g).strip() for g in (gaps or []) if str(g).strip()]
+    except Exception:
+        clean_gaps = []
+    if not clean_gaps:
+        return None
+    if not perception_tools_available:
+        return None
+    try:
+        proofs = [str(p).strip() for p in (perception_proofs or []) if str(p).strip()]
+    except Exception:
+        proofs = []
+    if proofs:
+        return None
+    _shown = "; ".join(clean_gaps[:3])
+    return _(
+        "Refus déterministe : le plan a été accepté avec des lacunes non "
+        "prouvées ({gaps}) et aucune perception n'a été exécutée depuis. "
+        "Aucune preuve que le but est atteint."
+    ).format(gaps=_shown)
 
 
 def _update_tool_health(streak: Dict[str, int], attempts: List[Any]) -> List[str]:
@@ -525,6 +567,12 @@ class Solver(Supervisor, Entity):
                 # planner ne sait plus quoi changer → recul solver. Remis à 0
                 # dès qu'un plan passe la validation.
                 _consecutive_supervisor_rejections = 0
+                # Refus d'argument cible rendus par l'hôte APRES dispatch
+                # (TARGET_REQUIRED / TARGET_SCHEMA_INVALID). Le contrat d'appel
+                # est en cause, pas la stratégie : un seul essai de correction,
+                # puis abandon (voir is_host_target_contract_refusal). Budget
+                # par mission : au 2e refus, on abandonne.
+                _host_target_refusals = 0
                 # Anti faux-succès (Alerte 1) : cumul inter-tentatives.
                 seen_tool_steps_total = 0
                 material_success_total = 0                # Santé outils : même outil en échec N fois (toutes signatures)
@@ -621,10 +669,19 @@ class Solver(Supervisor, Entity):
                             with self.runtime_state.execution_context.scope(entity_name="Planner", entity_role="Solver"):
                                 _past_failures = []
                                 try:
+                                    # P-A (GO 03/11) : dédup des raisons
+                                    # identiques. Le même message répété à
+                                    # l'identique sur N tentatives ne doit pas
+                                    # occuper 3 lignes du prompt (Cause 3,
+                                    # runs 31/10 : « args illisibles » ×3).
+                                    _seen_reasons: set = set()
                                     for _att in (getattr(getattr(self, "execution_tree", None), "attempts", None) or []):
                                         if getattr(_att, "outcome", None) in ("failed", "rejected") and getattr(_att, "failure_reason", None):
                                             _full = str(_att.failure_reason)
                                             _txt = _full if len(_full) <= 600 else (_full[:600] + " …[tronqué]")
+                                            if _txt in _seen_reasons:
+                                                continue
+                                            _seen_reasons.add(_txt)
                                             _past_failures.append(
                                                 f"- tentative {getattr(_att, 'attempt_number', '?')} : {_txt}"
                                             )
@@ -662,17 +719,14 @@ class Solver(Supervisor, Entity):
                                 "max_attempts": MAX_PREEXECUTION_FAILURES
                             })
 
-                            if proposed_plan is not None:
-                                rejected_plan_summary = self._summarize_plan(proposed_plan)
+                            _rejected_plan = self._resolve_rejected_plan(proposed_plan)
+                            if _rejected_plan is not None:
+                                rejected_plan_summary = self._summarize_plan(_rejected_plan)
                             else:
-                                rejected_plan_summary = "Aucun plan généré (erreur de validation JSON)"
+                                rejected_plan_summary = _("Aucun plan généré (erreur de validation JSON)")
 
-                            feedback_msg = (
-                                _("\n[⚠️ REJET DU PLAN PRÉCÉDENT]\n")
-                                + _("Le système a rejeté votre plan pour l'erreur suivante :\n{}\n").format(error_msg)
-                                + _("Voici la structure de votre plan rejeté pour vous aider à identifier l'erreur :\n")
-                                + rejected_plan_summary
-                                + _("\nVeuillez corriger cette erreur dans votre nouveau plan.")
+                            feedback_msg = self._build_plan_retry_feedback(
+                                error_msg, rejected_plan_summary
                             )
                             self.context = f"{self.context}\n{feedback_msg}" if self.context else feedback_msg
                             self._preexecution_failures += 1
@@ -690,16 +744,13 @@ class Solver(Supervisor, Entity):
                                 "max_attempts": MAX_PREEXECUTION_FAILURES
                             })
 
-                            if proposed_plan is not None:
-                                rejected_plan_summary = self._summarize_plan(proposed_plan)
+                            _rejected_plan = self._resolve_rejected_plan(proposed_plan)
+                            if _rejected_plan is not None:
+                                rejected_plan_summary = self._summarize_plan(_rejected_plan)
                             else:
-                                rejected_plan_summary = "Aucun plan généré (erreur de validation)"
-                            feedback_msg = (
-                                _("\n[⚠️ REJET DU PLAN PRÉCÉDENT]\n")
-                                + _("Le système a rejeté votre plan pour l'erreur suivante :\n{}\n").format(error_msg)
-                                + _("Voici la structure de votre plan rejeté pour vous aider à identifier l'erreur :\n")
-                                + rejected_plan_summary
-                                + _("\nVeuillez corriger cette erreur dans votre nouveau plan.")
+                                rejected_plan_summary = _("Aucun plan généré (erreur de validation)")
+                            feedback_msg = self._build_plan_retry_feedback(
+                                error_msg, rejected_plan_summary
                             )
                             self.context = f"{self.context}\n{feedback_msg}" if self.context else feedback_msg
                             self._preexecution_failures += 1
@@ -909,6 +960,64 @@ class Solver(Supervisor, Entity):
                                 getattr(result, "material_success_count", 0),
                             )
 
+                            # Erreur de contrat pre-dispatch : l'alias a ete
+                            # accepte par les gates structurelles mais le runtime
+                            # ne l'a pas publie. Replanifier a l'identique ne
+                            # peut pas reparer cette liaison, et les succes
+                            # `target` repetes ne sont pas un vrai progres.
+                            if is_nonretryable_contract_failure(result.error_reason):
+                                _contract_why = _(
+                                    "Abandon : référence de cible non liée avant "
+                                    "dispatch. Replanifier à l'identique ne peut pas "
+                                    "réparer la liaison runtime."
+                                )
+                                Logger.warning(f"[Solver:{self.id}] 🛑 {_contract_why}")
+                                self.context += _("\n[Abandon] {}.").format(_contract_why)
+                                try:
+                                    Logger.event(
+                                        "contract_failure_circuit_open",
+                                        solver_id=self.id,
+                                        reason=str(result.error_reason or "")[:500],
+                                    )
+                                except Exception:
+                                    pass
+                                break
+
+                            # Refus de contrat cible par l'hôte (post-dispatch) :
+                            # relancer la même stratégie ne peut pas réparer un
+                            # argument qui viole le schéma déclaré. On autorise
+                            # UNE correction ciblée (le planner voit l'erreur),
+                            # puis on abandonne au 2e refus.
+                            if is_host_target_contract_refusal(result.error_reason):
+                                _host_target_refusals += 1
+                                try:
+                                    Logger.event(
+                                        "host_target_refusal",
+                                        solver_id=self.id,
+                                        reason=str(result.error_reason or "")[:500],
+                                        count=_host_target_refusals,
+                                    )
+                                except Exception:
+                                    pass
+                                if host_refusal_budget_exhausted(_host_target_refusals):
+                                    _refusal_why = _(
+                                        "Abandon : l'hôte a refusé deux fois "
+                                        "l'argument cible (contrat d'appel). "
+                                        "Corriger la stratégie ne change pas "
+                                        "le schéma attendu par l'hôte."
+                                    )
+                                    Logger.warning(f"[Solver:{self.id}] 🛑 {_refusal_why}")
+                                    self.context += _("\n[Abandon] {}.").format(_refusal_why)
+                                    try:
+                                        Logger.event(
+                                            "host_target_refusal_circuit_open",
+                                            solver_id=self.id,
+                                            count=_host_target_refusals,
+                                        )
+                                    except Exception:
+                                        pass
+                                    break
+
                 self.execution_tree.ended_at = time.time()
 
                 if success and final_result is not None:
@@ -1045,15 +1154,41 @@ class Solver(Supervisor, Entity):
         except Exception:
             pass
 
+    def _resolve_rejected_plan(self, proposed_plan: Optional[Plan]) -> Optional[Plan]:
+        """Plan à afficher dans le feedback de retry (F1).
+
+        `propose_plan` lève `ValueError` APRÈS avoir posé
+        `planner._last_proposed_plan`, donc la variable locale `proposed_plan`
+        du Solver reste `None` et le modèle lisait « Aucun plan généré ».
+        Le Planner remet ce champ à `None` en début de génération : aucun
+        risque de ressortir un plan périmé.
+        """
+        if proposed_plan is not None:
+            return proposed_plan
+        return getattr(getattr(self, "planner", None), "_last_proposed_plan", None)
+
+    def _build_plan_retry_feedback(self, error_msg: str, rejected_plan_summary: str) -> str:
+        """Bloc unique de feedback après rejet (F6) — une seule source."""
+        return (
+            _("\n[⚠️ REJET DU PLAN PRÉCÉDENT]\n")
+            + _("Le système a rejeté votre plan pour l'erreur suivante :\n{}\n").format(error_msg)
+            + _("Voici la structure de votre plan rejeté pour vous aider à identifier l'erreur :\n")
+            + rejected_plan_summary
+            + _("\nVeuillez corriger cette erreur dans votre nouveau plan.")
+        )
+
     def _summarize_plan(self, plan: Plan) -> str:
         """Génère un résumé concis d'un plan pour le feedback."""
-        lines = ["Structure du plan rejeté :"]
+        lines = [_("Structure du plan rejeté :")]
         for step in plan.steps:
+            _target = getattr(step, "output_target_name", None)
+            _target_txt = f", target={_target}" if _target else ""
             lines.append(
                 f"  - {step.id}: type={step.type.value}, "
                 f"output_var={step.output_variable_name or 'None'}, "
                 f"expected={step.expected_result}, "
                 f"tool={getattr(step, 'tool_name', 'None')}"
+                f"{_target_txt}"
             )
         used_vars = set()
         for step in plan.steps:
@@ -1061,7 +1196,11 @@ class Solver(Supervisor, Entity):
                 if field:
                     matches = re.findall(r'\$@_([a-zA-Z0-9_-]+)', field)
                     used_vars.update(matches)
-        lines.append(f"Variables utilisées : {', '.join(used_vars) if used_vars else 'aucune'}")
+        lines.append(
+            _("Variables utilisées : {}").format(
+                ", ".join(used_vars) if used_vars else _("aucune")
+            )
+        )
         return "\n".join(lines)
 
     def _format_similar_missions(self, similar: List[Dict]) -> str:
@@ -1468,6 +1607,17 @@ class Solver(Supervisor, Entity):
         sauf en strict où le silence du monde vaut refus.
         Retour (ok, raison).
         """
+        def _done(ok: bool, why: str = "") -> tuple:
+            """Mémorise le verdict pour le rapport final (F3)."""
+            try:
+                self.runtime_state.last_convergence_ok = bool(ok)
+                self.runtime_state.last_convergence_reason = str(why or "")
+            except Exception:
+                pass
+            return bool(ok), str(why or "")
+
+        _gaps: List[str] = []
+        _perc_proofs: List[str] = []
         try:
             from core.plan_models import ConvergenceDecision
             loader = get_prompt_loader()
@@ -1509,6 +1659,7 @@ class Solver(Supervisor, Entity):
                         continue
                     _line = f"[PERCEPTION {_vname}] {str(_v)[:200]}"
                     evidence_parts.append(_line)
+                    _perc_proofs.append(_line)
                     _budget -= len(_line)
             except Exception:
                 pass
@@ -1527,6 +1678,56 @@ class Solver(Supervisor, Entity):
                 )
             except Exception:
                 world_warnings = ""
+            try:
+                _store = getattr(self.runtime_state, "plan_warnings_by_solver", None)
+                if isinstance(_store, dict):
+                    _gaps = [
+                        str(g).strip()
+                        for g in (_store.get(self.id, None) or [])
+                        if str(g).strip()
+                    ]
+                plan_gaps = "\n".join(f"- {g}" for g in _gaps[:5])
+            except Exception:
+                plan_gaps = ""
+            # Sorties `any` non consommées : avertissement, jamais un échec.
+            try:
+                _exp_store = getattr(self.runtime_state, "expected_warnings_by_solver", None)
+                if isinstance(_exp_store, dict):
+                    _exp = [
+                        str(w).strip()
+                        for w in (_exp_store.get(self.id, None) or [])
+                        if str(w).strip()
+                    ]
+                else:
+                    _exp = []
+                expected_warnings = "\n".join(f"- {w}" for w in _exp[:5])
+            except Exception:
+                expected_warnings = ""
+            # Porte déterministe (F2) : lacunes acceptées + zéro perception
+            # non vide depuis l'acceptation du plan = refus AVANT le juge.
+            # Le LLM ignore ces lacunes de façon reproductible ; le trail de
+            # perception est remis à zéro à chaque `execute_plan`.
+            try:
+                _tm_gate = getattr(self.runtime_state, "tools_manager", None)
+                _perc_tools = set()
+                if _tm_gate is not None and hasattr(_tm_gate, "perception_tool_names"):
+                    _perc_tools = set(_tm_gate.perception_tool_names() or set())
+            except Exception:
+                _perc_tools = set()
+            _gap_refusal = gap_convergence_refusal(
+                _gaps, _perc_proofs, bool(_perc_tools)
+            )
+            if _gap_refusal:
+                Logger.warning(
+                    f"[Solver:{self.id}] ⛔ Convergence refusée sans LLM : "
+                    f"{len(_gaps)} lacune(s) non prouvée(s)."
+                )
+                return _done(False, _gap_refusal)
+            if _gaps and not _perc_tools:
+                Logger.warning(
+                    f"[Solver:{self.id}] Porte de lacunes désactivée : "
+                    "aucun outil de perception déclaré par l'hôte."
+                )
             evidence = "\n".join(p for p in evidence_parts if p)[:6000]
             try:
                 from core.alignment import plan_risk, risk_sentence
@@ -1551,7 +1752,7 @@ class Solver(Supervisor, Entity):
             except Exception:
                 _final_snapshot = ""
             if strict and not _final_snapshot.strip():
-                return False, _("Vérification STRICTE : monde frais muet après échecs — réponse finale refusée.")
+                return _done(False, _("Vérification STRICTE : monde frais muet après échecs — réponse finale refusée."))
             _final_desc, _final_expected = _pick_final_criteria(
                 self.goal, getattr(getattr(self, "current_attempt", None), "nodes", None))
             prompt = loader.load(
@@ -1564,6 +1765,8 @@ class Solver(Supervisor, Entity):
                 alignment_note=alignment_note,
                 world_snapshot=_final_snapshot,
                 world_warnings=world_warnings,
+                plan_gaps=plan_gaps,
+                expected_warnings=expected_warnings,
             )
             conv_llm = self.llm
             try:
@@ -1582,7 +1785,7 @@ class Solver(Supervisor, Entity):
                 mission_id=self.id,
             )
             if getattr(decision, "is_convergent", False):
-                return True, ""
+                return _done(True)
             _reason = str(getattr(decision, "reason", "") or _("But non atteint."))
             _node = _last_real_node(
                 getattr(getattr(self, "current_attempt", None), "nodes", None))
@@ -1592,13 +1795,16 @@ class Solver(Supervisor, Entity):
                 _target = (f"{_sid} ({_sdesc})".strip() if _sid else _sdesc)
                 if _target:
                     _reason += _(
-                        " Étape probablement en cause : {target}. "
-                        "Change l'approche de cette étape, pas seulement l'attente."
+                        " Étape possiblement concernée : {target}. "
+                        "Piste à évaluer : faire évoluer l'approche de cette étape, "
+                        "ou ajuster l'attente si le délai semble en cause. "
+                        "Cette étape n'est pas nécessairement la cause ; "
+                        "remonte aussi le plan si l'indice est ambigu."
                     ).format(target=_target)
-            return False, _reason
+            return _done(False, _reason)
         except Exception as e:
             Logger.warning(f"[Solver:{self.id}] Vérification finale impossible ({e}) — mission conservée.")
-            return True, ""
+            return _done(True, "")
 
     async def _handle_skill_lifecycle_post_execution(self, is_success: bool):
         """

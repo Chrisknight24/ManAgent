@@ -12,6 +12,7 @@ import json
 import os
 import array
 import math
+import uuid
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from utils.logger import Logger
@@ -132,7 +133,12 @@ class LessonStore:
                         polarity TEXT DEFAULT 'avoid',
                         embedding BLOB,
                         last_verified_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        uid TEXT,
+                        origin TEXT DEFAULT 'generated',
+                        revision INTEGER DEFAULT 1,
+                        locked BOOLEAN DEFAULT 0,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                     )
                 ''')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_lessons_scope ON lessons(scope)')
@@ -147,6 +153,28 @@ class LessonStore:
                 self._ensure_column(conn, "lessons", "conflict_resolution", "TEXT")
                 self._ensure_column(conn, "lessons", "embedding", "BLOB")
                 self._ensure_column(conn, "lessons", "embedding_model", "TEXT")
+                self._ensure_column(conn, "lessons", "uid", "TEXT")
+                self._ensure_column(conn, "lessons", "origin", "TEXT DEFAULT 'generated'")
+                self._ensure_column(conn, "lessons", "revision", "INTEGER DEFAULT 1")
+                self._ensure_column(conn, "lessons", "locked", "BOOLEAN DEFAULT 0")
+                self._ensure_column(conn, "lessons", "updated_at", "DATETIME")
+                try:
+                    rows = cursor.execute(
+                        "SELECT id FROM lessons WHERE uid IS NULL OR uid = ''"
+                    ).fetchall()
+                    for (lesson_id,) in rows:
+                        cursor.execute(
+                            "UPDATE lessons SET uid = ? WHERE id = ?",
+                            (uuid.uuid4().hex, lesson_id),
+                        )
+                    cursor.execute(
+                        "UPDATE lessons SET updated_at = COALESCE(updated_at, created_at, CURRENT_TIMESTAMP)"
+                    )
+                    cursor.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS idx_lessons_uid ON lessons(uid)"
+                    )
+                except Exception as e:
+                    Logger.warning(f"[LessonStore] Migration uid/updated_at partielle : {e}")
                 # Lignes historiques sans modèle = espace MiniLM d'origine.
                 try:
                     from embeddings.catalog import HISTORIC_MODEL_ID
@@ -236,11 +264,11 @@ class LessonStore:
                         new_conf = min(0.95, (new_ev + 1) / (new_ev + 2))
                         cursor.execute(
                             "UPDATE lessons SET evidence_count = ?, confidence = ?, "
-                            "keywords_json = ?, source_episodes_json = ?, last_verified_at = ? "
-                            "WHERE id = ?",
+                            "keywords_json = ?, source_episodes_json = ?, last_verified_at = ?, "
+                            "updated_at = ? WHERE id = ?",
                             (new_ev, new_conf, json.dumps(merged_kw, ensure_ascii=False),
                              json.dumps(sources[-self.MAX_SOURCE_EPISODES:], ensure_ascii=False),
-                             datetime.now().isoformat(), lid),
+                             datetime.now().isoformat(), datetime.now().isoformat(), lid),
                         )
                         conn.commit()
                         Logger.debug(f"[LessonStore] Leçon renforcée (id={lid}, preuves={new_ev}, conf={new_conf:.2f}).")
@@ -259,8 +287,9 @@ class LessonStore:
                             conf_o = (ev_o + 1) / (ev_o + contra_o + 2)
                             cursor.execute(
                                 "UPDATE lessons SET contradiction_count = ?, confidence = ?, "
-                                "last_verified_at = ? WHERE id = ?",
-                                (contra_o, conf_o, datetime.now().isoformat(), oid),
+                                "last_verified_at = ?, updated_at = ? WHERE id = ?",
+                                (contra_o, conf_o, datetime.now().isoformat(),
+                                 datetime.now().isoformat(), oid),
                             )
                             Logger.debug(f"[LessonStore] Contradiction enregistrée (id={oid}, conf={conf_o:.2f}).")
                     except Exception:
@@ -284,9 +313,9 @@ class LessonStore:
                             merged = sorted(set(keywords))
                         cursor.execute(
                             "UPDATE lessons SET evidence_count = ?, keywords_json = ?, "
-                            "last_verified_at = ? WHERE id = ?",
+                            "last_verified_at = ?, updated_at = ? WHERE id = ?",
                             (int(ev or 1) + 1, json.dumps(merged, ensure_ascii=False),
-                             datetime.now().isoformat(), lid),
+                             datetime.now().isoformat(), datetime.now().isoformat(), lid),
                         )
                         conn.commit()
                         Logger.debug(f"[LessonStore] Fait existant renforcé (id={lid}), pas de doublon.")
@@ -298,13 +327,14 @@ class LessonStore:
                         entity_type, scope, recommendation, environment,
                         confidence, evidence_count, keywords_json,
                         source_episodes_json, polarity,
-                        is_consolidated, is_active, embedding, embedding_model
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)
+                        is_consolidated, is_active, embedding, embedding_model,
+                        uid, origin, revision, locked, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?, 'generated', 1, 0, ?)
                 ''', (entity_type, scope, recommendation, environment,
                     initial_confidence, 1,
                     json.dumps(sorted(set(keywords)), ensure_ascii=False),
                     json.dumps(sources, ensure_ascii=False),
-                    polarity, blob, model))
+                    polarity, blob, model, uuid.uuid4().hex, datetime.now().isoformat()))
                 
                 lesson_id = cursor.lastrowid
                 if blob:
@@ -400,7 +430,7 @@ class LessonStore:
                     WHERE is_consolidated = 0
                     AND is_active = 1
                     GROUP BY entity_type, scope, environment
-                    HAVING COUNT(*) >= ?
+                    HAVING SUM(COALESCE(evidence_count, 1)) >= ?
                 ''', (ENTITY_LEARNER_MIN_EVIDENCE,))
                 return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
@@ -484,8 +514,8 @@ class LessonStore:
                         consolidated_from_id, recommendation, confidence,
                         evidence_count, contradiction_count, keywords_json,
                         source_episodes_json, polarity, conflict_resolution, embedding,
-                        embedding_model
-                    ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        embedding_model, uid, origin, revision, locked, updated_at
+                    ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'generated', 1, 0, ?)
                 ''', (
                     entity_type, scope, environment,
                     from_lesson_id, recommendation, confidence,
@@ -493,7 +523,8 @@ class LessonStore:
                     json.dumps(keywords, ensure_ascii=False),
                     json.dumps(source_episodes, ensure_ascii=False),
                     polarity, conflict_resolution, blob,
-                    embedding_model or self.embedding_model
+                    embedding_model or self.embedding_model,
+                    uuid.uuid4().hex, datetime.now().isoformat()
                 ))
                 new_id = cursor.lastrowid
                 if blob:
@@ -568,9 +599,10 @@ class LessonStore:
                         FROM lessons
                         WHERE is_active = 1
                           AND (entity_type IN ({placeholders}) OR scope = 'semantic_fact')
+                          AND environment = ?
                           {_model_filter}
                     """
-                    cursor.execute(sql, expanded_entities + _model_params)
+                    cursor.execute(sql, expanded_entities + [environment] + _model_params)
                 else:
                     sql = f"""
                         SELECT id, entity_type, scope, recommendation, confidence,
@@ -580,9 +612,10 @@ class LessonStore:
                         WHERE is_active = 1
                           AND entity_type IN ({placeholders})
                           AND (scope IS NULL OR scope != 'semantic_fact')
+                          AND environment = ?
                           {_model_filter}
                     """
-                    cursor.execute(sql, expanded_entities + _model_params)
+                    cursor.execute(sql, expanded_entities + [environment] + _model_params)
                     
                 rows = cursor.fetchall()
                 
@@ -702,6 +735,15 @@ class LessonStore:
 
     def get_lessons_count(self) -> int:
         """Retourne le nombre total de règles/leçons apprises."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('SELECT COUNT(*) FROM lessons')
+                row = cursor.fetchone()
+                return int(row[0]) if row else 0
+        except Exception as e:
+            Logger.error(f"[LessonStore] Erreur comptage leçons : {e}")
+            return 0
 
     def mark_group_consolidated(self, entity_type: str, scope: str, environment: str) -> int:
         """Marque les brutes d'un groupe (classées, jamais effacées).
@@ -722,15 +764,227 @@ class LessonStore:
         except Exception as e:
             Logger.error(f"[LessonStore] Erreur mark_group_consolidated : {e}")
             return 0
+
+    @staticmethod
+    def _lesson_from_row(row: sqlite3.Row) -> Dict[str, Any]:
+        d = dict(row)
+        for key in ("keywords_json", "source_episodes_json"):
+            raw = d.pop(key, None)
+            target = "keywords" if key == "keywords_json" else "source_episodes"
+            try:
+                d[target] = json.loads(raw or "[]")
+            except Exception:
+                d[target] = []
+        d["locked"] = bool(d.get("locked"))
+        d["is_active"] = bool(d.get("is_active"))
+        d["is_consolidated"] = bool(d.get("is_consolidated"))
+        d["revision"] = int(d.get("revision") or 1)
+        return d
+
+    def list_lessons(self, *, environment: Optional[str] = None,
+                     entity_type: Optional[str] = None,
+                     scope: Optional[str] = None,
+                     polarity: Optional[str] = None,
+                     include_inactive: bool = False,
+                     limit: int = 200, offset: int = 0) -> List[Dict[str, Any]]:
+        try:
+            clauses, params = [], []
+            if environment is not None:
+                clauses.append("environment = ?")
+                params.append(environment)
+            if entity_type is not None:
+                clauses.append("entity_type = ?")
+                params.append(entity_type)
+            if scope is not None:
+                clauses.append("scope = ?")
+                params.append(scope)
+            if polarity is not None:
+                clauses.append("polarity = ?")
+                params.append(polarity)
+            if not include_inactive:
+                clauses.append("is_active = 1")
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            limit = max(1, min(int(limit or 200), 1000))
+            offset = max(0, int(offset or 0))
+            with self._get_connection() as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"SELECT * FROM lessons {where} "
+                    "ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
+                    (*params, limit, offset),
+                )
+                return [self._lesson_from_row(row) for row in cursor.fetchall()]
+        except Exception as e:
+            Logger.error(f"[LessonStore] Erreur list_lessons : {e}")
+            return []
+
+    def get_lesson(self, uid_or_id: Any) -> Optional[Dict[str, Any]]:
+        try:
+            with self._get_connection() as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                row = cursor.execute(
+                    "SELECT * FROM lessons WHERE uid = ?", (str(uid_or_id),)
+                ).fetchone()
+                if row is None:
+                    try:
+                        row = cursor.execute(
+                            "SELECT * FROM lessons WHERE id = ?", (int(uid_or_id),)
+                        ).fetchone()
+                    except (TypeError, ValueError):
+                        row = None
+                return self._lesson_from_row(row) if row else None
+        except Exception as e:
+            Logger.error(f"[LessonStore] Erreur get_lesson : {e}")
+            return None
+
+    def create_lesson(self, *, entity_type: str, scope: str, recommendation: str,
+                      environment: str = "simulated", polarity: str = "avoid",
+                      keywords: Optional[List[str]] = None, confidence: float = 2 / 3,
+                      evidence_count: int = 1, origin: str = "manual",
+                      locked: bool = False,
+                      embedding: Optional[List[float]] = None,
+                      embedding_model: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        blob = self._serialize_embedding(embedding) if embedding else None
+        now = datetime.now().isoformat()
+        try:
+            with self._get_connection() as conn:
+                self._ensure_extension_loaded(conn)
+                cursor = conn.cursor()
+                uid = uuid.uuid4().hex
+                cursor.execute('''
+                    INSERT INTO lessons (
+                        entity_type, scope, recommendation, environment,
+                        confidence, evidence_count, keywords_json,
+                        source_episodes_json, polarity, is_consolidated,
+                        is_active, embedding, embedding_model, uid, origin,
+                        revision, locked, updated_at, created_at, last_verified_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, 0, 1, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+                ''', (
+                    entity_type, scope, recommendation, environment,
+                    max(0.0, min(1.0, float(confidence))), max(1, int(evidence_count)),
+                    json.dumps(sorted(set(keywords or [])), ensure_ascii=False),
+                    polarity, blob, embedding_model or self.embedding_model,
+                    uid, origin, 1 if locked else 0, now, now, now,
+                ))
+                lesson_id = cursor.lastrowid
+                if blob:
+                    cursor.execute(
+                        f"INSERT INTO {self._vec_table}(rowid, embedding) VALUES (?, ?)",
+                        (lesson_id, blob),
+                    )
+                conn.commit()
+            return self.get_lesson(uid)
+        except Exception as e:
+            Logger.error(f"[LessonStore] Erreur create_lesson : {e}")
+            return None
+
+    def update_lesson(self, uid: str, updates: Dict[str, Any], *,
+                      expected_revision: Optional[int] = None,
+                      force: bool = False) -> Optional[Dict[str, Any]]:
+        current = self.get_lesson(uid)
+        if current is None:
+            return None
+        if current.get("locked") and not force:
+            raise PermissionError("leçon verrouillée")
+        if expected_revision is not None and int(current.get("revision") or 1) != int(expected_revision):
+            raise ValueError("révision obsolète")
+
+        allowed = {
+            "entity_type", "scope", "recommendation", "environment", "polarity",
+            "confidence", "evidence_count", "origin", "locked", "is_active",
+            "is_consolidated", "conflict_resolution",
+        }
+        sets, params = [], []
+        for key in allowed:
+            if key not in updates or updates[key] is None:
+                continue
+            value = updates[key]
+            if key in ("locked", "is_active", "is_consolidated"):
+                value = 1 if value else 0
+            elif key in ("confidence",):
+                value = max(0.0, min(1.0, float(value)))
+            elif key in ("evidence_count",):
+                value = max(0, int(value))
+            sets.append(f"{key} = ?")
+            params.append(value)
+
+        if "keywords" in updates:
+            sets.append("keywords_json = ?")
+            params.append(json.dumps(sorted(set(updates.get("keywords") or [])), ensure_ascii=False))
+        if "source_episodes" in updates:
+            sets.append("source_episodes_json = ?")
+            params.append(json.dumps(list(updates.get("source_episodes") or []), ensure_ascii=False))
+
+        embedding = updates.get("embedding")
+        if embedding is not None:
+            blob = self._serialize_embedding(embedding)
+            sets.extend(["embedding = ?", "embedding_model = ?"])
+            params.extend([blob, updates.get("embedding_model") or self.embedding_model])
+        elif "recommendation" in updates:
+            sets.extend(["embedding = NULL", "embedding_model = NULL"])
+            blob = None
+
+        sets.extend(["revision = revision + 1", "updated_at = ?", "last_verified_at = ?"])
+        now = datetime.now().isoformat()
+        params.extend([now, now, str(uid)])
+        try:
+            with self._get_connection() as conn:
+                self._ensure_extension_loaded(conn)
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"UPDATE lessons SET {', '.join(sets)} WHERE uid = ?", tuple(params)
+                )
+                if embedding is not None:
+                    cursor.execute(
+                        f"INSERT OR REPLACE INTO {self._vec_table}(rowid, embedding) "
+                        "SELECT id, ? FROM lessons WHERE uid = ?",
+                        (blob, str(uid)),
+                    )
+                elif "recommendation" in updates:
+                    try:
+                        cursor.execute(
+                            f"DELETE FROM {self._vec_table} WHERE rowid IN "
+                            "(SELECT id FROM lessons WHERE uid = ?)", (str(uid),)
+                        )
+                    except Exception:
+                        pass
+                conn.commit()
+            return self.get_lesson(uid)
+        except Exception as e:
+            Logger.error(f"[LessonStore] Erreur update_lesson : {e}")
+            return None
+
+    def delete_lesson(self, uid: str, *, hard: bool = False, force: bool = False) -> bool:
+        current = self.get_lesson(uid)
+        if current is None:
+            return False
+        if current.get("locked") and not force:
+            raise PermissionError("leçon verrouillée")
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute('SELECT COUNT(*) FROM lessons')
-                row = cursor.fetchone()
-                return int(row[0]) if row else 0
+                if hard:
+                    try:
+                        cursor.execute(
+                            f"DELETE FROM {self._vec_table} WHERE rowid IN "
+                            "(SELECT id FROM lessons WHERE uid = ?)", (str(uid),)
+                        )
+                    except Exception:
+                        pass
+                    cursor.execute("DELETE FROM lessons WHERE uid = ?", (str(uid),))
+                else:
+                    cursor.execute(
+                        "UPDATE lessons SET is_active = 0, revision = revision + 1, "
+                        "updated_at = ? WHERE uid = ?",
+                        (datetime.now().isoformat(), str(uid)),
+                    )
+                conn.commit()
+            return True
         except Exception as e:
-            Logger.error(f"[LessonStore] Erreur comptage leçons : {e}")
-            return 0
+            Logger.error(f"[LessonStore] Erreur delete_lesson : {e}")
+            return False
 
     def get_all_lessons(self) -> List[Dict[str, Any]]:
         """Retourne toutes les leçons actives sans blob d'embedding pour export."""
@@ -739,24 +993,14 @@ class LessonStore:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT id, entity_type, scope, recommendation, confidence, 
-                           evidence_count, environment, contradiction_count, is_active, 
-                           keywords_json, source_episodes_json, is_consolidated, polarity
+                    SELECT id, uid, entity_type, scope, recommendation, confidence,
+                           evidence_count, environment, contradiction_count, is_active,
+                           keywords_json, source_episodes_json, is_consolidated, polarity,
+                           origin, revision, locked, updated_at, created_at
                     FROM lessons
                 ''')
                 rows = cursor.fetchall()
-                results = []
-                for row in rows:
-                    d = dict(row)
-                    try:
-                        d["keywords"] = json.loads(d.pop("keywords_json") or "[]")
-                    except Exception:
-                        d["keywords"] = []
-                    try:
-                        d["source_episodes"] = json.loads(d.pop("source_episodes_json") or "[]")
-                    except Exception:
-                        d["source_episodes"] = []
-                    results.append(d)
+                results = [self._lesson_from_row(row) for row in rows]
                 return results
         except Exception as e:
             Logger.error(f"[LessonStore] Erreur get_all_lessons : {e}")

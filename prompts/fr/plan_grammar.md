@@ -12,6 +12,8 @@ Chaque étape N produit automatiquement deux canaux :
 - Recopie EXACTEMENT les noms ; n'invente jamais de suffixe.
 {% if targets_enabled %}
 - `output_target_name` nomme une cible produite par l'étape (sans préfixe `data_`/`bool_`). Tu la réutilises comme `$@_<nom>` uniquement dans un argument consommateur de cible.
+- Toute action qui consomme une cible doit recevoir un nom local produit avant elle ; un paramètre cible requis absent invalide le plan.
+- Pour créer une cible, utilise un outil dont le contrat déclare `produces` ; un outil sans `produces` ne peut pas porter `output_target_name`.
 - Jamais de référence brute, d'identifiant hôte ni de clé inventée.
 {% endif %}
 
@@ -30,10 +32,7 @@ Chaque étape N produit automatiquement deux canaux :
 ### Analyser une donnée ou une image
 `llm_analyze_data` ne traite QU'UNE variable déjà produite (`source: "$@_data_xxx"`). Il n'existe pas de source magique (`current_screen`). Pour du visuel : d'abord un outil de capture → `output_variable_name`, puis passe `$@_data_...` à `llm_analyze_data` (image déclarée : `$@_data_<étape>_<champ>`). Jamais d'`abstract_task` pour inspecter une variable : `tool_call` direct.
 
-### Checklist (avant de répondre)
-- [ ] Chaque `tool_call` a un `tool_name` exact et non vide.
-- [ ] Chaque `$@_...` vient d'une étape antérieure (ou du registre) et est recopié exactement.
-- [ ] Chaque `execute_if` suit une des deux formes.
-- [ ] Pas d'`abstract_task` pour inspecter une variable.
-- [ ] Aucun `output_variable_name` dans `tool_args_json`.
-- [ ] Dernière étape = `direct_answer`.
+{# P-D (GO 03/11) : la checklist finale vit désormais dans l'include
+   séparé `plan_checklist.md` (anti-doublon — le prompt planner a sa
+   CHECKLIST dédiée et ne charge PAS cet include ;
+   skill_repair / skill_synthesis l'incluent explicitement). #}

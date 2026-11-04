@@ -60,6 +60,10 @@ class ProviderServiceUnavailableError(ProviderError):
     """Levée en cas d'indisponibilité du service distant (503 / 500)."""
     pass
 
+class ProviderNetworkError(ProviderError):
+    """Levée quand le fournisseur est injoignable (DNS, connexion, TLS)."""
+    pass
+
 class ProviderModelNotFoundError(ProviderError):
     """Levée quand le modèle demandé n'existe pas ou n'est pas accessible avec les clés fournies."""
     pass
