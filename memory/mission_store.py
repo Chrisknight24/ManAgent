@@ -2,13 +2,27 @@
 import sqlite3
 import json
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from utils.logger import Logger
 from memory.session_memory import MissionCache
 
 
 import os
 import threading
+
+
+def utc_naive(value: Optional[datetime]) -> Optional[datetime]:
+    """Horodatage UTC naif, convention unique de `memory.db`.
+
+    `created_at` est ecrit par SQLite (`CURRENT_TIMESTAMP`, UTC) tandis que
+    `finished_at` etait ecrit en heure locale naive : les deux colonnes ne
+    parlaient pas le meme fuseau. On stocke desormais UTC partout ; le
+    rapport d'observabilite convertit en heure locale a l'affichage.
+    """
+    if value is None:
+        return None
+    # Naif = heure locale (ancienne convention) ; aware = on respecte le fuseau.
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def _safe_json_default(obj: Any) -> Any:
@@ -98,7 +112,10 @@ class MissionStore:
                 ensure_ascii=False,
                 default=_safe_json_default
             )
-            finished_at_iso = mission_cache.finished_at.isoformat() if mission_cache.finished_at else None
+            _finished_utc = utc_naive(mission_cache.finished_at)
+            finished_at_iso = (
+                _finished_utc.isoformat(sep=" ") if _finished_utc else None
+            )
             summary = mission_cache.summary or ""
             profile_id = getattr(mission_cache, "profile_id", None)
 

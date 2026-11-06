@@ -21,6 +21,12 @@ MODES = frozenset({"single", "candidates"})
 FIELD_ROLES = frozenset(
     {"ref", "description", "scope", "correlation_id", "generation"}
 )
+# Vocabulaire du cerveau, jamais celui d'un hote :
+# - `local` designe une cle du registre de cibles (nom local) ;
+# - tout autre `kind` de sujet/ancre est declare par l'hote et transmis tel
+#   quel. Aucun nom de type de cible (cell, grid, file, key, joint...) n'est
+#   code en dur ici.
+LOCAL_SUBJECT_KIND = "local"
 
 _SCOPE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
 _PATH_RE = re.compile(r"^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$")
@@ -43,6 +49,9 @@ class ProducerSpec:
     mode: str
     scope: Optional[str] = None
     fields: Dict[str, str] = field(default_factory=dict)
+    # Champs libres exposes au selecteur (role, rect, cells, interactive...).
+    # Declaration explicite : `fields.attributes: {nom: chemin}`.
+    attributes: Dict[str, str] = field(default_factory=dict)
     usable_as: Tuple[str, ...] = ()
 
     @property
@@ -51,10 +60,96 @@ class ProducerSpec:
 
 
 @dataclass(frozen=True)
+class ViewSpec:
+    """Vue nommee declaree par l'hote (`disclosure.views[]`).
+
+    `name` et `path` sont libres : grille, liste de fichiers, symboles,
+    etat de capteurs... Le cerveau affiche la vue au selecteur sans en
+    connaitre la semantique.
+    """
+
+    name: str
+    path: str
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class AnchorSpec:
+    """Ancre brute declaree par l'hote (`disclosure.anchors[]`).
+
+    `kind` est un vocabulaire HOTE (cell, file, key, joint, symbol...).
+    `param` est le parametre consommateur qui recoit la valeur brute.
+    """
+
+    kind: str
+    param: str
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class ProbeSubjectSpec:
+    """Sujet d'une sonde de ciblage (jamais un nom d'outil hote).
+
+    `kind == "local"` : sujet = nom local du registre. Tout autre `kind`
+    renvoie a une ancre declaree par l'hote (`disclosure.anchors`).
+    """
+
+    kind: str
+    param: str
+    scheme: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ProbeSpec:
+    """Recette d'inspection declaree par l'hote dans `disclosure.probes`."""
+
+    id: str
+    kind: str
+    description: str = ""
+    tool: Optional[str] = None
+    args: Dict[str, Any] = field(default_factory=dict)
+    hint_param: Optional[str] = None
+    subject: Optional[ProbeSubjectSpec] = None
+    produces: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class DisclosureSpec:
+    """Capacite d'inspection progressive declaree par l'hote."""
+
+    version: int
+    views: Tuple[ViewSpec, ...] = ()
+    anchors: Tuple[AnchorSpec, ...] = ()
+    probes: Tuple[ProbeSpec, ...] = ()
+
+    def probe(self, probe_id: str) -> Optional[ProbeSpec]:
+        for probe in self.probes:
+            if probe.id == probe_id:
+                return probe
+        return None
+
+    def view(self, name: str) -> Optional[ViewSpec]:
+        for view in self.views:
+            if view.name == name:
+                return view
+        return None
+
+    def anchor(self, kind: str) -> Optional[AnchorSpec]:
+        for anchor in self.anchors:
+            if anchor.kind == kind:
+                return anchor
+        return None
+
+    def anchor_kinds(self) -> Tuple[str, ...]:
+        return tuple(anchor.kind for anchor in self.anchors)
+
+
+@dataclass(frozen=True)
 class TargetContract:
     version: int
     consumers: Tuple[ConsumerSpec, ...] = ()
     producers: Tuple[ProducerSpec, ...] = ()
+    disclosure: Optional[DisclosureSpec] = None
     tool_name: str = ""
 
     @property
@@ -165,7 +260,17 @@ def resolve_consumer_arguments(
         if param not in resolved:
             continue
         if consumer.raw_allow:
-            continue
+            # `raw: allow` = le parametre accepte AUSSI un litteral hote
+            # (ex. opt-out global `none`). Un nom local CONNU reste resolu ;
+            # un litteral inconnu est transmis tel quel. Aucune valeur
+            # concrete n'est codee en dur ici : l'hote reste l'autorite sur
+            # son propre vocabulaire.
+            if (
+                registry is None
+                or not isinstance(resolved[param], str)
+                or registry.get(resolved[param]) is None
+            ):
+                continue
         if display is None:
             display = dict(arguments)
         value = resolved[param]
@@ -242,7 +347,7 @@ def parse_target_contract(
         error("target_contract must be an object")
         return TargetContractResult(errors=errors, warnings=warnings)
 
-    unknown_keys = set(raw) - {"version", "consumes", "produces"}
+    unknown_keys = set(raw) - {"version", "consumes", "produces", "disclosure"}
     for key in sorted(unknown_keys):
         warning(f"unknown target_contract key: {key}")
 
@@ -293,6 +398,15 @@ def parse_target_contract(
     if version == SUPPORTED_VERSION and not consumers and not producers:
         warning("contract has no consumers or producers; it stays inert")
 
+    disclosure = None
+    disclosure_raw = raw.get("disclosure")
+    if disclosure_raw is not None:
+        disclosure = _parse_disclosure(
+            disclosure_raw,
+            error=error,
+            warning=warning,
+        )
+
     if errors:
         return TargetContractResult(errors=errors, warnings=warnings)
 
@@ -300,9 +414,271 @@ def parse_target_contract(
         version=SUPPORTED_VERSION,
         consumers=tuple(consumers),
         producers=tuple(producers),
+        disclosure=disclosure,
         tool_name=tool_name,
     )
     return TargetContractResult(contract=contract, warnings=warnings)
+
+
+def _parse_disclosure(raw: Any, *, error, warning) -> Optional[DisclosureSpec]:
+    """Parse le bloc optionnel `disclosure` (version 1).
+
+    Le cerveau ne connait aucun nom d'outil/champ hote : tout est declare ici.
+    Un bloc invalide est un diagnostic, jamais une exception.
+
+    Forme generique :
+      - `views`: vues nommees que le selecteur peut lire ;
+      - `anchors`: types d'ancre brute que l'hote accepte ;
+      - `probes`: inspections bornees a executer via les outils declares.
+    """
+    if not isinstance(raw, dict):
+        error("disclosure must be an object")
+        return None
+
+    unknown = set(raw) - {"version", "views", "anchors", "probes"}
+    for key in sorted(unknown):
+        warning(f"disclosure has unknown key: {key}")
+
+    version = raw.get("version", 1)
+    if isinstance(version, bool) or not isinstance(version, int) or version != 1:
+        error("disclosure.version must be 1")
+        return None
+
+    views = _parse_views(raw.get("views"), error=error, warning=warning)
+    if views is None:
+        return None
+
+    anchors = _parse_anchors(raw.get("anchors"), error=error, warning=warning)
+    if anchors is None:
+        return None
+
+    probes_raw = raw.get("probes", [])
+    if probes_raw is None:
+        probes_raw = []
+    if not isinstance(probes_raw, list):
+        error("disclosure.probes must be a list")
+        return None
+
+    probes: List[ProbeSpec] = []
+    seen_ids: set = set()
+    for index, item in enumerate(probes_raw):
+        probe = _parse_probe(
+            item, index=index, error=error, warning=warning, seen_ids=seen_ids
+        )
+        if probe is not None:
+            probes.append(probe)
+
+    if not probes:
+        warning("disclosure declares no probe; inspections stay unavailable")
+
+    return DisclosureSpec(
+        version=1,
+        views=tuple(views),
+        anchors=tuple(anchors),
+        probes=tuple(probes),
+    )
+
+
+def _parse_views(raw: Any, *, error, warning) -> Optional[List[ViewSpec]]:
+    if raw is None:
+        return []
+    views: List[ViewSpec] = []
+    if isinstance(raw, dict):
+        items = []
+        for name, path in raw.items():
+            items.append({"name": name, "path": path})
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        error("disclosure.views must be an object or a list")
+        return None
+
+    seen: set = set()
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            error(f"disclosure.views[{index}] must be an object")
+            return None
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip():
+            error(f"disclosure.views[{index}].name is required")
+            return None
+        name = name.strip()
+        if name in seen:
+            error(f"disclosure.views[{index}].name is duplicated: {name!r}")
+            return None
+        seen.add(name)
+        path = item.get("path")
+        if not isinstance(path, str) or not _PATH_RE.fullmatch(path.strip()):
+            error(f"disclosure.views[{index}].path is invalid: {path!r}")
+            return None
+        description = item.get("description", "")
+        if description is None:
+            description = ""
+        if not isinstance(description, str):
+            error(f"disclosure.views[{index}].description must be a string")
+            return None
+        views.append(
+            ViewSpec(name=name, path=path.strip(), description=description)
+        )
+    return views
+
+
+def _parse_anchors(raw: Any, *, error, warning) -> Optional[List[AnchorSpec]]:
+    if raw is None:
+        return []
+    anchors: List[AnchorSpec] = []
+    if isinstance(raw, dict):
+        items = []
+        for kind, param in raw.items():
+            items.append({"kind": kind, "param": param})
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        error("disclosure.anchors must be an object or a list")
+        return None
+
+    seen: set = set()
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            error(f"disclosure.anchors[{index}] must be an object")
+            return None
+        kind = item.get("kind")
+        if not isinstance(kind, str) or not kind.strip():
+            error(f"disclosure.anchors[{index}].kind is required")
+            return None
+        kind = kind.strip()
+        if kind in seen:
+            error(f"disclosure.anchors[{index}].kind is duplicated: {kind!r}")
+            return None
+        seen.add(kind)
+        param = item.get("param")
+        if not isinstance(param, str) or not param.strip():
+            error(f"disclosure.anchors[{index}].param is required")
+            return None
+        description = item.get("description", "")
+        if description is None:
+            description = ""
+        if not isinstance(description, str):
+            error(f"disclosure.anchors[{index}].description must be a string")
+            return None
+        anchors.append(
+            AnchorSpec(
+                kind=kind,
+                param=param.strip(),
+                description=description,
+            )
+        )
+    return anchors
+
+
+def _parse_probe(item: Any, *, index: int, error, warning, seen_ids: set) -> Optional[ProbeSpec]:
+    if not isinstance(item, dict):
+        error(f"disclosure.probes[{index}] must be an object")
+        return None
+
+    unknown = set(item) - {
+        "id", "kind", "description", "tool", "args", "hint_param",
+        "subject", "produces",
+    }
+    for key in sorted(unknown):
+        warning(f"disclosure.probes[{index}] has unknown key: {key}")
+
+    probe_id = item.get("id")
+    if not isinstance(probe_id, str) or not probe_id.strip():
+        error(f"disclosure.probes[{index}].id is required")
+        return None
+    probe_id = probe_id.strip()
+    if probe_id in seen_ids:
+        error(f"disclosure.probes[{index}].id is duplicated: {probe_id!r}")
+        return None
+    seen_ids.add(probe_id)
+
+    kind = item.get("kind", "inspect")
+    if not isinstance(kind, str) or not kind.strip():
+        error(f"disclosure.probes[{index}].kind must be a non-empty string")
+        return None
+    # `kind` est un vocabulaire HOTE (widen, zoom, read_file, ...) : le cerveau
+    # ne lui donne aucune semantique et ne le filtre pas.
+    kind = kind.strip()
+
+    description = item.get("description", "")
+    if description is None:
+        description = ""
+    if not isinstance(description, str):
+        error(f"disclosure.probes[{index}].description must be a string")
+        return None
+
+    tool = item.get("tool")
+    if tool is not None:
+        if not isinstance(tool, str) or not tool.strip():
+            error(f"disclosure.probes[{index}].tool is invalid")
+            return None
+        tool = tool.strip()
+
+    args = item.get("args", {})
+    if args is None:
+        args = {}
+    if not isinstance(args, dict):
+        error(f"disclosure.probes[{index}].args must be an object")
+        return None
+
+    hint_param = item.get("hint_param")
+    if hint_param is not None:
+        if not isinstance(hint_param, str) or not hint_param.strip():
+            error(f"disclosure.probes[{index}].hint_param is invalid")
+            return None
+        hint_param = hint_param.strip()
+
+    subject = None
+    subject_raw = item.get("subject")
+    if subject_raw is not None:
+        if not isinstance(subject_raw, dict):
+            error(f"disclosure.probes[{index}].subject must be an object")
+            return None
+        subject_kind = subject_raw.get("kind")
+        if not isinstance(subject_kind, str) or not subject_kind.strip():
+            error(f"disclosure.probes[{index}].subject.kind is required")
+            return None
+        subject_kind = subject_kind.strip()
+        subject_param = subject_raw.get("param")
+        if not isinstance(subject_param, str) or not subject_param.strip():
+            error(f"disclosure.probes[{index}].subject.param is required")
+            return None
+        scheme = subject_raw.get("scheme")
+        if scheme is not None and (
+            not isinstance(scheme, str) or not scheme.strip()
+        ):
+            error(f"disclosure.probes[{index}].subject.scheme is invalid")
+            return None
+        subject = ProbeSubjectSpec(
+            kind=subject_kind,
+            param=subject_param.strip(),
+            scheme=scheme.strip() if isinstance(scheme, str) else None,
+        )
+
+    produces_raw = item.get("produces", [])
+    if produces_raw is None:
+        produces_raw = []
+    if not isinstance(produces_raw, list):
+        error(f"disclosure.probes[{index}].produces must be a list")
+        return None
+    produces: List[str] = []
+    for value in produces_raw:
+        if not isinstance(value, str) or not value.strip():
+            error(f"disclosure.probes[{index}].produces has an invalid value")
+            return None
+        produces.append(value.strip())
+
+    return ProbeSpec(
+        id=probe_id,
+        kind=kind,
+        description=description,
+        tool=tool,
+        args=dict(args),
+        hint_param=hint_param,
+        subject=subject,
+        produces=tuple(produces),
+    )
 
 
 def _valid_scope(value: Any) -> bool:
@@ -442,7 +818,28 @@ def _parse_producer(
         return None
 
     cleaned_fields: Dict[str, str] = {}
+    cleaned_attributes: Dict[str, str] = {}
     for role, field_name in fields.items():
+        if role == "attributes":
+            # Champs libres exposes au selecteur : {nom: chemin.de.lecture}.
+            if not isinstance(field_name, dict):
+                error(f"produces[{index}].fields.attributes must be an object")
+                continue
+            for attr_name, attr_path in field_name.items():
+                if not isinstance(attr_name, str) or not attr_name.strip():
+                    error(f"produces[{index}].fields.attributes has an invalid name")
+                    continue
+                if (
+                    not isinstance(attr_path, str)
+                    or not _PATH_RE.fullmatch(attr_path.strip())
+                ):
+                    error(
+                        f"produces[{index}].fields.attributes.{attr_name} "
+                        f"is invalid: {attr_path!r}"
+                    )
+                    continue
+                cleaned_attributes[attr_name.strip()] = attr_path.strip()
+            continue
         if role not in FIELD_ROLES:
             warning(f"produces[{index}].fields has unknown role: {role}")
             continue
@@ -478,5 +875,6 @@ def _parse_producer(
         mode=mode,
         scope=scope,
         fields=cleaned_fields,
+        attributes=cleaned_attributes,
         usable_as=usable,
     )

@@ -505,3 +505,56 @@ L'arbre d'exécution stocké dans `memory.db` contient :
 
 Reste à faire : §5 P5.6 (bloqué par l'absence de run), §3 prompts (Christian),
 §6 R2 (à confirmer au prochain run réel).
+
+### Chantier suivant (annoté le 04/11, non commencé)
+
+La refonte de la Progressive Disclosure et du routeur de scope est cadrée
+dans `docs/PD_CHANTIER_2026-11-04.md`. Idée validée : remplacer la grosse
+section PD auto-injectée par une **entité-pont sémantique** courte
+(« tu as une mission ; si tu manques d'infos, fais un discovery request en
+langage naturel sur un scope »), le routeur choisissant le DataProvider.
+Ce chantier vient **après** les phases 0→5 du plan du 04/11.
+
+### Phase 2b — flux composite presets (05/11)
+
+La réponse hôte du 05/11 remplace l'ancre sémantique par des **presets
+numérotés** (`t1..tN`, réinitialisés à chaque capture, TTL 120 s) + `vision
+mode=inspect` + `target preset=tN`. Un plan ne peut donc plus écrire `tN` :
+la lecture et l'ancrage doivent rester dans la même étape.
+
+**Implémenté** :
+
+- `perceive_understand` accepte `source_tool` **et** `target_producer`
+  ensemble (flux composite). La source projette ses candidates, le méta-outil
+  en choisit une par `target_description`, puis injecte son **nom local** dans
+  le paramètre consommateur DÉCLARÉ du producteur (`target_args` explicite
+  reste prioritaire). La cible finale est celle que le producteur vient de
+  produire ; `output_target_name` la lie.
+- Refus honnêtes : `TARGET_ANCHOR_UNSUPPORTED` si la source ne rend aucune
+  candidate, si le producteur ne déclare aucun consommateur, ou si le scope de
+  la candidate ne correspond pas. Aucun clic aveugle, aucune référence devinée.
+- `perceive_action` profite du composite sans changement de signature.
+- `plan_validator` : `target_args.<consommateur>` est un argument consommateur
+  (alias `$@_...` obligatoire s'il est fourni) ; un flux composite exige que la
+  source déclare `produces` **et** que le producteur déclare `consumes`.
+- `executor._target_arg_sources` trace aussi `target_args.<param>=...`.
+- Prompts planner (base/en/fr) : EXEMPLE 3 réécrit en composite compact,
+  budget de surface T31 respecté (base 314, en 301, fr 314 tokens ≤ 320).
+- Tests : `tests/test_presets_flow.py` (8 tests, `HostSim`) — candidates →
+  sélection → `target preset=<local>` → `mouse target=<local>`, refus sans
+  candidate / sans consommateur / mauvais scope, `target_args` préservé,
+  plan composite valide/rejeté.
+- i18n reconstruit (`scripts/compile_i18n.py`), 604 chaînes cataloguées.
+
+**Reste à faire côté hôte** (lettre `AgentBridge/brain_to_host.md`) :
+
+1. `vision` déclare `produces` sur `data.presets` (scope `ui_preset`,
+   `fields.ref=id`, `fields.description=name`) et `data.elements` si `inspect`
+   doit aussi ancrer.
+2. `target` déclare `consumes: [{param:"preset", scope:"ui_preset",
+   required:false, raw:"deny"}]` en plus de son `produces`.
+3. Confirmer que `keyboard.target` n'est pas dans `required` du schéma (sinon
+   `mode=text` sans cible serait refusé par notre prévalidation).
+
+Tant que ces déclarations ne sont pas transmises, le retest YouTube reste
+bloqué : le cerveau est agnostique, il ne peut pas deviner `preset`.

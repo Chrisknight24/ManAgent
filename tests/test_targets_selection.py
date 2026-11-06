@@ -12,6 +12,16 @@ from core.targets import TargetRegistry
 from tools import internal_tools as IT
 
 
+def _consumer_contract(param="cell", tool_name="click"):
+    raw = {
+        "version": 1,
+        "consumes": [{"param": param, "scope": "ui_element"}],
+    }
+    result = parse_target_contract(raw, tool_name=tool_name)
+    assert result.contract is not None, result.errors
+    return result.contract
+
+
 def _contract(*, mode="candidates", fields=None, tool_name="scan"):
     raw = {
         "version": 1,
@@ -93,7 +103,7 @@ def test_t10_single_auto_selection_expose_description():
     contract = _contract(mode="single")
     registry = TargetRegistry()
     manager = _FakeManager(
-        {"scan": contract},
+        {"scan": contract, "click": _consumer_contract()},
         {"scan": _single_payload({"id": "ref-ok", "label": "Bouton OK"}),
          "click": {"result": True, "data": {"clicked": True}}},
     )
@@ -106,10 +116,13 @@ def test_t10_single_auto_selection_expose_description():
         "action_args": {"cell": "$TARGET"},
     }, runtime))
 
+    entry = registry.find_by_ref("ref-ok")
     assert out["result"] is True
+    # Le meta-outil ne transmet QUE le nom local : la membrane egress de
+    # l'hôte le résout en référence au dernier moment.
     assert manager.calls == [
         ("scan", {}),
-        ("click", {"cell": "ref-ok"}),
+        ("click", {"cell": entry.local_name}),
     ]
     assert out["data"]["target"]["description"] == "Bouton OK"
     assert out["data"]["target"]["key"] in registry
@@ -121,7 +134,7 @@ def test_t11_output_target_name_lie_un_nom_reutilisable(monkeypatch):
     contract = _contract(mode="single")
     registry = TargetRegistry()
     manager = _FakeManager(
-        {"scan": contract},
+        {"scan": contract, "click": _consumer_contract()},
         {"scan": _single_payload({"id": "ref-close", "label": "Fermer"})},
     )
     variables = {}
@@ -161,7 +174,7 @@ def test_t12_perceive_action_selectionne_sur_donnees_projetees(monkeypatch):
     second = registry.upsert(scope="ui_element", ref="ref-b",
                              description="Deuxieme", correlation_id="c-b")
     manager = _FakeManager(
-        {"scan": contract},
+        {"scan": contract, "click": _consumer_contract()},
         {"scan": _scan_payload([
             {"id": "ref-a", "label": "Premier", "correlation_id": "c-a"},
             {"id": "ref-b", "label": "Deuxieme", "correlation_id": "c-b"},
@@ -192,7 +205,7 @@ def test_t12_perceive_action_selectionne_sur_donnees_projetees(monkeypatch):
     assert first.local_name in prompts[0] and second.local_name in prompts[0]
     assert "ref-a" not in prompts[0] and "ref-b" not in prompts[0]
     assert out["data"]["target"]["key"] == second.local_name
-    assert manager.calls[-1] == ("click", {"cell": "ref-b"})
+    assert manager.calls[-1] == ("click", {"cell": second.local_name})
     assert "ref-b" not in json.dumps(out["data"]["seen"])
 
 
@@ -204,7 +217,7 @@ def test_t16_cle_candidate_inconnue_rejetee_avant_action(monkeypatch):
     registry.upsert(scope="ui_element", ref="ref-b",
                     description="B", correlation_id="c-b")
     manager = _FakeManager(
-        {"scan": contract},
+        {"scan": contract, "click": _consumer_contract()},
         {"scan": _scan_payload([
             {"id": "ref-a", "label": "A", "correlation_id": "c-a"},
             {"id": "ref-b", "label": "B", "correlation_id": "c-b"},
@@ -240,7 +253,7 @@ def test_t23_aba_selectionne_un_nouveau_nom_jamais_l_ancien():
                           description="Ancienne", correlation_id="c-old")
     assert registry.invalidate(correlation_id="c-old") == 1
     manager = _FakeManager(
-        {"scan": contract},
+        {"scan": contract, "click": _consumer_contract()},
         {"scan": _single_payload({
             "id": "ref-aba", "label": "Nouvelle", "correlation_id": "c-new",
         }), "click": {"result": True, "data": {"clicked": True}}},
@@ -258,12 +271,12 @@ def test_t23_aba_selectionne_un_nouveau_nom_jamais_l_ancien():
     assert out["result"] is True
     assert new is not None and new.local_name != old.local_name
     assert registry.get(old.local_name).active is False
-    assert manager.calls[-1] == ("click", {"cell": "ref-aba"})
+    assert manager.calls[-1] == ("click", {"cell": new.local_name})
 def test_t11_executor_transmet_output_target_name_au_meta_outil(monkeypatch):
     contract = _contract(mode="single")
     registry = TargetRegistry()
     manager = _FakeManager(
-        {"scan": contract},
+        {"scan": contract, "click": _consumer_contract()},
         {"scan": _single_payload({"id": "ref-exec", "label": "Executer"})},
     )
     variables = {}

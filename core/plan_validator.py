@@ -263,6 +263,43 @@ def find_reserved_plan_tools(plan: Any) -> List[str]:
     return bad
 
 
+# Outils qui ne changent pas le monde : lire, analyser, extraire, charger,
+# enquêter. Un plan qui ne contient QUE ceux-là ne peut pas prouver un but
+# d'action. Signal NON bloquant (warning), jamais un refus.
+_READ_ONLY_PLAN_TOOLS = frozenset({
+    "perceive_understand",
+    "llm_analyze_data",
+    "llm_analyze_multi_data",
+    "extract_json_value",
+    "load_literal_data",
+    "investigate",
+    "tool_manager",
+})
+
+
+def find_plan_without_action(plan: Any, read_only_tools=None) -> bool:
+    """True si le plan ne contient AUCUNE action matérielle.
+
+    Un plan fait uniquement de lectures/analyses/réponses ne peut pas
+    prouver un but d'action : le monde n'a pas changé. Fonction pure, sans
+    LLM. Ne juge jamais la validité du plan — seulement un signal.
+    """
+    steps = list(getattr(plan, "steps", []) or [])
+    if not steps:
+        return False
+    allowed = (
+        _READ_ONLY_PLAN_TOOLS if read_only_tools is None else set(read_only_tools)
+    )
+    for step in steps:
+        stype = getattr(getattr(step, "type", None), "value", getattr(step, "type", None))
+        if stype != "tool_call":
+            continue
+        tname = (getattr(step, "tool_name", None) or "").strip()
+        if tname and tname not in allowed:
+            return False
+    return True
+
+
 def _plan_declared_ref_names(steps: Any, upto_index: int) -> set:
     """Noms `$@_...` résolubles à l'exécution au step d'index donné.
 
@@ -347,11 +384,26 @@ def _meta_source_tool(step: Any, args: Dict[str, Any]) -> str:
     return str(value).strip() if isinstance(value, str) else ""
 
 
+def _meta_producer_tool(step: Any, args: Dict[str, Any]) -> str:
+    """Outil qui produit réellement la cible d'un méta-outil.
+
+    `target_producer` prime : c'est le producteur final (contrat `produces`).
+    Sinon on retombe sur `source_tool` (contrat qui produit en lisant).
+    """
+    tool_name = _step_tool_name(step)
+    if tool_name not in _META_TARGET_TOOLS:
+        return ""
+    producer = args.get("target_producer")
+    if isinstance(producer, str) and producer.strip():
+        return producer.strip()
+    return _meta_source_tool(step, args)
+
+
 def _step_target_producer_modes(step: Any, args: Dict[str, Any], tools_mgr: Any) -> Set[str]:
     tool_name = _step_tool_name(step)
     if tool_name in _META_TARGET_TOOLS:
         return _target_producer_modes(
-            _target_contract(tools_mgr, _meta_source_tool(step, args))
+            _target_contract(tools_mgr, _meta_producer_tool(step, args))
         )
     return _target_producer_modes(_target_contract(tools_mgr, tool_name))
 
@@ -364,6 +416,15 @@ def _step_consumer_specs(step: Any, args: Dict[str, Any], tools_mgr: Any) -> Dic
         if source is not None:
             for consumer in getattr(source, "consumers", ()):
                 specs[f"source_args.{consumer.param}"] = consumer
+        producer_name = args.get("target_producer")
+        producer_name = (
+            producer_name.strip() if isinstance(producer_name, str) else ""
+        )
+        if producer_name:
+            producer = _target_contract(tools_mgr, producer_name)
+            if producer is not None:
+                for consumer in getattr(producer, "consumers", ()):
+                    specs[f"target_args.{consumer.param}"] = consumer
         if tool_name == "perceive_action":
             action_name = args.get("action_tool")
             action_name = str(action_name).strip() if isinstance(action_name, str) else ""
@@ -419,12 +480,40 @@ def find_target_plan_problems(plan: Any, tools_mgr: Any = None) -> List[str]:
         producer_ok = False
 
         if tool_name in _META_TARGET_TOOLS:
-            producer_ok = "candidates" in modes
-            if "single" in modes:
+            # `target_producer` EST la voie d'ancrage : un producteur single
+            # ou candidates y est légitime, c'est lui qui lie le nom local.
+            # Via `source_tool` seul, on garde la règle historique (un
+            # producteur single se consomme directement).
+            _declared_producer = str(args.get("target_producer") or "").strip()
+            producer_ok = ("candidates" in modes) or bool(
+                _declared_producer and modes
+            )
+            if "single" in modes and not _declared_producer:
                 hits.append(
                     f"{step_id}: producteur 'single' enveloppe dans "
                     f"'{tool_name}' (appelez-le directement)"
                 )
+            # Flux composite (phase 2b) : source de candidates + producteur
+            # consommateur. Les DEUX déclarations sont exigées ; sans elles,
+            # l'ancrage ne peut pas être frais et le plan serait un pari.
+            _declared_source = _meta_source_tool(step, args)
+            if _declared_producer and _declared_source:
+                _source_contract = _target_contract(tools_mgr, _declared_source)
+                if _source_contract is None or not getattr(
+                    _source_contract, "producers", ()
+                ):
+                    hits.append(
+                        f"{step_id}: source '{_declared_source}' ne déclare pas "
+                        "de candidates (produces) pour le flux composite"
+                    )
+                _producer_decl = _target_contract(tools_mgr, _declared_producer)
+                if _producer_decl is None or not getattr(
+                    _producer_decl, "consumers", ()
+                ):
+                    hits.append(
+                        f"{step_id}: producteur '{_declared_producer}' ne déclare "
+                        "aucun consommateur (consumes) pour le flux composite"
+                    )
         else:
             if "candidates" in modes:
                 hits.append(
@@ -815,20 +904,6 @@ def find_unconsumed_any_outputs(plan: Any, perception_tools: Any = None) -> List
         return []
 
 
-def _tool_declares_media(tool_name: str, tool_returns: Any) -> bool:
-    """L'outil déclare-t-il des charges médias (le validateur le sait) ?"""
-    if not tool_returns or not isinstance(tool_returns, dict):
-        return False
-    declared = tool_returns.get(tool_name) or []
-    if not isinstance(declared, list):
-        return False
-    from core.discovery.data_asset import is_media_mime
-    return any(
-        isinstance(d, dict) and is_media_mime(str(d.get("asset") or ""))
-        for d in declared
-    )
-
-
 def find_invalid_perceive_sources(plan: Any, known_tool_names=None) -> List[str]:
     """Sources de `perceive_understand` inconnues (gate anti-nom-en-dur).
 
@@ -853,7 +928,11 @@ def find_invalid_perceive_sources(plan: Any, known_tool_names=None) -> List[str]
         args = _parse_step_args(getattr(step, "tool_args_json", "{}"))
         src_tool = str(args.get("source_tool") or "").strip()
         src_data = str(args.get("source_data") or "").strip()
+        producer = str(args.get("target_producer") or "").strip()
         if src_data:
+            continue
+        if producer and producer not in known:
+            bad.append(f"{getattr(step, 'id', '?')}: target_producer={producer}")
             continue
         if not src_tool:
             continue  # déjà refusé par Pydantic (source requise)
@@ -893,8 +972,13 @@ def find_direct_perception_calls(plan: Any, perception_tool_names=None, tool_ret
     La lecture du monde passe UNIQUEMENT par `perceive_understand`
     (le LLM ne tient pas le pattern tout seul). Gate déterministe.
     Sans référentiel (None) : pas de vérification (rétro-compat).
-    Outils à charges médias déclarées exclus : leur appel direct préserve
-    les pixels (normalisés en assets), la réécriture les tuerait.
+
+    Doctrine « outil hôte = source de données brutes » : plus aucune
+    exception média. Un outil de perception appelé en direct contourne
+    l'interprétation en contexte de mission ; `perceive_understand` sait
+    déjà normaliser les charges déclarées en assets, donc la réécriture
+    ne détruit pas les pixels. `tool_returns` reste accepté pour la
+    compatibilité des appelants, mais ne change plus la décision.
     """
     if not perception_tool_names:
         return []
@@ -905,7 +989,7 @@ def find_direct_perception_calls(plan: Any, perception_tool_names=None, tool_ret
         if stype != "tool_call":
             continue
         tname = (getattr(step, "tool_name", None) or "").strip()
-        if tname in targets and not _tool_declares_media(tname, tool_returns):
+        if tname in targets:
             bad.append(str(getattr(step, "id", "?")))
     return bad
 
@@ -915,7 +999,8 @@ def repair_direct_perception_calls(plan: Any, perception_tool_names=None, tool_r
 
     Au lieu de refuser en boucle un planner qui ne sait pas se corriger :
     question = description de l'étape, source = outil + args d'origine.
-    Outils à charges médias déclarées exclus (pixels préservés).
+    Aucune exception média (doctrine « source brute ») : les charges
+    déclarées sont normalisées en assets par `perceive_understand`.
     Retourne les ids réparés. Pur hormis la mutation du plan (pratique du
     code : les plans sont déjà mutés ailleurs).
     """
@@ -930,7 +1015,7 @@ def repair_direct_perception_calls(plan: Any, perception_tool_names=None, tool_r
         if stype != "tool_call":
             continue
         tname = (getattr(step, "tool_name", None) or "").strip()
-        if tname not in targets or _tool_declares_media(tname, tool_returns):
+        if tname not in targets:
             continue
         try:
             src_args = _tolerant_parse_args(getattr(step, "tool_args_json", "{}") or "{}")
@@ -1026,6 +1111,7 @@ class PlanValidationOutcome:
         irreversibility_flags: Optional[List[str]] = None,
         is_partial: bool = False,
         partial_gaps: Optional[List[str]] = None,
+        warnings: Optional[List[str]] = None,
     ):
         self.is_valid = is_valid
         self.reason = reason
@@ -1035,6 +1121,9 @@ class PlanValidationOutcome:
         self.irreversibility_flags = irreversibility_flags or []
         self.is_partial = is_partial
         self.partial_gaps = partial_gaps or []
+        # Avertissements déterministes : jamais bloquants, évalués par la
+        # convergence finale (le juge du plan ne tranche pas l'ancrage).
+        self.warnings = warnings or []
 
     def __bool__(self) -> bool:
         return self.is_valid
@@ -1495,6 +1584,19 @@ class PlanValidator:
         # Signaux de convergence : jamais réutiliser ceux d'un plan précédent.
         self._last_unconsumed_warnings = []
         self._last_any_warnings = []
+        self._last_warnings = []
+        # Monde inchangé ? Comparaison avec la validation précédente du MÊME
+        # solver (photo fournie par l'orchestrateur, jamais une preuve).
+        _world_key = str(world_snapshot or "").strip()
+        _world_store = getattr(self, "_last_world_by_solver", None)
+        if not isinstance(_world_store, dict):
+            _world_store = {}
+            self._last_world_by_solver = _world_store
+        _previous_world = _world_store.get(child_solver_id)
+        _world_unchanged = bool(
+            _world_key and _previous_world is not None and _world_key == _previous_world
+        )
+        _world_store[child_solver_id] = _world_key
         # Collecter les signaux déterministes
         repeated_warning = self.detect_repeated_plan_pattern(plan, previous_attempts or [])
         recursion_warnings = self.detect_lazy_delegation_and_tree_recursion(
@@ -1607,6 +1709,46 @@ class PlanValidator:
                 self._last_any_warnings = list(any_unconsumed[:8])
             except Exception:
                 pass
+
+        # --- Avertissements déterministes (jamais des refus) --------------
+        # Le juge du plan ne tranche JAMAIS l'ancrage : il reçoit ces signaux
+        # et la convergence finale les évalue. `warnings` est le canal unique.
+        deterministic_warnings: List[str] = []
+        if unconsumed:
+            deterministic_warnings.append(
+                _("Perception non consommée : {ids}. Sa sortie n'est réutilisée "
+                  "par aucune étape postérieure — vérifiez qu'elle prouve le but.").format(
+                    ids=", ".join(unconsumed[:5])
+                )
+            )
+        if any_unconsumed:
+            deterministic_warnings.append(
+                _("Sortie à critère 'any' non consommée : {ids}.").format(
+                    ids=", ".join(any_unconsumed[:5])
+                )
+            )
+        if mechanical_note:
+            deterministic_warnings.append(mechanical_note)
+        if find_plan_without_action(plan):
+            deterministic_warnings.append(
+                _("Plan sans action matérielle : il lit, analyse ou répond mais "
+                  "ne change pas le monde. Un but d'action ne peut pas être "
+                  "prouvé ainsi.")
+            )
+        if _world_unchanged and novelty_assessment and "IDENTIQUE" in novelty_assessment:
+            deterministic_warnings.append(
+                _("Même monde et même plan qu'une tentative précédente : "
+                  "rejouer à l'identique ne changera pas le résultat.")
+            )
+        self._last_warnings = list(deterministic_warnings[:10])
+
+        # Le juge voit les signaux (contexte), pas comme des refus.
+        if deterministic_warnings:
+            _signals = "\n\n".join(deterministic_warnings)
+            pattern_warning = (
+                f"{pattern_warning}\n\n{_signals}" if pattern_warning else _signals
+            )
+
         if problems:
             # P-A (GO 03/11) : déduplication en conservant l'ordre + conseils
             # ciblés. Cause 3 partielle confirmée (runs 31/10) : le suffixe
@@ -1707,6 +1849,17 @@ class PlanValidator:
                 irreversibility_flags=decision.irreversibility_flags,
             )
 
+        # Warnings LLM (jamais bloquants) : ils s'ajoutent aux signaux
+        # déterministes et suivent le plan accepté jusqu'à la convergence.
+        _decision_warnings = [
+            str(w).strip()
+            for w in (getattr(decision, "warnings", None) or [])
+            if str(w).strip()
+        ]
+        if _decision_warnings:
+            deterministic_warnings = list(deterministic_warnings) + _decision_warnings
+            self._last_warnings = list(deterministic_warnings[:10])
+
         # Plan partiel : accepté UNIQUEMENT s'il est sûr et récupérable.
         # Les lacunes deviennent un warning pré-exécution, puis la convergence
         # finale doit prouver qu'elles sont couvertes (ou devenues inutiles).
@@ -1764,6 +1917,7 @@ class PlanValidator:
                 irreversibility_flags=decision.irreversibility_flags,
                 is_partial=_partial,
                 partial_gaps=_partial_gaps,
+                warnings=deterministic_warnings,
             )
 
         # Conforme, mais le juge exige une confirmation humaine.
@@ -1806,6 +1960,7 @@ class PlanValidator:
             irreversibility_flags=decision.irreversibility_flags,
             is_partial=_partial,
             partial_gaps=_partial_gaps,
+            warnings=deterministic_warnings,
         )
 
 

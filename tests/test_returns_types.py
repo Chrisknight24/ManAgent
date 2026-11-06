@@ -109,12 +109,18 @@ def _perceive_step(tool="capturer_image"):
     )
 
 
-def test_capture_image_non_reecrite():
+def test_capture_image_reecrite_comme_toute_perception():
+    """Doctrine « source brute » : plus d'exception média.
+
+    `perceive_understand` normalise les charges déclarées en assets ; un
+    appel direct à un outil de perception (même média) contourne
+    l'interprétation en contexte de mission.
+    """
     plan = Plan(goal="g", steps=[_perceive_step()])
     returns = {"capturer_image": _DECL}
-    assert find_direct_perception_calls(plan, {"capturer_image"}, returns) == []
-    assert repair_direct_perception_calls(plan, {"capturer_image"}, returns) == []
-    assert plan.steps[0].tool_name == "capturer_image"
+    assert find_direct_perception_calls(plan, {"capturer_image"}, returns) == ["s1"]
+    assert repair_direct_perception_calls(plan, {"capturer_image"}, returns) == ["s1"]
+    assert plan.steps[0].tool_name == "perceive_understand"
 
 
 def test_sans_declaration_reecrite_comme_avant():

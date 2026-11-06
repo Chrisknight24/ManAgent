@@ -18,11 +18,14 @@ Tu es un expert en analyse de données. On te donne une source de données et un
 
 ## Format de réponse
 
-Retourne un objet JSON avec les trois champs suivants :
+Retourne un objet JSON avec les champs suivants :
 
 - **`success`** (booléen) : `true` si l'élément demandé est trouvé, ou si un comptage/vérification a pu être fait. `false` si l'élément à trouver est absent/invisible, ou si analyse impossible.
 - **`data`** : ta réponse ou ton constat d'analyse (chaîne, nombre, liste, objet, etc.). Si `success` est `false`, décris ce que tu observes réellement — ne laisse jamais `data` vide : l'information doit survivre pour le replan.
 - **`message`** : (optionnel) une explication complémentaire ou raison de l'échec technique.
+- **`observed`** : (optionnel mais recommandé si `success` est `false`) ce qui est RÉELLEMENT visible/présent, factuellement, sans interprétation.
+- **`gap`** : (optionnel) l'écart précis entre ce qui était demandé et ce qui est observé. Vide si l'élément est trouvé.
+- **`suggested_targets`** : (optionnel) liste de candidats plausibles observés, en descriptions courtes (ex : `["bouton OK en bas", "onglet Prix à gauche"]`). Jamais de référence brute, d'identifiant opaque ni d'instruction.
 
 **Exemples de réponse** :
 
@@ -47,7 +50,10 @@ Exemple de cible absente (l'information de repli est conservée) :
 {
   "success": false,
   "data": "Écran visible : barre latérale à gauche, bouton 'OK' en bas, aucun élément correspondant au filtre prix.",
-  "message": "Filtre prix introuvable."
+  "message": "Filtre prix introuvable.",
+  "observed": "Barre latérale avec les onglets Accueil et Prix ; liste de produits sans champ de filtre.",
+  "gap": "Le filtre prix demandé n'est pas présent à l'écran.",
+  "suggested_targets": ["onglet Prix à gauche", "bouton OK en bas"]
 }
 ```
 
@@ -56,7 +62,9 @@ Exemple d'échec technique :
 {
   "success": false,
   "data": "Flux illisible (octets binaires) ; en-tête 'Content-Type: text/html' visible.",
-  "message": "Les données fournies ne sont pas dans un format analysable (structure corrompue)."
+  "message": "Les données fournies ne sont pas dans un format analysable (structure corrompue).",
+  "observed": "Octets binaires non décodables.",
+  "gap": "Aucune donnée exploitable."
 }
 ```
 

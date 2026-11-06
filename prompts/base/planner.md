@@ -30,11 +30,9 @@ Rapports de missions passées JUGÉES (le juge peut se tromper) : pistes suggest
 {% endif %}
 {% if targets_enabled %}
 ## CIBLES
-- Une cible se désigne par un nom local (`$@_<nom>`), jamais par une référence brute.
-- Toute action qui consomme une cible doit recevoir ce nom local, produit AVANT l'action. Si un paramètre cible est requis, son absence rend le plan invalide.
-- N'utilise pas un champ legacy (`cell`, `uia`, coordonnées) à la place d'un paramètre cible requis.
-- `output_target_name` : uniquement sur un producteur de cibles ou un méta-outil de sélection. Renseigne ensuite ce nom exact dans un argument consommateur.
-- Pour créer une cible, utilise l'outil dont le contrat déclare `produces` ; ne mets pas `output_target_name` sur un outil qui ne le déclare pas.
+- Une cible = un nom local (`$@_<nom>`), jamais une référence brute. L'action consommatrice reçoit ce nom, produit AVANT elle ; un paramètre cible requis absent invalide le plan.
+- Jamais de champ legacy (`cell`, `uia`, coordonnées) à la place d'un paramètre cible.
+- `output_target_name` : uniquement sur un producteur ou un méta-outil de sélection. Ancre via `source_tool` (candidates fraîches) + `target_producer` (outil `produces`/`consumes`) : la source lit, le producteur consomme une candidate, `target_description` choisit. Jamais de référence hôte devinée ; pas d'`output_target_name` sans `produces`.
 {% if target_selection_enabled %}
 - Plusieurs candidates : le méta-outil de sélection choisit une clé locale. Ne fabrique jamais de clé.
 {% endif %}
@@ -99,7 +97,9 @@ Un `tool_call` exige un `tool_name` recopié de OUTILS. Une action = un `tool_ca
 ## LIRE LE MONDE
 
 Avec `perceive_understand`. Il lit et explique en une étape.
-`source_tool` = recopie exacte d'un outil `[perception]` listé dans OUTILS ci-dessus. N'invente aucun nom d'outil hôte. Sans outil `[perception]` listé : utilise `source_data` (variable existante) ou termine en `direct_answer`. Écris dans `question` tout ce que la réponse doit contenir.
+`source_tool` = recopie exacte d'un outil hôte listé qui lit le monde (`[perception]` ou producteur de candidates). N'invente aucun nom. Sans un tel outil : `source_data` ou `direct_answer`. Écris dans `question` tout ce que la réponse doit contenir.
+Les outils hôte sont des **sources de données brutes** : leur nom ou leur description ne te dit pas ce que tu dois en conclure. Seul `perceive_understand` interprète le résultat dans le contexte de la mission. N'appelle jamais un outil de perception en direct.
+**Réparer le monde, pas le relire** : si une perception montre que l'élément manque ou est faux, l'étape suivante agit pour corriger (ou explique honnêtement l'impossibilité) ; elle ne refait pas la même lecture.
 Si tu utilises des outils à effet incertain sans lecture du monde derrière, une vérification finale par perception sera probablement requise : écris-la ou assume le risque.
 Si l'effet attendu est subtil (élément qui apparaît, texte modifié dans une zone), précise `verify_with` avec l'outil `[perception]` adapté ; sinon `get_world_state` s'appliquera par défaut.
 Le résultat `$@_data_step_N` EST la réponse quand la question la demande : n'ajoute pas d'analyse derrière sans raison. `llm_analyze_data` sert seulement pour des données déjà en variable (fichier, long texte).
@@ -128,12 +128,10 @@ Objectif : dis si la fenêtre Exemple est ouverte.
 - step_3, `direct_answer`, `La fenêtre Exemple est fermée.`, `execute_if` = `$@_data_step_1 == "no"`
 
 {% if targets_enabled %}
-## EXEMPLE 3 : créer une cible puis l'utiliser
+## EXEMPLE 3 : ancrer puis agir
 
-Objectif : agir sur un contrôle précis nommé dans l'objectif.
-
-- step_1, `tool_call`, `{{ target_producer_tool | default("<un outil [produces] de OUTILS>") }}`, `{"label": "…"}`, `output_target_name` = `controle_nomme`
-- step_2, `tool_call`, `{{ target_consumer_tool | default("<un outil avec argument 'target' de OUTILS>") }}`, `{"action": "click", "target": "$@_controle_nomme"}`
+- step_1, `tool_call`, `perceive_action`, `{"question": "Trouve OK.", "source_tool": "{{ target_source_tool | default("<[perception]>") }}", "target_producer": "{{ target_producer_tool | default("<[produces]>") }}", "target_description": "le bouton OK", "action_tool": "{{ target_consumer_tool | default("<[target]>") }}", "action_args": {{ target_consumer_args | default({"<cible>": "$TARGET"}) | tojson }}}`
+- Variante : `output_target_name` = `controle_nomme`, puis `"target": "$@_controle_nomme"` EXACTEMENT.
 {% endif %}
 
 ## CHECKLIST

@@ -220,7 +220,7 @@ class PlanStep(BaseModel):
     )
     tool_args_json: str = Field(
         default="{}",
-        description=_("Arguments de l'outil, en JSON d'objet valide : {\"button\": \"left\"}. Une chaîne JSON, SANS commentaire ni texte avant/après. Pour les données du registre, référencer $@_nom. Pour perceive_understand : {\"question\": \"...\", \"source_tool\": \"...\"} ou {\"question\": \"...\", \"source_data\": \"...\"}.")
+        description=_("Arguments de l'outil, en JSON d'objet valide : {\"button\": \"left\"}. Une chaîne JSON, SANS commentaire ni texte avant/après. Pour les données du registre, référencer $@_nom. Pour perceive_understand : {\"question\": \"...\", \"source_tool\": \"...\"} ou {\"question\": \"...\", \"source_data\": \"...\"} ou {\"question\": \"...\", \"target_producer\": \"...\", \"target_args\": {...}} ; pour le flux composite : {\"question\": \"...\", \"source_tool\": \"...\", \"target_producer\": \"...\", \"target_args\": {...}} (la source rend les candidates, le producteur en consomme une).")
     )
 
     step_context: str = Field(
@@ -317,10 +317,11 @@ class PlanStep(BaseModel):
                     question = str(parsed.get("question") or "").strip()
                     source_tool = str(parsed.get("source_tool") or "").strip()
                     source_data = str(parsed.get("source_data") or "").strip()
+                    target_producer = str(parsed.get("target_producer") or "").strip()
                     if not question:
                         raise ValueError(_("perceive_understand exige 'question' (que chercher)."))
-                    if not source_tool and not source_data:
-                        raise ValueError(_("perceive_understand exige 'source_tool' ou 'source_data' (d'où lire le monde)."))
+                    if not source_tool and not source_data and not target_producer:
+                        raise ValueError(_("perceive_understand exige 'source_tool', 'source_data' ou 'target_producer' (d'où lire le monde)."))
         
         
         if self.execute_if:
@@ -407,6 +408,14 @@ class SolverResult(BaseModel):
     failure_class: Optional[FailureClass] = Field(
         None,
         description=_("Classe d'échec détectée par l'Executor (EXECUTION_FAILURE ou CONVERGENCE_FAILURE).")
+    )
+    failed_tool: Optional[str] = Field(
+        default=None,
+        description=_("Outil dont l'étape a échoué, quand il est connu (diagnostic de signature)."),
+    )
+    error_code: Optional[str] = Field(
+        default=None,
+        description=_("Code d'erreur fermé renvoyé par l'hôte ou l'outil, quand il est disponible."),
     )
     target_entity: Optional[str] = Field(
         None,
@@ -677,20 +686,176 @@ def drop_unknown_injected_assets(injected_assets, known_uris):
     return kept, dropped
 
 
-def normalize_failure_signature(failure_class: Any, reason: Any) -> str:
-    """Signature comparable d'un échec (pur, sans LLM).
+FAILURE_ORIGINS = frozenset({
+    "ARGS_INVALID",
+    "HOST_REFUSAL",
+    "TOOL_ERROR",
+    "ALIGNMENT",
+    "PLAN_REJECTED",
+    "CONVERGENCE",
+    "USER_CANCELLED",
+    "UNKNOWN",
+})
 
-    Normalise pour que le même échec avec d'autres IDs reste identique :
-    minuscules, IDs d'étapes/UUID/nombres remplacés, espaces tassés.
+# Codes/expressions qui disent « l'appel est mal formé » (le monde n'est pas
+# en panne). Volontairement agnostiques : aucun nom d'outil en dur.
+_HOST_REFUSAL_CODES = (
+    "TARGET_REQUIRED",
+    "TARGET_SCHEMA_INVALID",
+    "TARGET_ANCHOR_UNSUPPORTED",
+    "TARGET_PRODUCER_UNSUPPORTED",
+    "TARGET_PRODUCER_NOT_UTILITY",
+    "TARGET_NOT_FOUND",
+    "TARGET_SCOPE_MISMATCH",
+    "TARGET_STALE_REF",
+)
+_HOST_REFUSAL_MARKERS = (
+    "ancrage obligatoire",
+    "target required",
+    "requires a target",
+    "missing target",
+    "refus",
+    "refuse",
+    "not allowed",
+    "non autorise",
+    "non autorisé",
+)
+_ARGS_INVALID_MARKERS = (
+    "argument",
+    "parametre",
+    "paramètre",
+    "mal appel",
+    "invalid",
+    "invalide",
+    "requis",
+    "required",
+    "schema",
+    "schéma",
+    "enum",
+)
+
+_HASH_EXCLUDED_CODES = frozenset({
+    "JSON", "LLM", "API", "URL", "GUI", "RUM", "MCP", "HTTP", "HTTPS",
+    "TRUE", "FALSE", "NONE", "NULL",
+})
+
+
+def classify_failure_origin(
+    failure_class: Any,
+    reason: Any,
+    *,
+    tool_name: str = "",
+    error_code: str = "",
+) -> str:
+    """Taxonomie d'origine d'un échec (pure, sans LLM).
+
+    Distingue ce qui est réparable par le plan (stratégie/convergence) de ce
+    qui ne l'est pas (arguments invalides, refus de contrat hôte) et de ce qui
+    accuse réellement l'outil (panne d'exécution).
     """
+    cls = str(getattr(failure_class, "value", failure_class) or "").strip().lower()
+    text = str(reason or "").lower()
+    code = str(error_code or "").strip().upper()
+
+    if cls == "alignment_failure":
+        return "ALIGNMENT"
+    if cls in ("plan_rejected_validation", "plan_rejected_supervisor"):
+        return "PLAN_REJECTED"
+    if cls == "user_cancelled":
+        return "USER_CANCELLED"
+
+    if code and code in _HOST_REFUSAL_CODES:
+        return "HOST_REFUSAL"
+    for token in _HOST_REFUSAL_CODES:
+        if token.lower() in text:
+            return "HOST_REFUSAL"
+    if any(marker in text for marker in _HOST_REFUSAL_MARKERS):
+        return "HOST_REFUSAL"
+    if any(marker in text for marker in _ARGS_INVALID_MARKERS):
+        return "ARGS_INVALID"
+
+    if cls == "convergence_failure":
+        return "CONVERGENCE"
+    if cls == "execution_failure":
+        return "TOOL_ERROR"
+    if cls == "max_retries_reached":
+        return "CONVERGENCE"
+    return "UNKNOWN"
+
+
+def _signature_tool(reason: str) -> str:
     import re
-    cls = getattr(failure_class, "value", failure_class)
-    text = f"{cls} :: {reason or ''}".lower()
+    patterns = (
+        r"(?:outil|tool)\s*['\"\[]?([A-Za-z_][\w.\-]*)",
+        r"step[_\-][\w\-]+\s*[:\-]\s*([A-Za-z_][\w.\-]*)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, reason, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip().lower()
+    return "?"
+
+
+def _signature_code(reason: str) -> str:
+    import re
+    for match in re.finditer(r"\b([A-Z][A-Z0-9_]{2,})\b", reason):
+        value = match.group(1)
+        if value not in _HASH_EXCLUDED_CODES:
+            return value.lower()
+    return ""
+
+
+def failure_signature_class(signature: Any) -> str:
+    """Classe d'une signature, ancien (` :: `) ou nouveau (`|`) format."""
+    text = str(signature or "")
+    if "|" in text:
+        return text.split("|", 1)[0]
+    return text.split(" :: ", 1)[0]
+
+
+def failure_signature_origin(signature: Any) -> str:
+    """Origine encodée dans une signature structurée (vide si ancienne)."""
+    text = str(signature or "")
+    if "|" not in text:
+        return ""
+    parts = text.split("|")
+    if len(parts) < 3:
+        return ""
+    return parts[2].strip().lower()
+
+
+def normalize_failure_signature(
+    failure_class: Any,
+    reason: Any,
+    *,
+    tool: str = "",
+    code: str = "",
+) -> str:
+    """Signature comparable et DISCRIMINANTE d'un échec (pur, sans LLM).
+
+    Format : `classe|outil|origine_ou_code|prose[:120]|digest`.
+    Les champs discriminants sont en tête ; la prose est normalisée (IDs,
+    UUID, nombres) et n'est tronquée qu'à la fin. Le digest porte sur la prose
+    complète normalisée : deux causes différentes ne fusionnent plus.
+    """
+    import hashlib
+    import re
+
+    cls = str(getattr(failure_class, "value", failure_class) or "").strip().lower()
+    raw = str(reason or "")
+    origin = classify_failure_origin(
+        failure_class, raw, tool_name=tool, error_code=code
+    )
+    tool_value = (tool or _signature_tool(raw) or "?").strip().lower()
+    code_value = (code or _signature_code(raw) or origin).strip().lower()
+
+    text = raw.lower()
     text = re.sub(r'step[_\-][\w\-]+', 'step_#', text)
     text = re.sub(r'\b[0-9a-f]{8}(?:-[0-9a-f]{4}){0,3}\b', '#id', text)
     text = re.sub(r'\d+', '#', text)
     text = re.sub(r'\s+', ' ', text).strip()
-    return text[:200]
+    digest = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()[:8]
+    return f"{cls}|{tool_value}|{code_value}|{text[:120]}|{digest}"
 
 
 def is_quota_streak(history, threshold: int = 2) -> bool:
@@ -727,6 +892,12 @@ def is_sterile_streak(history) -> bool:
     last_sig, last_mat = history[-1]
     prev_sig, _ = history[-2]
     if last_sig != prev_sig:
+        return False
+    # Seule une panne RÉELLE de l'outil justifie l'abandon pour stérilité.
+    # Un refus hôte, des args invalides, un désalignement ou une divergence
+    # ont leur propre garde-fou : les confondre relançait/arrêtait à tort.
+    origin = failure_signature_origin(last_sig)
+    if origin and origin not in ("tool_error", "unknown"):
         return False
     try:
         best_before = max(int(m) for _, m in history[:-1])
@@ -879,6 +1050,14 @@ class PlanValidationDecision(BaseDiscoverySchema):
         description=_(
             "Parties de l'objectif non couvertes par un plan partiel sûr. "
             "Chaque entrée doit être assez précise pour être vérifiée après exécution."
+        )
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description=_(
+            "Avertissements NON BLOQUANTS : doutes, ancrage faible, cible littérale "
+            "ou vérification incertaine. Ne jamais refuser un plan à cause d'un "
+            "avertissement ; la convergence finale les évaluera."
         )
     )
 

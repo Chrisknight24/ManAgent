@@ -326,8 +326,13 @@ Règles de validation (le contrat est tout ou rien) :
 - `scope` XOR `fields.scope` : scope fixe déclaré, ou scope lu sur chaque item.
   Un item sans scope exploitable est ignoré (une sortie `single` devient `null`).
 - `fields.ref` est obligatoire. Les autres rôles reconnus sont `description`,
-  `scope`, `correlation_id`, `generation` ; les rôles inconnus sont ignorés
-  avec un avertissement.
+  `scope`, `correlation_id`, `generation`, `attributes` ; les rôles inconnus
+  sont ignorés avec un avertissement.
+- `fields.attributes` (optionnel) déclare des champs libres visibles par le
+  sélecteur : `{"nom_public": "chemin.de.lecture"}`. Les valeurs sont copiées
+  dans l'entrée et exposées telles quelles (`role`, `rect`, `cells`, ...),
+  jamais la référence. Sans cette déclaration, le sélecteur ne voit que
+  `key`, `description` et `scope`.
 - `usable_as` (optionnel) élargit les scopes consommables : une cible de ce
   scope peut remplir un slot de chaque scope listé. Défaut : `[scope]`.
   La relation n'est pas transitive.
@@ -398,6 +403,72 @@ Identité et fraîcheur :
 - les descriptions sont des **données non fiables**, plafonnées à 200
   caractères, jamais des instructions.
 
+### Inspections déclarées (`disclosure`) et ancres
+
+Quand une lecture ne suffit pas (candidates ambiguës, zoom, fichier à
+résoudre), l'hôte peut déclarer des **vues nommées**, des **types d'ancre
+brute** et des **recettes d'inspection**. Le cerveau ne connaît aucun nom
+d'outil ni aucun type de cible : il ne peut demander que ce qui est listé. Le
+contrat reste en `version: 1` ; `disclosure` est optionnel et non cassant.
+
+```json
+"disclosure": {
+  "version": 1,
+  "views": [
+    {"name": "grid", "path": "data.grid", "description": "Grille de cellules"},
+    {"name": "tree", "path": "data.tree", "description": "Arborescence"}
+  ],
+  "anchors": [
+    {"kind": "cell", "param": "cell", "description": "Cellule brute"},
+    {"kind": "file", "param": "path", "description": "Chemin de fichier"}
+  ],
+  "probes": [
+    {
+      "id": "elargir",
+      "kind": "widen",
+      "description": "Relit l'écran avec la question comme indice.",
+      "tool": "lire_ecran",
+      "args": {},
+      "hint_param": "question",
+      "produces": ["candidates", "grid"]
+    },
+    {
+      "id": "inspecter_cellule",
+      "kind": "inspect",
+      "tool": "lire_ecran",
+      "subject": {"kind": "cell", "param": "cell"},
+      "produces": ["candidates"]
+    }
+  ]
+}
+```
+
+- `views[]` : `name` libre (grille, arborescence, capteurs...) et `path`
+  pointé relatif au résultat complet. La vue est montrée au sélecteur, jamais
+  une référence brute.
+- `anchors[]` : `kind` est un **vocabulaire hôte** (`cell`, `file`, `key`,
+  `joint`, `symbol`...), `param` le consommateur qui reçoit la valeur brute.
+  Une cible finale `anchor` n'est acceptée que si son `kind` est déclaré ici
+  (ou dérivé d'un consommateur `raw: allow`).
+- `probes[]` : `id` stable, `kind` **libre** (le cerveau ne lui donne aucune
+  sémantique), `tool` hôte déclaré, `args` fixes, `hint_param` (reçoit la
+  question si le paramètre est vide), `subject` optionnel et `produces` (ce
+  que la sonde rafraîchit).
+- `subject.kind = "local"` : sujet = clé du registre (nom local). Tout autre
+  `kind` renvoie à une ancre déclarée et exige un paramètre `raw: allow`.
+- Le LLM ne fournit que `id` et sujet via `discovery_request` ; il ne peut ni
+  inventer un outil, ni changer un argument fixe, ni inventer un `kind`.
+- Budget : **2 inspections maximum**. Une sonde répétée pour le même sujet est
+  refusée (`TARGET_PROBE_LOOP`). Budget épuisé = décision finale exigée.
+- Une sonde `local` utilise le **nom local** si le paramètre est un
+  consommateur déclaré (la membrane egress le résout), sinon la référence
+  brute. Une sonde d'ancre exige un paramètre `raw: allow`.
+- Cible finale `anchor` : uniquement si l'hôte déclare ce `kind` et un
+  consommateur `raw: allow` correspondant. Sinon refus honnête
+  `TARGET_ANCHOR_UNSUPPORTED`, aucune devinette.
+- Les charges médias déclarées dans `returns` sont transmises au sélecteur
+  par le canal média : jamais de base64 dans le prompt.
+
 ### Mises à jour (`target_updates`)
 
 Un résultat peut invalider des cibles connues :
@@ -433,6 +504,8 @@ Refus **avant dispatch** (aucun effet hôte) :
 | `TARGET_SCOPE_MISMATCH` | scope produit incompatible avec le scope consommé |
 | `TARGET_SCHEMA_INVALID` | nom local vide/mal formé, référence ou entrée invalide |
 | `TARGET_STALE_REF` | réservé à un refus de référence signalé par l'hôte ; le runtime ne l'invente jamais |
+| `TARGET_ANCHOR_UNSUPPORTED` | aucune cible sûre (ou ancre choisie sans consommateur `raw: allow` du `kind` déclaré) : refus honnête, pas de devinette |
+| `TARGET_PROBE_LOOP` | même sonde redemandée pour le même sujet : inspection répétée refusée |
 
 `TARGET_REF_REJECTED` n'existe pas. Un refus émis par l'hôte reste un refus
 hôte (`result.status: "rejected"` + son `error.code`), pas une réécriture

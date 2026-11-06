@@ -30,11 +30,9 @@ Reports from past JUDGED missions (the judge can be wrong): suggestive leads, ne
 {% endif %}
 {% if targets_enabled %}
 ## TARGETS
-- A target is designated by a local name (`$@_<name>`), never by a raw reference.
-- Any action that consumes a target must receive that local name, produced BEFORE the action. If a target parameter is required, its absence makes the plan invalid.
-- Do not use a legacy field (`cell`, `uia`, coordinates) instead of a required target parameter.
-- `output_target_name`: only on a target producer or a selection meta-tool. Put that exact name in a consumer argument afterwards.
-- To create a target, use the tool whose contract declares `produces`; do not put `output_target_name` on a tool that does not declare it.
+- A target = a local name (`$@_<name>`), never a raw reference. The consuming action receives it, produced BEFORE it; a missing required target parameter invalidates the plan.
+- Never a legacy field (`cell`, `uia`, coordinates) instead of a target parameter.
+- `output_target_name`: only on a producer or a selection meta-tool. Anchor via `source_tool` (fresh candidates) + `target_producer` (tool declaring `produces`/`consumes`): the source reads, the producer consumes one candidate, `target_description` selects. Never a guessed host reference; no `output_target_name` without `produces`.
 {% if target_selection_enabled %}
 - Several candidates: the selection meta-tool picks a local key. Never invent a key.
 {% endif %}
@@ -99,7 +97,9 @@ A `tool_call` needs a `tool_name` copied from TOOLS. One action = one `tool_call
 ## READING THE WORLD
 
 With `perceive_understand`. It reads and explains in one step.
-`source_tool` = exact copy of a `[perception]` tool listed in TOOLS above. Never invent a host tool name. With no `[perception]` tool listed: use `source_data` (existing variable) or finish with `direct_answer`. Write in `question` everything the answer must contain.
+`source_tool` = exact copy of a listed host tool that reads the world (`[perception]` or candidate producer). Never invent a name. Without one: `source_data` or `direct_answer`. Write in `question` everything the answer must contain.
+Host tools are **raw data sources**: their name or description does not tell you what to conclude. Only `perceive_understand` interprets the result in the mission context. Never call a perception tool directly.
+**Repair the world, do not re-read it**: if a perception shows the element is missing or wrong, the next step acts to fix it (or honestly explains why it cannot); it does not repeat the same read.
 If you use uncertain-effect tools with no world reading after them, a final perception check will probably be required: write it or own the risk.
 If the expected effect is subtle (appearing element, modified text in an area), set `verify_with` to the matching `[perception]` tool; otherwise `get_world_state` applies by default.
 The `$@_data_step_N` result IS the answer when the question asks for it: add no analysis after it without a reason. `llm_analyze_data` is only for data already in a variable (file, long text).
@@ -128,12 +128,10 @@ Goal: say if the Example window is open.
 - step_3, `direct_answer`, `The Example window is closed.`, `execute_if` = `$@_data_step_1 == "no"`
 
 {% if targets_enabled %}
-## EXAMPLE 3: create a target, then use it
+## EXAMPLE 3: anchor then act
 
-Goal: act on a specific control named in the goal.
-
-- step_1, `tool_call`, `{{ target_producer_tool | default("<a [produces] tool from TOOLS>") }}`, `{"label": "…"}`, `output_target_name` = `controle_nomme`
-- step_2, `tool_call`, `{{ target_consumer_tool | default("<a tool with a 'target' argument from TOOLS>") }}`, `{"action": "click", "target": "$@_controle_nomme"}`
+- step_1, `tool_call`, `perceive_action`, `{"question": "Find OK.", "source_tool": "{{ target_source_tool | default("<[perception]>") }}", "target_producer": "{{ target_producer_tool | default("<[produces]>") }}", "target_description": "the OK button", "action_tool": "{{ target_consumer_tool | default("<[target]>") }}", "action_args": {{ target_consumer_args | default({"<target>": "$TARGET"}) | tojson }}}`
+- Variant: `output_target_name` = `controle_nomme`, then `"target": "$@_controle_nomme"` EXACTLY.
 {% endif %}
 
 ## CHECKLIST

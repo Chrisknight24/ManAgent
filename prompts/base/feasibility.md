@@ -32,6 +32,8 @@ Rapports de missions passées JUGÉES (le juge peut se tromper) : pistes suggest
 
 {{ tools_guidance }}
 
+Les outils hôte sont des **sources de données brutes** : leur nom ou leur description ne dit pas ce qu'il faut en conclure. Seul `perceive_understand` interprète un résultat dans le contexte de la mission. Une stratégie qui lit le monde passe par lui, jamais par un outil de perception appelé en direct.
+
 {% if skills %}
 ## SKILLS PRÊTS
 {{ skills }}
@@ -65,7 +67,8 @@ Pas faisable = une capacité nécessaire sans outil.
 - `tool_call` pour chaque action seule.
 - `abstract_task` seulement pour un sous-but à plusieurs actions avec choix. Jamais pour lire ou tester une variable.
 {% if world_guidance is not defined or world_guidance %}- Lire le monde = UNE étape `perceive_understand` (lit + explique). Pas d'analyse derrière.
-{% endif %}- La stratégie conseille. Le Planner décide.
+{% endif %}- Réparer le monde, pas le relire : si la perception montre que l'élément manque, la suite agit pour corriger.
+- La stratégie conseille. Le Planner décide.
 
 ## PAS FAISABLE
 

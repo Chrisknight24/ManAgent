@@ -162,6 +162,10 @@ def test_perceive_action_never_clicks_blind():
 
 
 def test_perceive_action_happy_path_uses_fresh_ref():
+    """Ancrage par contrat : le meta-outil transmet le NOM LOCAL, jamais la
+    référence hôte (la membrane egress la résout au dispatch)."""
+    from core.target_contract import parse_target_contract
+    from core.targets import TargetRegistry
     from tools.internal_tools import perceive_action
 
     calls = []
@@ -169,35 +173,54 @@ def test_perceive_action_happy_path_uses_fresh_ref():
     async def fake_exec(name, args):
         calls.append((name, dict(args)))
         if name == "perceive":
-            return '{"result": true, "data": {"elements": [{"id": "e_2_9", "name": "Edge"}]}}'
+            return '{"result": true, "data": {"targets": {"id": "e_2_9", "label": "Edge"}}}'
         return '{"result": true, "data": {"clicked": true}}'
 
-    class FakeGround:
-        target_ref = "e_2_9"
-        reason = "unique correspondant"
+    raw_contract = {
+        "version": 1,
+        "produces": [{
+            "path": "data.targets",
+            "mode": "single",
+            "scope": "ui_element",
+            "fields": {"ref": "id", "description": "label"},
+        }],
+    }
+    raw_consumer = {
+        "version": 1,
+        "consumes": [{"param": "cell", "scope": "ui_element"}],
+    }
+    contract = parse_target_contract(raw_contract, tool_name="perceive").contract
+    consumer = parse_target_contract(raw_consumer, tool_name="click_at").contract
+    registry = TargetRegistry()
 
-    class FakeLlm:
-        async def generate_structured(self, **kwargs):
-            return FakeGround()
+    class FakeMgr:
+        async def execute_tool(self, name, args):
+            return await fake_exec(name, args)
 
-    import tools.internal_tools as it
-    orig = it._get_tools_llm
+        def get_target_contract(self, name):
+            if name == "perceive":
+                return contract
+            if name == "click_at":
+                return consumer
+            return None
 
-    async def fake_get_llm(rs):
-        return FakeLlm()
+        def get_tool_returns(self, name):
+            return []
 
-    it._get_tools_llm = fake_get_llm
-    try:
-        rs, _ = _stub_runtime(fake_exec)
-        out = asyncio.run(perceive_action(
-            {"question": "ou est Edge ?", "source_tool": "perceive",
-             "action_tool": "click_at", "action_args": {"cell": "$TARGET"}}, rs))
-    finally:
-        it._get_tools_llm = orig
+    rs = types.SimpleNamespace(
+        tools_manager=FakeMgr(),
+        target_registry=registry,
+        _solver_registry_for_tools={},
+        language="en",
+    )
+    out = asyncio.run(perceive_action(
+        {"question": "ou est Edge ?", "source_tool": "perceive",
+         "action_tool": "click_at", "action_args": {"cell": "$TARGET"}}, rs))
+    entry = registry.find_by_ref("e_2_9")
     assert out["result"] is True
     assert calls[0][0] == "perceive"
-    assert calls[1] == ("click_at", {"cell": "e_2_9"})
-    assert out["data"]["target"] == "e_2_9"
+    assert calls[1] == ("click_at", {"cell": entry.local_name})
+    assert out["data"]["target"]["key"] == entry.local_name
 
 
 def test_condition_syntax_error_raises_not_skips():

@@ -24,6 +24,108 @@ from core.targets import target_is_live
 PLANNER_PD_ENABLED = False
 
 
+def target_example_context(tools_manager: Any) -> Dict[str, Any]:
+    """Variables d'EXEMPLE 3, dérivées du manifeste (aucun nom en dur).
+
+    Le prompt doit montrer un exemple **valide**, pas seulement plausible :
+
+    - `target_producer_tool` : un outil qui déclare `produces` ;
+    - `target_source_tool` : un AUTRE outil qui produit des candidates ;
+    - `target_consumer_tool` : un outil d'action avec un consommateur ;
+    - `target_consumer_args` : ses arguments requis recopiés de SON schéma
+      (première valeur `enum` ou `default`), plus son paramètre consommateur
+      à `$TARGET`. Aucun argument n'est inventé : un exemple qui nomme un
+      paramètre absent du schéma apprend au modèle à mal appeler l'outil.
+
+    Retourne des placeholders d'indirection si le manifeste ne fournit pas la
+    capacité : le template reste lisible, sans exemple vide.
+    """
+    context: Dict[str, Any] = {
+        "target_producer_tool": _("<un outil [produces] de OUTILS>"),
+        "target_source_tool": _("<un outil hôte qui lit le monde de OUTILS>"),
+        "target_consumer_tool": _("<un outil d'action à cible de OUTILS>"),
+        "target_consumer_args": {"<paramètre cible>": "$TARGET"},
+    }
+    if tools_manager is None:
+        return context
+    try:
+        names = list(tools_manager.target_contract_names())
+    except Exception:
+        return context
+
+    producer_candidates: List[str] = []
+    source_candidates: List[str] = []
+    consumer_candidates: List[Dict[str, Any]] = []
+    tools = getattr(tools_manager, "_tools", {}) or {}
+    for name in names:
+        try:
+            contract = tools_manager.get_target_contract(name)
+        except Exception:
+            continue
+        if contract is None or not getattr(contract, "is_effective", False):
+            continue
+        producers = tuple(getattr(contract, "producers", ()) or ())
+        consumers = sorted(contract.consumer_param_names())
+        tool_def = tools.get(name) or {}
+        if producers:
+            producer_candidates.append(name)
+        if any(getattr(p, "mode", "") == "candidates" for p in producers):
+            source_candidates.append(name)
+        if str(tool_def.get("kind") or "") == "action" and consumers:
+            params = tool_def.get("parameters") or {}
+            properties = params.get("properties") or {}
+            consumer_spec = contract.consumer_for(consumers[0])
+            consumer_candidates.append({
+                "name": name,
+                "param": consumers[0],
+                "props": properties,
+                "required": params.get("required") or [],
+                "size": len(properties),
+                # Une action dont la cible est REQUISE est sans ambiguïté une
+                # action *sur cible* ; une cible optionnelle (ex. clavier
+                # mode=text) peut agir sans cible et ferait un mauvais exemple.
+                "target_required": bool(
+                    consumer_spec is not None and consumer_spec.required
+                ),
+            })
+    if not producer_candidates:
+        return context
+
+    producer_tool = producer_candidates[0]
+    context["target_producer_tool"] = producer_tool
+    for name in source_candidates:
+        if name != producer_tool:
+            context["target_source_tool"] = name
+            break
+    # Exemple le plus court ET valide : d'abord une action dont la cible est
+    # requise (mouse plutôt que clavier mode=text), puis l'outil le plus simple.
+    for candidate in sorted(
+        consumer_candidates,
+        key=lambda item: (
+            not item["target_required"],
+            item["size"],
+            item["name"],
+        ),
+    ):
+        if candidate["name"] == producer_tool:
+            continue
+        example_args: Dict[str, Any] = {}
+        for pname in candidate["required"]:
+            if pname == candidate["param"]:
+                continue
+            spec = candidate["props"].get(pname) or {}
+            enum = spec.get("enum") if isinstance(spec, dict) else None
+            if isinstance(enum, (list, tuple)) and enum:
+                example_args[pname] = enum[0]
+            elif isinstance(spec, dict) and "default" in spec:
+                example_args[pname] = spec["default"]
+        example_args[candidate["param"]] = "$TARGET"
+        context["target_consumer_tool"] = candidate["name"]
+        context["target_consumer_args"] = example_args
+        break
+    return context
+
+
 class PlannerRegistryProvider:
     """
     DataProvider pour le Planner – interroge le registre du Solver parent
@@ -181,34 +283,12 @@ class Planner(Entity):
         # P-D (GO 03/11) : EXEMPLE 3 du prompt reçoit les VRAIS noms d'outils
         # cibles, lus depuis le manifeste hôte au moment du rendu. Agnostique
         # par construction : aucun nom d'hôte codé en dur, ses cartes d'outils
-        # (contrats 'produces' / consommateur 'target') font foi. Si un nom
-        # manque, fallback = consigne d'indirection (même style qu'EXEMPLE 1).
-        target_producer_tool = _("<un outil [produces] de OUTILS>")
-        target_consumer_tool = _("<un outil avec argument 'target' de OUTILS>")
-        if target_flags["targets_enabled"]:
-            try:
-                _tm_tt = getattr(self.runtime_state, "tools_manager", None)
-                if _tm_tt is not None:
-                    _producer_tool_done = False
-                    _consumer_tool_done = False
-                    for _tt_name in _tm_tt.target_contract_names():
-                        _tt_contract = _tm_tt.get_target_contract(_tt_name)
-                        if _tt_contract is None or not getattr(_tt_contract, "is_effective", False):
-                            continue
-                        if (not _producer_tool_done) and (getattr(_tt_contract, "producers", ()) or ()):
-                            target_producer_tool = _tt_name
-                            _producer_tool_done = True
-                        if (not _consumer_tool_done) and "target" in (
-                            _tt_contract.consumer_param_names()
-                        ):
-                            target_consumer_tool = _tt_name
-                            _consumer_tool_done = True
-                        if _producer_tool_done and _consumer_tool_done:
-                            break
-            except Exception as _tt_err:
-                Logger.debug(
-                    f"[Planner:{self.name}] Outils cibles EXEMPLE 3 indisponibles : {_tt_err}"
-                )
+        # (contrats 'produces' / consommateur) font foi. Sans capacité, le
+        # helper rend des placeholders d'indirection (même style qu'EXEMPLE 1).
+        target_example = target_example_context(
+            getattr(self.runtime_state, "tools_manager", None)
+            if target_flags["targets_enabled"] else None
+        )
         # Monde vivant : UNIQUEMENT en retry (premier passage inchangé :
         # rapide, pas cher). Le solver active après le 1er échec.
         if enable_world_pd and self.runtime_state.discovery_engine:
@@ -327,8 +407,7 @@ class Planner(Entity):
             unsupported_modalities=unsupported_modalities,
             targets_enabled=target_flags["targets_enabled"],
             target_selection_enabled=target_flags["target_selection_enabled"],
-            target_producer_tool=target_producer_tool,
-            target_consumer_tool=target_consumer_tool,
+            **target_example,
         )
 
         proposed_plan: Plan = await self.llm.generate_structured(

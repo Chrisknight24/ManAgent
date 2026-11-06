@@ -60,12 +60,35 @@ def _clean_generation(value: Any) -> Optional[int]:
     return None
 
 
-def _canonical_entry(entry: Any) -> Dict[str, str]:
-    return {
+def _canonical_entry(entry: Any) -> Dict[str, Any]:
+    canonical: Dict[str, Any] = {
         "key": entry.local_name,
         "description": entry.description,
         "scope": entry.scope,
     }
+    attributes = getattr(entry, "attributes", None)
+    if isinstance(attributes, dict):
+        for name, value in attributes.items():
+            if name not in canonical:
+                canonical[name] = value
+    return canonical
+
+
+def _read_attributes(item: Any, spec: ProducerSpec) -> Optional[Dict[str, Any]]:
+    """Lit les champs libres declares par `fields.attributes`.
+
+    Retourne `None` quand l'hote n'a rien declare : la projection reste
+    strictement identique (`key`, `description`, `scope`).
+    """
+    if not spec.attributes:
+        return None
+    values: Dict[str, Any] = {}
+    for name, path in spec.attributes.items():
+        value = _read_path(item, path)
+        if value is _MISSING:
+            continue
+        values[name] = value
+    return values
 
 
 _ALIAS_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -172,6 +195,7 @@ def _project_item(
             correlation_id=correlation_raw,
             generation=generation,
             usable_as=list(spec.usable_as) or None,
+            attributes=_read_attributes(item, spec),
         )
     except TargetSchemaError:
         return None

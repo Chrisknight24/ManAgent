@@ -8,7 +8,7 @@ vue normalisée du registre utilisant les types stockés (bool/data),
 et intégration du Skill Engine (Auto-Discovery, Auto-Healing).
 """
 
-from typing import Optional, Any, Dict, List
+from typing import Optional, Any, Dict, List, Tuple
 import asyncio
 import time
 import json
@@ -29,7 +29,7 @@ from core.constants import (
     MAX_INSIGHTS_PER_TARGET,
 )
 from .supervisor import Supervisor
-from .plan_models import FeasibilityDecision, Plan, SolverResult, ExecutionStatus, MissionSignature, CompactedAdvice, normalize_failure_signature, is_sterile_streak, is_quota_streak, is_nonretryable_contract_failure, is_host_target_contract_refusal, host_refusal_budget_exhausted
+from .plan_models import FeasibilityDecision, Plan, SolverResult, ExecutionStatus, MissionSignature, CompactedAdvice, normalize_failure_signature, failure_signature_class, is_sterile_streak, is_quota_streak, is_nonretryable_contract_failure, is_host_target_contract_refusal, host_refusal_budget_exhausted
 from .planner import Planner
 from .executor import Executor
 from core.llm import Llm
@@ -116,19 +116,83 @@ def _update_tool_health(streak: Dict[str, int], attempts: List[Any]) -> List[str
     Pur (sans LLM) : ne regarde que la DERNIÈRE tentative (vrai consécutif),
     remet à zéro les outils qui n'y ont pas échoué. Retourne la liste triée
     des outils malades (>= 3). Testé vite.
+
+    Les outils d'ALIGNEMENT (`perceive_*`) sont exclus : un `false` de
+    perception ne dit rien de la santé de l'outil, il dit que la cible/le
+    plan ne correspond pas encore au monde.
     """
     failed_now = set()
     last = attempts[-1] if attempts else None
     if last is not None and getattr(last, "outcome", None) == "failed":
         for node in getattr(last, "nodes", None) or []:
             if getattr(node, "status", None) == "failed" and getattr(node, "tool_name", None):
-                failed_now.add(str(getattr(node, "tool_name")))
+                tool_name = str(getattr(node, "tool_name"))
+                if tool_name in ("perceive_understand", "perceive_action"):
+                    continue
+                # Seule une panne RÉELLE de l'outil compte. Un refus de
+                # contrat, des args invalides, un désalignement ou une
+                # divergence ne disent rien de la santé de l'outil.
+                origin = str(getattr(node, "failure_origin", "") or "").upper()
+                if origin and origin not in ("TOOL_ERROR", "UNKNOWN"):
+                    continue
+                failed_now.add(tool_name)
     for tool in list(streak.keys()):
         if tool not in failed_now:
             streak[tool] = 0
     for tool in failed_now:
         streak[tool] = streak.get(tool, 0) + 1
     return sorted([t for t, n in streak.items() if n >= 3])
+
+
+def _perception_stall(fail_history, threshold: int = 3) -> bool:
+    """3 échecs d'ALIGNEMENT consécutifs = on relit sans jamais s'aligner.
+
+    Un `false` de perception n'est pas une panne : c'est un désalignement.
+    Relire à l'identique ne peut pas le réparer ; il faut changer d'ancre ou
+    d'approche. Fonction pure, testable vite.
+    """
+    try:
+        tail = list(fail_history)[-threshold:]
+        if len(tail) < threshold:
+            return False
+        return all(
+            failure_signature_class(sig) == "alignment_failure"
+            for sig, _material in tail
+        )
+    except Exception:
+        return False
+
+
+def plan_convergence_warnings(runtime_state: Any, solver_id: Any) -> Tuple[List[str], str]:
+    """Sépare lacunes bloquantes et avertissements non bloquants.
+
+    Retourne `(gaps, plan_gaps_text)` :
+    - `gaps` ne contient QUE les lacunes partielles acceptées, seules à
+      alimenter la porte déterministe `gap_convergence_refusal` ;
+    - `plan_gaps_text` joint lacunes + avertissements soft pour le juge
+      final (contexte), jamais pour refuser.
+
+    Un avertissement d'ancrage ne doit jamais devenir une lacune : c'est
+    exactement la confusion qui faisait refuser des convergences saines.
+    """
+    def _read(attr: str) -> List[str]:
+        try:
+            store = getattr(runtime_state, attr, None)
+            if isinstance(store, dict):
+                return [
+                    str(v).strip()
+                    for v in (store.get(solver_id, None) or [])
+                    if str(v).strip()
+                ]
+        except Exception:
+            pass
+        return []
+
+    gaps = _read("plan_warnings_by_solver")
+    soft = _read("plan_soft_warnings_by_solver")
+    lines = [f"- {g}" for g in gaps[:5]]
+    lines += [f"- (avertissement) {w}" for w in soft[:5]]
+    return gaps, "\n".join(lines)
 
 
 def _is_pure_direct_answer_plan(plan) -> bool:
@@ -580,14 +644,57 @@ class Solver(Supervisor, Entity):
                 # de brûler le budget. Remis à zéro dès qu'un outil réussit.
                 tool_fail_streak: Dict[str, int] = {}
 
+                # Observabilité : `attempt_failed` est émis une seule fois par
+                # tentative, quel que soit le chemin de sortie (rejet avant
+                # exécution ou échec d'exécution). Évite d'oublier un `continue`.
+                self._attempt_failed_emitted: set = set()
+
                 while True:
                     if self.runtime_state.cancel_requested:
                         break
+
+                    try:
+                        _ca = getattr(self, "current_attempt", None)
+                        _ca_out = getattr(_ca, "outcome", None)
+                        _ca_pid = getattr(_ca, "plan_id", None)
+                        if (_ca is not None and _ca_out in ("failed", "rejected")
+                                and _ca_pid not in self._attempt_failed_emitted):
+                            self._attempt_failed_emitted.add(_ca_pid)
+                            self._emit_attempt_event(
+                                "attempt_failed", _ca,
+                                getattr(_ca, "failure_reason", "") or "",
+                            )
+                    except Exception:
+                        pass
 
                     if fail_history and is_sterile_streak(fail_history):
                         _resign_why = _("Abandon : même échec répété sans aucun progrès matériel. Inutile de relancer à l'identique.")
                         Logger.warning(f"[Solver:{self.id}] 🛑 {_resign_why}")
                         self.context += _("\n[Abandon] {}.").format(_resign_why)
+                        break
+
+                    # Garde-fou propre à la CONVERGENCE : un recul stratégique a
+                    # déjà eu lieu ; si la même divergence persiste à l'identique,
+                    # replanifier ne peut plus la réparer. La stérilité générique
+                    # ne couvre que les vraies pannes d'outil.
+                    if (
+                        len(fail_history) >= 2
+                        and strategy_refreshed_key == "convergence_failure"
+                        and failure_signature_class(fail_history[-1][0])
+                        == "convergence_failure"
+                        and fail_history[-1][0] == fail_history[-2][0]
+                    ):
+                        _conv_why = _(
+                            "Arrêt : divergence persistante après recul "
+                            "stratégique. Replanifier à l'identique ne la "
+                            "réparera pas."
+                        )
+                        Logger.warning(f"[Solver:{self.id}] 🛑 {_conv_why}")
+                        Logger.event(
+                            "convergence_circuit_open",
+                            solver_id=self.id,
+                        )
+                        self.context += _("\n[Abandon] {}.").format(_conv_why)
                         break
 
                     # Recul solver — la stratégie est peut-être en cause, pas le
@@ -663,6 +770,10 @@ class Solver(Supervisor, Entity):
                         failure_class=FailureClass.NONE
                     )
                     self.execution_tree.add_attempt(self.current_attempt)
+                    self._emit_attempt_event(
+                        "attempt_started", self.current_attempt,
+                        max_attempts=max_allowed,
+                    )
 
                     with self.runtime_state.execution_context.scope(attempt_number=attempt_counter):
                         try:
@@ -762,6 +873,10 @@ class Solver(Supervisor, Entity):
                             self.current_attempt.ended_at = time.time()
                             self.current_attempt.outcome = "failed"
                             self.current_attempt.failure_class = FailureClass.USER_CANCELLED
+                            self._emit_attempt_event(
+                                "attempt_failed", self.current_attempt,
+                                _("Annulation demandée"),
+                            )
                             self.current_attempt.failure_reason = _("Annulation demandée")
                             break
 
@@ -804,6 +919,13 @@ class Solver(Supervisor, Entity):
                                 self.current_attempt.outcome = "rejected"
                                 self.current_attempt.failure_class = FailureClass.PLAN_REJECTED_SUPERVISOR
                                 self.current_attempt.failure_reason = rejection_reason
+                                self._emit_attempt_event(
+                                    "attempt_failed", self.current_attempt, rejection_reason
+                                )
+                                try:
+                                    self._attempt_failed_emitted.add(self.current_attempt.plan_id)
+                                except Exception:
+                                    pass
                                 self.current_attempt.target_entity = "Planner"
                                 self.context += _("\n[Échec] Plan refusé par le Superviseur : {reason}").format(reason=rejection_reason)
                                 self._preexecution_failures += 1
@@ -843,13 +965,6 @@ class Solver(Supervisor, Entity):
 
                         execution_attempt += 1
                         self.runtime_state.update_marker("execution_attempt", execution_attempt)
-
-                        Logger.event(
-                            "mission_retry",
-                            solver_id=self.id,
-                            attempt_number=execution_attempt,
-                            max_attempts=max_allowed
-                        )
 
                         with self.runtime_state.execution_context.scope(entity_name="Executor", entity_role="Solver"):
                             result = await self.executor.execute_plan(
@@ -959,6 +1074,31 @@ class Solver(Supervisor, Entity):
                                 self.current_attempt.failure_reason,
                                 getattr(result, "material_success_count", 0),
                             )
+
+                            # 3 désalignements consécutifs : relire ne répare
+                            # rien. On le dit explicitement au planner et on
+                            # force un changement d'ancre/d'approche.
+                            if _perception_stall(fail_history):
+                                _stall_why = _(
+                                    "3 lectures consécutives sans alignement : "
+                                    "la cible ou l'ancre ne correspond pas au monde. "
+                                    "Ne relis pas à l'identique — change d'ancre "
+                                    "(description sémantique, autre producteur) ou "
+                                    "d'approche, ou explique honnêtement l'impossibilité."
+                                )
+                                Logger.warning(f"[Solver:{self.id}] 🔁 {_stall_why}")
+                                self.context += _("\n[ALIGNEMENT] {}.").format(_stall_why)
+                                try:
+                                    Logger.event(
+                                        "perception_stall",
+                                        solver_id=self.id,
+                                        streak=3,
+                                        last_reason=str(
+                                            self.current_attempt.failure_reason or ""
+                                        )[:500],
+                                    )
+                                except Exception:
+                                    pass
 
                             # Erreur de contrat pre-dispatch : l'alias a ete
                             # accepte par les gates structurelles mais le runtime
@@ -1145,6 +1285,11 @@ class Solver(Supervisor, Entity):
         self.current_attempt.failure_reason = error_msg
         self.current_attempt.planner_feedback = error_msg
         self.current_attempt.target_entity = "Planner"
+        self._emit_attempt_event("attempt_failed", self.current_attempt, error_msg)
+        try:
+            self._attempt_failed_emitted.add(self.current_attempt.plan_id)
+        except Exception:
+            pass
         if not store_plan:
             return
         try:
@@ -1514,6 +1659,33 @@ class Solver(Supervisor, Entity):
     async def process(self, *args, **kwargs) -> Any:
         return await self.run()
 
+    def _emit_attempt_event(
+        self, name: str, attempt: Any, reason: str = "", **extra
+    ) -> None:
+        """Evenement de cycle de vie d'une tentative (observabilite honnete).
+
+        `attempt_started` est emis a la creation de la tentative,
+        `attempt_failed` au moment ou son issue est connue (rejet avant
+        execution ou echec d'execution). L'ancien nom `mission_retry` etait
+        trompeur : il partait au demarrage, pas au retry.
+        """
+        try:
+            failure_class = getattr(attempt, "failure_class", None)
+            fields = {
+                "solver_id": self.id,
+                "attempt_number": getattr(attempt, "attempt_number", None),
+                "plan_id": getattr(attempt, "plan_id", None),
+                "outcome": getattr(attempt, "outcome", None),
+                "failure_class": getattr(failure_class, "value", failure_class),
+            }
+            if reason:
+                fields["reason"] = str(reason)
+            for _key, _value in (extra or {}).items():
+                fields[str(_key)] = _value
+            Logger.event(name, **fields)
+        except Exception:
+            pass
+
     @staticmethod
     def _record_failure(fail_history, failure_class, reason, result_or_material) -> None:
         """Ajoute (signature, matériel) à l'historique d'échecs (pur)."""
@@ -1521,7 +1693,20 @@ class Solver(Supervisor, Entity):
             material = result_or_material
             if not isinstance(material, int):
                 material = getattr(result_or_material, "material_success_count", 0) or 0
-            fail_history.append((normalize_failure_signature(failure_class, reason), int(material)))
+            tool = ""
+            code = ""
+            if not isinstance(result_or_material, int) and result_or_material is not None:
+                tool = str(getattr(result_or_material, "failed_tool", "") or "")
+                code = str(getattr(result_or_material, "error_code", "") or "")
+                bundle = getattr(result_or_material, "failure_bundle", None)
+                if not code and bundle is not None:
+                    code = str(getattr(bundle, "error_code", "") or "")
+            fail_history.append((
+                normalize_failure_signature(
+                    failure_class, reason, tool=tool, code=code
+                ),
+                int(material),
+            ))
         except Exception:
             fail_history.append((normalize_failure_signature(failure_class, reason), 0))
 
@@ -1531,6 +1716,8 @@ class Solver(Supervisor, Entity):
 
         - convergence_failure : dès le 1er échec (le plan a été exécuté : c'est
           la stratégie qui a échoué, pas la syntaxe du plan).
+        - alignment_failure : dès le 1er échec (même raison : relire à
+          l'identique ne répare pas un désalignement).
         - execution_failure : après 2 échecs de même classe (comportement historique).
         - plan_rejected : après 2 rejets consécutifs du superviseur (le planner
           n'arrive plus à changer d'approche seul → problème stratégique).
@@ -1538,12 +1725,12 @@ class Solver(Supervisor, Entity):
         key: Optional[str] = None
         try:
             if fail_history:
-                last = str(fail_history[-1][0]).split(" :: ")[0]
-                if last == "convergence_failure":
-                    key = "convergence_failure"
+                last = failure_signature_class(fail_history[-1][0])
+                if last in ("convergence_failure", "alignment_failure"):
+                    key = last
                 elif len(fail_history) >= 2:
-                    c1 = str(fail_history[-1][0]).split(" :: ")[0]
-                    c2 = str(fail_history[-2][0]).split(" :: ")[0]
+                    c1 = failure_signature_class(fail_history[-1][0])
+                    c2 = failure_signature_class(fail_history[-2][0])
                     if c1 == c2 and c1 in ("execution_failure", "convergence_failure"):
                         key = c1
         except Exception:
@@ -1678,17 +1865,14 @@ class Solver(Supervisor, Entity):
                 )
             except Exception:
                 world_warnings = ""
+            _gaps = []
             try:
-                _store = getattr(self.runtime_state, "plan_warnings_by_solver", None)
-                if isinstance(_store, dict):
-                    _gaps = [
-                        str(g).strip()
-                        for g in (_store.get(self.id, None) or [])
-                        if str(g).strip()
-                    ]
-                plan_gaps = "\n".join(f"- {g}" for g in _gaps[:5])
+                # Lacunes (porte déterministe) vs avertissements (juge seul).
+                _gaps, plan_gaps = plan_convergence_warnings(
+                    self.runtime_state, self.id
+                )
             except Exception:
-                plan_gaps = ""
+                _gaps, plan_gaps = [], ""
             # Sorties `any` non consommées : avertissement, jamais un échec.
             try:
                 _exp_store = getattr(self.runtime_state, "expected_warnings_by_solver", None)

@@ -7,6 +7,7 @@ sans dependance lourde : il peut etre importe par RuntimeState sans cycle.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import re
@@ -27,6 +28,7 @@ TARGET_ERROR_CODES = frozenset({
     "TARGET_SCOPE_MISMATCH",
     "TARGET_STALE_REF",
     "TARGET_SCHEMA_INVALID",
+    "TARGET_ANCHOR_UNSUPPORTED",
 })
 
 
@@ -143,6 +145,9 @@ class TargetEntry:
     generation: Optional[int] = None
     active: bool = True
     usable_as: Tuple[str, ...] = ()
+    # Champs libres declares par l'hote (`fields.attributes`) et exposes au
+    # selecteur : role, rect, cells, interactive... Jamais la reference.
+    attributes: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def effective_usable_as(self) -> Tuple[str, ...]:
@@ -283,6 +288,28 @@ def _clean_description(description: Any) -> str:
     if not isinstance(description, str):
         return ""
     return description.strip()[:MAX_DESCRIPTION_LENGTH]
+
+
+def _clean_attributes(attributes: Any) -> Dict[str, Any]:
+    """Copie sure des champs libres exposes au selecteur.
+
+    Seuls les noms non vides et les valeurs JSON-compatibles sont gardes :
+    un attribut ne doit jamais faire echouer l'ingress ni fuiter une ref.
+    """
+    if attributes is None:
+        return {}
+    if not isinstance(attributes, dict):
+        raise TargetSchemaError("attributes invalides")
+    cleaned: Dict[str, Any] = {}
+    for name, value in attributes.items():
+        if not isinstance(name, str) or not name.strip():
+            continue
+        try:
+            json.dumps(value, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        cleaned[name.strip()] = copy.deepcopy(value)
+    return cleaned
 
 
 def _clean_usable_as(usable_as: Any, scope: str) -> Tuple[str, ...]:
@@ -440,6 +467,7 @@ class TargetRegistry:
         generation: Optional[int] = None,
         local_name: Optional[str] = None,
         usable_as: Optional[Iterable[str]] = None,
+        attributes: Optional[Dict[str, Any]] = None,
     ) -> TargetEntry:
         scope_value = _clean_scope(scope)
         ref_value = TargetRef.from_value(ref)
@@ -447,6 +475,7 @@ class TargetRegistry:
         gen = _clean_generation(generation)
         desc = _clean_description(description)
         usable = _clean_usable_as(usable_as, scope_value)
+        attrs = _clean_attributes(attributes)
         requested_name = _clean_local_name(local_name) if local_name is not None else None
 
         existing: Optional[TargetEntry] = None
@@ -482,6 +511,8 @@ class TargetRegistry:
                     existing.description = desc
                 existing.generation = gen if gen is not None else existing.generation
                 existing.usable_as = usable
+                if attributes is not None:
+                    existing.attributes = attrs
                 if corr is not None:
                     existing.correlation_id = corr
                 existing.active = True
@@ -503,6 +534,7 @@ class TargetRegistry:
             generation=gen,
             active=True,
             usable_as=usable,
+            attributes=attrs,
         )
         self._entries[name] = entry
         self._index.set_ref(ref_value.canonical, name)

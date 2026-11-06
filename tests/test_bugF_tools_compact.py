@@ -52,6 +52,40 @@ def test_signature_tolerant():
     assert args_signature("pas un dict") == ""
 
 
+def test_signature_ne_tronque_pas_les_descriptions():
+    """Un argument cible porte son contrat dans sa description : on la garde."""
+    long_target = (
+        "Cible obligatoire : nom local `$@_...` ou ancre sémantique. Sans "
+        "ancrage, rien n'est sûr : ne devine jamais une case ni des coordonnées."
+    )
+    params = {
+        "type": "object",
+        "properties": {
+            "target": {"type": "string", "description": long_target},
+            "clear_first": {
+                "type": "boolean",
+                "description": (
+                    "Vide le champ avant de taper. Utile quand la valeur "
+                    "existante doit disparaître au lieu d'être complétée."
+                ),
+            },
+        },
+        "required": ["target"],
+    }
+    sig = args_signature(params)
+    assert long_target in sig
+    assert "Vide le champ avant de taper" in sig
+    assert "…" not in sig
+
+
+def test_signature_replie_les_sauts_de_ligne():
+    sig = args_signature({
+        "properties": {"x": {"type": "string", "description": "ligne 1\nligne 2"}}
+    })
+    assert "ligne 1 ligne 2" in sig
+    assert "\n" not in sig
+
+
 def test_planner_garde_les_noms_et_compacte_les_args():
     out = _render()
     assert "[file_move]" in out           # nom d'outil intact

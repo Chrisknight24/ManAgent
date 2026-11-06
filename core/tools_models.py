@@ -4,7 +4,7 @@ core/tools_models.py
 Modèles Pydantic pour le ToolsManager.
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from pydantic import BaseModel, Field
 from core.i18n import _
 from core.base_schema import BaseDiscoverySchema
@@ -57,4 +57,26 @@ class AnalysisResult(BaseModel):
     message: Optional[str] = Field(
         None,
         description=_("Explication complémentaire ou raison de l'échec (compatible avec les deux dénominations).")
+    )
+    observed: Optional[str] = Field(
+        None,
+        description=_(
+            "Ce qui est RÉELLEMENT observé dans la source (éléments présents, "
+            "état, texte). Rempli surtout quand l'élément cherché est absent : "
+            "c'est la matière première du replan."
+        ),
+    )
+    gap: Optional[str] = Field(
+        None,
+        description=_(
+            "Écart précis entre ce qui était demandé et ce qui est observé. "
+            "Vide si l'élément demandé est trouvé."
+        ),
+    )
+    suggested_targets: List[str] = Field(
+        default_factory=list,
+        description=_(
+            "Candidats plausibles observés (descriptions courtes, jamais des "
+            "références brutes) pour aider à choisir une cible au tour suivant."
+        ),
     )

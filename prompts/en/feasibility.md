@@ -33,6 +33,8 @@ Reports from past JUDGED missions (the judge can be wrong): suggestive leads, ne
 
 {{ tools_guidance }}
 
+Host tools are **raw data sources**: their name or description does not tell you what to conclude. Only `perceive_understand` interprets a result in the mission context. A strategy that reads the world goes through it, never through a perception tool called directly.
+
 {% if skills %}
 ## READY SKILLS
 {{ skills }}
@@ -66,7 +68,8 @@ Not feasible = a needed capability with no tool.
 - `tool_call` for every single action.
 - `abstract_task` only for a sub-goal with several actions and choices. Never to read or test a variable.
 {% if world_guidance is not defined or world_guidance %}- Read the world = ONE `perceive_understand` step (reads + explains). No analysis after it.
-{% endif %}- The strategy advises. The Planner decides.
+{% endif %}- Repair the world, do not re-read it: if perception shows the element is missing, the next step acts to fix it.
+- The strategy advises. The Planner decides.
 
 ## NOT FEASIBLE
 

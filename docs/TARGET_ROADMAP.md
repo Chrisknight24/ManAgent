@@ -716,7 +716,7 @@ inchangée à 564 tests.
 
 ## 10. Checklist avant chaque commit
 
-- [ ] `pytest -q` vert (469 + nouveaux).
+- [ ] `pytest -q` vert (base 804 au 2026-11-06).
 - [ ] T14/T28 (inertie/prompts) verts.
 - [ ] Aucun nom d'hôte/outil/app en dur.
 - [ ] Aucun bridage de sortie ajouté.
@@ -810,6 +810,32 @@ inchangée à 564 tests.
   `world_snapshot`. P4 : double leçon supprimée, i18n réelle (extraction AST,
   `.po`/`.mo` sans dépendance). P5 : routeur de scope en langage naturel
   (`investigate`, flag off par défaut). Suite **740** verte.
+- 2026-11-06 : **Lots 1-4 — ciblage visible, P0/P1, `disclosure`, docs**.
+  Lot 1 : `core/targeting.py` (`ObservedWorld` = brut + médias + candidates +
+  attributs + grille + historique de sondes) ; le sélecteur n'est plus appelé
+  avec la PD générique, la boucle « anchor or disclose » résout elle-même la
+  demande d'inspection. Lot 2 : les 5 retours `SolverResult(FAILED)` portent
+  les compteurs matériels ; signature d'échec structurée
+  `classe|outil|origine|prose[:120]|digest` ; taxonomie d'origine ; santé
+  outil et stérilité ne comptent que `TOOL_ERROR`/`UNKNOWN` ; la convergence a
+  son propre disjoncteur après le recul. Lot 3 : `fields.attributes` +
+  `target_contract.disclosure` (grille, ancres, sondes bornées à 2),
+  cellules finales seulement via un consommateur `scope: cell` + `raw: allow`,
+  médias transmis au sélecteur par le canal média, refus honnêtes
+  (`TARGET_ANCHOR_UNSUPPORTED`, `TARGET_PROBE_LOOP`). Lot 4 : HOST_CONTRACT
+  FR/EN, schéma et exemple de manifeste synchronisés. 8 tests dédiés
+  (`tests/test_target_disclosure_flow.py`) ; suite **804** verte. Aucun
+  commit/push.
+- 2026-11-06 : **Audit d'agnosticisme + refonte générique**. Constat : le cœur
+  contenait encore `SUBJECT_KINDS`/`PROBE_KINDS`, `grid_path`,
+  `anchor.candidate/cell`, `target_kind candidate|cell`, `allow_cell`,
+  `_consumer_spec_for_cell` et `scope == "cell"`. Remplacés par :
+  `views[]` (vues nommées), `anchors[]` (`kind` libre → `param`), `probe.kind`
+  libre, `target_kind` `local|anchor`, `anchor_kind`. Une ancre finale est
+  acceptée si l'hôte l'a déclarée et qu'un consommateur `raw: allow` la reçoit
+  (résolution par `anchors`, puis `scope`, puis `param` — aucun littéral).
+  Nouveaux bancs `tests/test_target_hosts_agnostic.py` : calculatrice
+  déterministe sans perception, robot, IDE. Suite **808** verte.
 
 ---
 
@@ -841,4 +867,40 @@ inchangée à 564 tests.
   complète est remplacée par **une ligne** (`Scopes disponibles : …`) et la
   boucle de découverte est court-circuitée ; l'entité passe par `investigate`.
 - Activation après R1/R2 (mesure du delta tokens/appel et du taux de refus).
+
+## 14. Ciblage visible et inspection (2026-11-06)
+
+Le sélecteur ne devine plus : il **voit** un monde observé et peut demander
+une inspection déclarée par l'hôte.
+
+- `core/targeting.py::ObservedWorld` agrège : payload brut, médias du canal
+  `returns`, candidates projetées (`key`, `description`, `scope`,
+  `attributes`), vues nommées lues via `disclosure.views[]`, historique des
+  sondes.
+- `TargetDecision` (`BaseDiscoverySchema`) porte `target_key`, `target_kind`
+  (`local`|`anchor`), `anchor_kind`, `no_target`, `reason` et
+  `discovery_request`. `local` = clé du registre ; `anchor` = valeur brute
+  d'un type **déclaré par l'hôte**. Aucun `cell`/`grid`/`preset` en dur.
+- Boucle bornée « anchor or disclose » : au plus **2 sondes**. Une sonde est
+  identifiée par `id` + sujet ; la même paire redemandée est refusée
+  (`TARGET_PROBE_LOOP`). Le LLM ne fournit jamais d'outil ni d'argument fixe.
+- `fields.attributes` expose au sélecteur des champs libres déclarés
+  (`role`, `rect`, `cells`, `angle`, ...). Repli générique limité aux champs
+  projetés : aucune référence brute ne fuit.
+- `disclosure` (version 1, optionnel) : `views[]` (`name`, `path`),
+  `anchors[]` (`kind`, `param`), `probes[]` (`id`, `kind` **libre**, `tool`,
+  `args`, `hint_param`, `subject`, `produces`). Les sondes s'exécutent par
+  `tools_mgr.execute_tool` avec les arguments déclarés.
+- Sonde `subject.kind = "local"` : nom local si le paramètre est un
+  consommateur déclaré (egress résout), sinon référence brute. Tout autre
+  `kind` est une ancre déclarée et exige `raw: allow`.
+- Cible finale ancre : le `kind` doit être déclaré (`anchors[]` ou consommateur
+  `raw: allow` dont le scope/param vaut ce kind) ; sinon refus honnête
+  `TARGET_ANCHOR_UNSUPPORTED`, aucun producteur appelé.
+- Le contrat reste `version: 1` : tous ces blocs sont optionnels et non
+  cassants. Sans contrat ou sans `disclosure`, le comportement historique est
+  inchangé.
+- Preuve multi-hôtes : `tests/test_target_hosts_agnostic.py` simule une
+  calculatrice déterministe **sans aucun outil de perception**, un robot
+  (articulations + attributs) et un IDE (ancre `file` puis cible locale).
 

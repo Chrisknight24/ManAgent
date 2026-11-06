@@ -6,7 +6,7 @@ import os
 import base64
 import mimetypes
 from typing import List, Optional, Tuple, Any, Dict
-from .plan_models import Plan, PlanStep, SolverResult, ExecutionStatus, StepType, ConvergenceDecision
+from .plan_models import Plan, PlanStep, SolverResult, ExecutionStatus, StepType, ConvergenceDecision, classify_failure_origin
 from core.constants import Events, ASSET_INLINE_LIMIT
 from utils.logger import Logger
 import re
@@ -113,6 +113,8 @@ class Executor:
             "required", "requis", "schema", "illegal", "interdit", "parse",
             "syntax", "syntaxe",
         )
+        # Outils d'alignement : un `false` n'est pas une panne du monde.
+        _ALIGNMENT_STEP_TOOLS = frozenset({"perceive_understand", "perceive_action"})
 
         if not hasattr(self.solver.runtime_state, 'mission_rum'):
             self.solver.runtime_state.mission_rum = {}
@@ -125,7 +127,10 @@ class Executor:
                         status=ExecutionStatus.FAILED,
                         final_context=accumulated_context,
                         error_reason=_("Exécution interrompue"),
-                        failure_class=FailureClass.USER_CANCELLED
+                        failure_class=FailureClass.USER_CANCELLED,
+                        material_success_count=material_success_count,
+                        tool_call_count=tool_call_count,
+                        skipped_crucial_ids=list(skipped_crucial_ids),
                     )
 
                 with self.solver.runtime_state.execution_context.scope(step_id=step.id):
@@ -149,6 +154,7 @@ class Executor:
                             step.status = ExecutionStatus.FAILED
                             node.status = ExecutionStatus.FAILED
                             node.error_reason = str(cond_err)
+                            node.failure_origin = "ARGS_INVALID"
                             node.ended_at = time.time()
                             await self.solver.propagate_event(Events.STEP_STATUS_CHANGED, {
                                 "step_id": step.id,
@@ -267,7 +273,11 @@ class Executor:
                         node.ended_at = time.time()
                         await self._credit_abstract_child(child_solver, False)
                         return SolverResult(status=ExecutionStatus.FAILED, final_context=accumulated_context,
-                                            error_reason=_("Arrêté par l'utilisateur."))
+                                            error_reason=_("Arrêté par l'utilisateur."),
+                                            failure_class=FailureClass.USER_CANCELLED,
+                                            material_success_count=material_success_count,
+                                            tool_call_count=tool_call_count,
+                                            skipped_crucial_ids=list(skipped_crucial_ids))
 
                     if not success:
                         _err_text = str(supplemental_data or "")
@@ -294,6 +304,13 @@ class Executor:
                         node.status = ExecutionStatus.FAILED
                         node.actual_result = supplemental_data
                         node.error_reason = step.result_context
+                        node.failure_origin = classify_failure_origin(
+                            FailureClass.ALIGNMENT_FAILURE
+                            if str(getattr(step, "tool_name", "") or "") in _ALIGNMENT_STEP_TOOLS
+                            else FailureClass.EXECUTION_FAILURE,
+                            step.result_context,
+                            tool_name=str(getattr(step, "tool_name", "") or ""),
+                        )
                         node.ended_at = time.time()
 
                         await self.solver.propagate_event(Events.STEP_STATUS_CHANGED, {
@@ -315,10 +332,18 @@ class Executor:
                             status=ExecutionStatus.FAILED,
                             final_context=final_context,
                             error_reason=_("Échec à l'étape {} : {}").format(step.id, step.result_context),
-                            failure_class=FailureClass.EXECUTION_FAILURE,
+                            failure_class=(
+                                FailureClass.ALIGNMENT_FAILURE
+                                if str(getattr(step, "tool_name", "") or "") in _ALIGNMENT_STEP_TOOLS
+                                else FailureClass.EXECUTION_FAILURE
+                            ),
                             target_entity="Executor",
                             failure_bundle=getattr(node, "failure_bundle", None),
-                            breakout_report=getattr(node, "breakout_report", None)
+                            breakout_report=getattr(node, "breakout_report", None),
+                            failed_tool=str(getattr(step, "tool_name", "") or "") or None,
+                            material_success_count=material_success_count,
+                            tool_call_count=tool_call_count,
+                            skipped_crucial_ids=list(skipped_crucial_ids),
                         )
 
                     convergence = await self._check_convergence(step, execution_output, supplemental_data, node=node, action_success=success)
@@ -331,7 +356,10 @@ class Executor:
                         await self._credit_abstract_child(child_solver, False)
                         return SolverResult(status=ExecutionStatus.FAILED, final_context=accumulated_context,
                                             error_reason=_("Generation stoppee."),
-                                            failure_class=FailureClass.USER_CANCELLED)
+                                            failure_class=FailureClass.USER_CANCELLED,
+                                            material_success_count=material_success_count,
+                                            tool_call_count=tool_call_count,
+                                            skipped_crucial_ids=list(skipped_crucial_ids))
 
                     if convergence.is_convergent:
                         Logger.info(f"[Executor] ✅ Étape [{step.id}] validée.")
@@ -384,6 +412,11 @@ class Executor:
                         node.status = ExecutionStatus.FAILED
                         node.actual_result = execution_output
                         node.error_reason = convergence.reason
+                        node.failure_origin = classify_failure_origin(
+                            FailureClass.CONVERGENCE_FAILURE,
+                            convergence.reason,
+                            tool_name=str(getattr(step, "tool_name", "") or ""),
+                        )
                         node.ended_at = time.time()
                         # Tag wait-timeout : les attentes appliquées cette tentative
                         # distinguent "trop court ?" d'un vrai problème d'action.
@@ -420,7 +453,11 @@ class Executor:
                             failure_class=FailureClass.CONVERGENCE_FAILURE,
                             target_entity="Executor",
                             failure_bundle=getattr(node, "failure_bundle", None),
-                            breakout_report=getattr(node, "breakout_report", None)
+                            breakout_report=getattr(node, "breakout_report", None),
+                            failed_tool=str(getattr(step, "tool_name", "") or "") or None,
+                            material_success_count=material_success_count,
+                            tool_call_count=tool_call_count,
+                            skipped_crucial_ids=list(skipped_crucial_ids),
                         )
 
             final_user_text = "\n\n".join([r for r in user_responses if r])
@@ -790,6 +827,58 @@ class Executor:
         except Exception:
             return set()
 
+    def _describe_consumer_values(self, tool_name: str, args: Any) -> Dict[str, str]:
+        """Origine de chaque argument consommateur de cible, pour la trace.
+
+        `alias:<nom>` = reference locale resolue, `unresolved:<nom>` = alias
+        declare mais absent du registre, `literal` = valeur brute (aucun
+        ancrage), `missing` = argument absent, `non_string` = type inattendu.
+        Pur (lecture registre), jamais bloquant.
+        """
+        keys = self._target_consumer_keys(tool_name)
+        if not keys or not isinstance(args, dict):
+            return {}
+        sources: Dict[str, str] = {}
+        for key in sorted(keys):
+            if key not in args:
+                sources[key] = "missing"
+                continue
+            value = args.get(key)
+            if not isinstance(value, str):
+                sources[key] = "non_string"
+                continue
+            match = re.fullmatch(r'(\$@_|@\$_)([a-zA-Z0-9_-]+)', value.strip())
+            if not match:
+                sources[key] = "literal"
+                continue
+            _matched_key, entry = self._find_var_in_registry(match.group(2))
+            if isinstance(entry, dict):
+                sources[key] = f"alias:{match.group(2)}"
+            else:
+                sources[key] = f"unresolved:{match.group(2)}"
+        return sources
+
+    def _target_arg_sources(self, step: Any, args: Any) -> List[str]:
+        """Trace lisible de l'origine des args de cible d'une etape."""
+        if not isinstance(args, dict):
+            return []
+        out: List[str] = []
+        tool_name = str(getattr(step, "tool_name", "") or "")
+        if tool_name in ("perceive_understand", "perceive_action"):
+            for args_key, tool_key in (("source_args", "source_tool"),
+                                       ("target_args", "target_producer"),
+                                       ("action_args", "action_tool")):
+                sub_args = args.get(args_key)
+                sub_tool = args.get(tool_key)
+                if not isinstance(sub_args, dict) or not isinstance(sub_tool, str):
+                    continue
+                for key, source in self._describe_consumer_values(sub_tool, sub_args).items():
+                    out.append(f"{args_key}.{key}={source}")
+        else:
+            for key, source in self._describe_consumer_values(tool_name, args).items():
+                out.append(f"{key}={source}")
+        return out
+
     def _substitute_consumer_values(self, args: Any, keys: set) -> Any:
         """Substitution brute des noms locaux, sans quoting JSON.
 
@@ -1095,6 +1184,24 @@ class Executor:
         except json.JSONDecodeError as e:
             error_detail = f"{e.msg} at line {e.lineno} column {e.colno} (pos {e.pos})"
             return False, "", _("Échec de désérialisation JSON initial : {}").format(error_detail)
+
+        # Origine des arguments de cible (alias resolu / litteral / absent) :
+        # sans cette trace, un clic sur une cible non ancree est indiscernable
+        # d'un clic ancre dans le rapport.
+        try:
+            _target_sources = self._target_arg_sources(step, tool_args)
+            if _target_sources:
+                if node is not None:
+                    node.metadata["target_args_source"] = list(_target_sources)
+                Logger.event(
+                    "target_args_source",
+                    solver_id=getattr(self.solver, "id", None),
+                    step_id=getattr(step, "id", None),
+                    tool=step.tool_name,
+                    sources=_target_sources,
+                )
+        except Exception:
+            pass
 
         # --- SI tool_manager, on garde les arguments bruts (avec $@_) ---
         if step.tool_name == "tool_manager":

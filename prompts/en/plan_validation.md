@@ -117,6 +117,10 @@ An action the user asked for in the original message keeps its risk level, and n
 History of human decisions for this mission:
 {{ human_validation_history }}
 
+## WARNINGS (`warnings`)
+
+`warnings` reports a NON-BLOCKING doubt: weak anchoring, literal target, uncertain verification, unconsumed perception. A warning NEVER makes the plan non-conformant. Set `is_conformant=false` only for a real broken rule or a dangerous plan: missing anchoring is reported, not blocked. The final convergence will evaluate these warnings.
+
 ## ANSWER
 
 Return JSON:
@@ -127,3 +131,4 @@ Return JSON:
 - `irreversibility_flags` (list of step ids)
 - `is_partial` (bool): true if the plan is safe but only reaches part of the goal
 - `partial_gaps` (list of strings): verifiable missing parts; empty when `is_partial=false`
+- `warnings` (list of strings): non-blocking doubts; never a reason to reject

@@ -69,10 +69,43 @@
               "ref": "id",
               "description": "label",
               "correlation_id": "corr",
-              "generation": "gen"
+              "generation": "gen",
+              "attributes": {
+                "role": "role",
+                "rect": "bounds",
+                "cells": "cells"
+              }
             }
           }
-        ]
+        ],
+        "disclosure": {
+          "version": 1,
+          "views": [
+            {
+              "name": "grid",
+              "path": "data.grid",
+              "description": "Grille de cellules (vue nommee par l'hote)."
+            }
+          ],
+          "anchors": [
+            {
+              "kind": "cell",
+              "param": "cell",
+              "description": "Cellule brute de la grille."
+            }
+          ],
+          "probes": [
+            {
+              "id": "elargir",
+              "kind": "widen",
+              "description": "Relit l'écran avec la question comme indice, sans changer de cible.",
+              "tool": "lire_ecran",
+              "args": {},
+              "hint_param": "question",
+              "produces": ["candidates", "grid"]
+            }
+          ]
+        }
       }
     },
     {

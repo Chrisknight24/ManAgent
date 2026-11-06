@@ -2365,7 +2365,14 @@ function formatTimestamp(ts) {
   if (typeof ts === 'number' || (typeof ts === 'string' && !isNaN(parseFloat(ts)) && isFinite(ts))) {
     d = new Date(parseFloat(ts) * 1000);
   } else {
-    d = new Date(ts);
+    // memory.db stocke UTC sans suffixe (SQLite CURRENT_TIMESTAMP). Sans
+    // marqueur, `new Date` interpreterait la chaine comme heure locale :
+    // on force UTC puis on affiche en heure locale.
+    let s = String(ts).trim();
+    if (/^\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?$/.test(s)) {
+      s = s.replace(' ', 'T') + 'Z';
+    }
+    d = new Date(s);
   }
   if (isNaN(d.getTime())) return String(ts);
   return d.toLocaleDateString('fr-FR', {month:'short', day:'numeric'}) + ' ' + d.toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit', second:'2-digit'});

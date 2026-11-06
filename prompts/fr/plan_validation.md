@@ -117,6 +117,10 @@ Une action demandée dans le message d'origine garde son risque, sans reconfirma
 Arbitrages humains de cette mission :
 {{ human_validation_history }}
 
+## AVERTISSEMENTS (`warnings`)
+
+`warnings` signale un doute NON BLOQUANT : ancrage faible, cible littérale, vérification incertaine, perception non consommée. Un avertissement ne rend JAMAIS le plan non conforme. Ne mets `is_conformant=false` que pour une vraie règle cassée ou un plan dangereux : l'absence d'ancrage se signale, elle ne bloque pas. La convergence finale évaluera ces avertissements.
+
 ## RÉPONSE
 
 JSON :
@@ -127,3 +131,4 @@ JSON :
 - `irreversibility_flags` (liste d'ids)
 - `is_partial` (bool) : true si le plan est sûr mais n'atteint qu'une partie de l'objectif
 - `partial_gaps` (liste de strings) : parties manquantes vérifiables ; vide si `is_partial=false`
+- `warnings` (liste de strings) : doutes non bloquants ; jamais un motif de refus

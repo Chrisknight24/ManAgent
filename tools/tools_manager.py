@@ -195,9 +195,17 @@ class ToolsManager(Entity):
                     "EXTERNE (hôte) puis fait comprendre le résultat par LLM. "
                     "Seule voie autorisée pour lire le monde — jamais d'appel direct "
                     "à un outil externe de perception. "
-                    "Requiert 'question' + ('source_tool' avec 'source_args' optionnels, "
-                    "ou 'source_data' déjà disponible) + 'format_response' optionnel "
-                    "(format strict attendu, ex: 'un identifiant', sinon rapport libre)."
+                    "Requiert 'question' + une source : 'source_tool' avec "
+                    "'source_args' optionnels, ou 'source_data' déjà disponible, ou "
+                    "'target_producer' (outil hôte `kind=utility` déclarant "
+                    "`produces`) avec 'target_args' recopiés de SON schéma et "
+                    "'target_description' en langage naturel. "
+                    "'source_tool' + 'target_producer' = flux composite : la "
+                    "source rend des candidates fraîches, la meilleure est "
+                    "choisie puis injectée dans le paramètre consommateur "
+                    "DÉCLARÉ du producteur (même étape, aucune référence "
+                    "périmée). Le producteur ancre une cible fraîche, liée à "
+                    "'output_target_name' du plan. 'format_response' optionnel."
                 ),
                 parameters_schema={
                     "type": "object",
@@ -206,6 +214,9 @@ class ToolsManager(Entity):
                         "source_tool": {"type": "string", "description": "Nom d'un outil EXTERNE (hôte) à appeler"},
                         "source_args": {"type": "object", "description": "Arguments de l'outil source"},
                         "source_data": {"type": "string", "description": "Variable déjà disponible (alternative à source_tool)"},
+                        "target_producer": {"type": "string", "description": "Outil EXTERNE kind=utility dont le contrat déclare produces : transforme une ancre sémantique en cible fraîche"},
+                        "target_args": {"type": "object", "description": "Arguments du producteur, recopiés de SON schéma déclaré (jamais inventés)"},
+                        "target_description": {"type": "string", "description": "Ce que la cible doit être, en langage naturel (choix parmi les candidates)"},
                         "format_response": {"type": "string", "description": "Format strict attendu de la réponse (vide = rapport libre)"}
                     },
                     "required": ["question"]
@@ -220,16 +231,18 @@ class ToolsManager(Entity):
                 name="perceive_action",
                 handler=perceive_action,
                 description=_(
-                    "VOIT puis AGIT en une seule étape (méta-outil) : perçoit via un outil "
-                    "EXTERNE, ancre la cible (référence exacte de l'observation fraîche), "
-                    "puis exécute l'action hôte aussitôt. À préférer dès qu'il faut agir "
-                    "sur ce qu'on voit (clic sur une icône, lecture puis saisie). "
-                    "Avantage : aucune référence (id/case) à écrire dans le plan, donc "
-                    "aucune devinette ni référence périmée. "
-                    "Requiert 'question' + 'source_tool' + 'action_tool'. "
-                    "'action_args' : gabarit ; toute valeur EXACTEMENT égale à \"$TARGET\" "
-                    "reçoit la référence ancrée. 'target_hint' optionnel. "
-                    "Ancrage incertain = échec honnête, jamais d'action aveugle."
+                    "VOIT puis AGIT en une seule étape (méta-outil composite) : "
+                    "`perceive_understand` lit et ancre une cible fraîche, puis "
+                    "l'outil d'action hôte la consomme aussitôt par son NOM LOCAL. "
+                    "Aucune référence brute (id/case) n'est écrite dans le plan, "
+                    "donc aucune devinette ni référence périmée. "
+                    "Requiert 'question' + une source (comme perceive_understand : "
+                    "'source_tool' (+ 'target_producer'/'target_args' pour le flux "
+                    "composite lecture → candidate → producteur) ou 'source_data') "
+                    "+ 'action_tool'. 'action_args' : gabarit ; toute valeur EXACTEMENT "
+                    "égale à \"$TARGET\" reçoit le nom local ancré. "
+                    "'target_description' optionnel. Ancrage incertain = échec honnête, "
+                    "jamais d'action aveugle."
                 ),
                 parameters_schema={
                     "type": "object",
@@ -237,11 +250,14 @@ class ToolsManager(Entity):
                         "question": {"type": "string", "description": "Que trouver, en langage naturel"},
                         "source_tool": {"type": "string", "description": "Outil perception EXTERNE (hôte)"},
                         "source_args": {"type": "object", "description": "Arguments de la perception"},
+                        "source_data": {"type": "string", "description": "Variable déjà disponible (alternative à source_tool)"},
+                        "target_producer": {"type": "string", "description": "Outil EXTERNE kind=utility dont le contrat déclare produces"},
+                        "target_args": {"type": "object", "description": "Arguments du producteur, recopiés de SON schéma déclaré"},
+                        "target_description": {"type": "string", "description": "Description sémantique de la cible"},
                         "action_tool": {"type": "string", "description": "Outil action EXTERNE (hôte)"},
-                        "action_args": {"type": "object", "description": "Gabarit d'args ($TARGET = référence ancrée)"},
-                        "target_hint": {"type": "string", "description": "Description de la cible"}
+                        "action_args": {"type": "object", "description": "Gabarit d'args ($TARGET = nom local ancré)"}
                     },
-                    "required": ["question", "source_tool", "action_tool"]
+                    "required": ["question", "action_tool"]
                 },
                 capabilities=[
                     "voir puis agir en une étape sans écrire de référence",
@@ -364,8 +380,11 @@ class ToolsManager(Entity):
                     "à un outil externe de perception). "
                     "Paramètres : 'question' (que chercher, langage naturel), "
                     "'source_tool' (outil externe hôte) + 'source_args' ou 'source_data' "
-                    "(variable déjà disponible), 'format_response' optionnel "
-                    "(format strict attendu, vide = rapport libre)."
+                    "(variable déjà disponible), ou 'target_producer' (outil hôte "
+                    "kind=utility déclarant produces) + 'target_args' recopiés de son "
+                    "schéma + 'target_description' ; 'source_tool' + 'target_producer' "
+                    "enchaîne lecture de candidates et ancrage dans la même étape ; "
+                    "'format_response' optionnel."
                 ),
                 "parameters": {
                     "type": "object",
@@ -374,6 +393,9 @@ class ToolsManager(Entity):
                         "source_tool": {"type": "string"},
                         "source_args": {"type": "object"},
                         "source_data": {"type": "string"},
+                        "target_producer": {"type": "string"},
+                        "target_args": {"type": "object"},
+                        "target_description": {"type": "string"},
                         "format_response": {"type": "string"}
                     },
                     "required": ["question"]

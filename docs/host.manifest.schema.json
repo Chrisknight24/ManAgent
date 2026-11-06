@@ -75,7 +75,12 @@
                         "description": { "type": "string" },
                         "scope": { "type": "string" },
                         "correlation_id": { "type": "string" },
-                        "generation": { "type": "string" }
+                        "generation": { "type": "string" },
+                        "attributes": {
+                          "type": "object",
+                          "description": "Free selector-visible fields: {public_name: read.path}. Never the raw reference.",
+                          "additionalProperties": { "type": "string" }
+                        }
                       },
                       "additionalProperties": true
                     },
@@ -87,6 +92,56 @@
                   },
                   "additionalProperties": true
                 }
+              },
+              "disclosure": {
+                "type": "object",
+                "description": "Optional inspection recipe (version 1). The host declares named views, raw anchor kinds and allowed probes; the brain never invents a tool, a target type or an argument.",
+                "required": ["version"],
+                "properties": {
+                  "version": { "type": "integer", "const": 1 },
+                  "views": {
+                    "type": ["object", "array"],
+                    "description": "Named views the selector may read. Object form: {name: dotted.path}; array form: [{name, path, description}].",
+                    "additionalProperties": true
+                  },
+                  "anchors": {
+                    "type": ["object", "array"],
+                    "description": "Raw anchor kinds the host accepts. Object form: {kind: consumer_param}; array form: [{kind, param, description}]. `kind` is HOST vocabulary (cell, file, key, joint...).",
+                    "additionalProperties": true
+                  },
+                  "probes": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["id", "kind"],
+                      "properties": {
+                        "id": { "type": "string", "description": "Stable probe identifier used by discovery_request.technical_goals." },
+                        "kind": { "type": "string", "minLength": 1, "description": "Free HOST vocabulary (widen, zoom, read_file, read_sensor...). The brain assigns no meaning to it." },
+                        "description": { "type": "string" },
+                        "tool": { "type": "string", "description": "Declared host tool to run. Omitted = probe is not executable." },
+                        "args": { "type": "object", "description": "Fixed arguments sent verbatim (LLM cannot override them)." },
+                        "hint_param": { "type": "string", "description": "Parameter that receives the natural-language question." },
+                        "subject": {
+                          "type": "object",
+                          "description": "Optional subject injected by the brain. kind='local' means a registry key; any other kind must be declared in anchors.",
+                          "required": ["kind", "param"],
+                          "properties": {
+                            "kind": { "type": "string", "minLength": 1 },
+                            "param": { "type": "string" },
+                            "scheme": { "type": "string" }
+                          },
+                          "additionalProperties": false
+                        },
+                        "produces": {
+                          "type": "array",
+                          "items": { "type": "string", "description": "What the probe refreshes: candidates, a named view, media..." }
+                        }
+                      },
+                      "additionalProperties": true
+                    }
+                  }
+                },
+                "additionalProperties": true
               }
             },
             "additionalProperties": true

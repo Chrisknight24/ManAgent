@@ -149,6 +149,39 @@ async def test_raw_allow_is_an_explicit_passthrough():
 
 
 @pytest.mark.asyncio
+async def test_raw_allow_resolves_known_local_name_and_passes_literal_through():
+    """`raw: allow` n'est pas un « ne rien faire » : c'est un « littéral admis ».
+
+    Un paramètre qui accepte à la fois une cible nommée et un opt-out littéral
+    (ex. raccourci système global) doit résoudre le nom local connu ET laisser
+    passer le littéral inconnu. Sinon le cerveau devrait coder en dur le
+    vocabulaire de l'hôte — dépendance interdite.
+    """
+    tm = _manager("legacy", contract=_contract("target", raw="allow"))
+    runtime_state = _runtime(tm)
+    entry = _register(runtime_state)
+
+    # 1. Littéral hôte inconnu : transmis tel quel, sans display.
+    orchestrator = _FakeOrchestrator(runtime_state)
+    raw = await Orchestrator._execute_external_tool(
+        orchestrator, "legacy", {"target": "none"}
+    )
+    assert json.loads(raw)["result"] is True
+    assert orchestrator.events[0][1]["arguments"] == {"target": "none"}
+    assert "arguments_display" not in orchestrator.events[0][1]
+
+    # 2. Nom local connu : résolu en référence hôte malgré `raw: allow`.
+    orchestrator = _FakeOrchestrator(runtime_state)
+    raw = await Orchestrator._execute_external_tool(
+        orchestrator, "legacy", {"target": entry.local_name}
+    )
+    assert json.loads(raw)["result"] is True
+    payload = orchestrator.events[0][1]
+    assert payload["arguments"] == {"target": {"id": 7}}
+    assert payload["arguments_display"] == {"target": entry.local_name}
+
+
+@pytest.mark.asyncio
 async def test_multi_target_is_all_or_nothing():
     tm = _manager("drag", params=("src", "dst"))
     runtime_state = _runtime(tm)

@@ -290,8 +290,12 @@ Validation rules (a contract is all-or-nothing):
 - `scope` XOR `fields.scope`: fixed declared scope, or scope read per item.
   An item without a usable scope is skipped (a `single` output becomes `null`).
 - `fields.ref` is mandatory. Other recognized roles are `description`,
-  `scope`, `correlation_id`, `generation`; unknown roles are ignored with a
-  warning.
+  `scope`, `correlation_id`, `generation`, `attributes`; unknown roles are
+  ignored with a warning.
+- `fields.attributes` (optional) declares free selector-visible fields:
+  `{"public_name": "read.path"}`. Values are copied into the entry and shown
+  as-is (`role`, `rect`, `cells`, ...), never the reference. Without it, the
+  selector only sees `key`, `description` and `scope`.
 - `usable_as` (optional) widens consumable scopes: a target in this scope may
   fill a slot of each listed scope. Default: `[scope]`. The relation is not
   transitive.
@@ -360,6 +364,71 @@ Identity and freshness:
 - descriptions are **untrusted data**, capped at 200 characters, never
   instructions.
 
+### Declared inspections (`disclosure`) and anchors
+
+When a read is not enough (ambiguous candidates, zoom, a file to resolve), the
+host may declare **named views**, **raw anchor kinds** and **inspection
+recipes**. The brain knows no tool name and no target type: it may only request
+what is listed. The contract stays at `version: 1`; `disclosure` is optional
+and non-breaking.
+
+```json
+"disclosure": {
+  "version": 1,
+  "views": [
+    {"name": "grid", "path": "data.grid", "description": "Cell grid"},
+    {"name": "tree", "path": "data.tree", "description": "Project tree"}
+  ],
+  "anchors": [
+    {"kind": "cell", "param": "cell", "description": "Raw cell"},
+    {"kind": "file", "param": "path", "description": "File path"}
+  ],
+  "probes": [
+    {
+      "id": "widen",
+      "kind": "widen",
+      "description": "Re-reads the screen using the question as a hint.",
+      "tool": "scan_ui",
+      "args": {},
+      "hint_param": "query",
+      "produces": ["candidates", "grid"]
+    },
+    {
+      "id": "inspect_cell",
+      "kind": "inspect",
+      "tool": "scan_ui",
+      "subject": {"kind": "cell", "param": "cell"},
+      "produces": ["candidates"]
+    }
+  ]
+}
+```
+
+- `views[]`: free `name` (grid, tree, sensors...) and `path` relative to the
+  full result. The view is shown to the selector, never a raw reference.
+- `anchors[]`: `kind` is **host vocabulary** (`cell`, `file`, `key`, `joint`,
+  `symbol`...), `param` is the consumer that receives the raw value. A final
+  `anchor` target is accepted only when its `kind` is declared here (or derived
+  from a `raw: allow` consumer).
+- `probes[]`: stable `id`, **free** `kind` (the brain assigns no meaning),
+  declared host `tool`, fixed `args`, `hint_param` (receives the question when
+  empty), optional `subject`, and `produces` (what the probe refreshes).
+- `subject.kind = "local"`: the subject is a registry key (local name). Any
+  other `kind` refers to a declared anchor and requires a `raw: allow`
+  parameter.
+- The LLM only supplies `id` and a subject through `discovery_request`; it
+  cannot invent a tool, override a fixed argument, or invent a `kind`.
+- Budget: **2 inspections maximum**. The same probe for the same subject is
+  refused (`TARGET_PROBE_LOOP`). Exhausted budget = final decision required.
+- A `local` probe uses the **local name** when the parameter is a declared
+  consumer (the egress membrane resolves it), otherwise the raw reference. An
+  anchor probe requires a `raw: allow` parameter.
+- Final `anchor` target: only when the host declares that `kind` and a matching
+  `raw: allow` consumer. Otherwise an honest `TARGET_ANCHOR_UNSUPPORTED`
+  refusal, never a guess.
+- Media payloads declared in `returns` reach the selector through the media
+  channel: never base64 inside the prompt.
+
 ### Updates (`target_updates`)
 
 A result may invalidate known targets:
@@ -394,6 +463,8 @@ A result may invalidate known targets:
 | `TARGET_SCOPE_MISMATCH` | produced scope incompatible with consumed scope |
 | `TARGET_SCHEMA_INVALID` | empty/malformed local name, invalid reference or entry |
 | `TARGET_STALE_REF` | reserved for a stale reference reported by the host; the runtime never invents it |
+| `TARGET_ANCHOR_UNSUPPORTED` | no safe target (or an anchor chosen without a matching `raw: allow` consumer): honest refusal, no guess |
+| `TARGET_PROBE_LOOP` | the same probe was requested again for the same subject: repeated inspection refused |
 
 `TARGET_REF_REJECTED` does not exist. A refusal emitted by the host remains a
 host refusal (`result.status: "rejected"` + its `error.code`), not a runtime

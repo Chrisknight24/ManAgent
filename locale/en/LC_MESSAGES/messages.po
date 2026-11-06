@@ -18,6 +18,9 @@ msgstr ""
 msgid "\nVeuillez corriger cette erreur dans votre nouveau plan."
 msgstr ""
 
+msgid "\n[ALIGNEMENT] {}."
+msgstr ""
+
 msgid "\n[Abandon] {}."
 msgstr ""
 
@@ -48,16 +51,55 @@ msgstr ""
 msgid " Étape possiblement concernée : {target}. Piste à évaluer : faire évoluer l'approche de cette étape, ou ajuster l'attente si le délai semble en cause. Cette étape n'est pas nécessairement la cause ; remonte aussi le plan si l'indice est ambigu."
 msgstr ""
 
+msgid "'action_args' doit être un objet JSON."
+msgstr ""
+
+msgid "'action_tool' doit être un outil externe (hôte)."
+msgstr ""
+
 msgid "'source_data' doit être un nom ($@_...) ou une adresse d'asset, jamais du texte libre."
 msgstr ""
 
 msgid "'source_tool' ou 'source_data' requis (d'où lire le monde)."
 msgstr ""
 
+msgid "'source_tool', 'source_data' ou 'target_producer' requis (d'où lire le monde)."
+msgstr ""
+
+msgid "'target_args' doit être un objet JSON conforme au schéma de '{tool}'."
+msgstr ""
+
+msgid "'target_producer' avec 'source_data' ne peut pas ancrer une candidate fraîche : utilise 'source_tool' pour lire et ancrer dans la même étape."
+msgstr ""
+
+msgid "'target_producer' avec 'source_data' ne peut pas ancrer une cible locale fraîche : utilise 'source_tool' pour lire et ancrer dans la même étape."
+msgstr ""
+
+msgid "'target_producer' est exclusif avec 'source_tool'/'source_data' : choisis UNE source d'ancrage."
+msgstr ""
+
 msgid "'targets' et 'technical_goals' sont requis."
 msgstr ""
 
 msgid "'{tool}' est interne : la source doit être un outil externe (hôte)."
+msgstr ""
+
+msgid "'{tool}' est interne : le producteur de cible doit être un outil externe (hôte)."
+msgstr ""
+
+msgid "'{tool}' n'est pas un utilitaire de production de cible (kind='utility') : ne l'appelle pas comme ancre, fais-en une étape d'action explicite."
+msgstr ""
+
+msgid "'{tool}' ne déclare aucun paramètre consommateur d'ancre brute pour le type '{kind}' (raw autorisé) : ancrage impossible."
+msgstr ""
+
+msgid "'{tool}' ne déclare aucun paramètre consommateur de cellule (scope 'cell', raw autorisé) : ancrage impossible."
+msgstr ""
+
+msgid "'{tool}' ne déclare aucun paramètre consommateur de cible : ancrage impossible."
+msgstr ""
+
+msgid "'{tool}' ne déclare pas de cible produite (contrat 'produces') : il ne peut pas servir d'ancre."
 msgstr ""
 
 msgid "(DataAsset: {})"
@@ -132,6 +174,30 @@ msgstr ""
 msgid "--- DIRECTIVE LOCALE SPÉCIFIQUE À CETTE TÂCHE ---\n"
 msgstr ""
 
+msgid "3 lectures consécutives sans alignement : la cible ou l'ancre ne correspond pas au monde. Ne relis pas à l'identique — change d'ancre (description sémantique, autre producteur) ou d'approche, ou explique honnêtement l'impossibilité."
+msgstr ""
+
+msgid "<un argument consommateur du producteur>"
+msgstr ""
+
+msgid "<un argument d'ancre du producteur>"
+msgstr ""
+
+msgid "<un outil [perception] qui produit des candidates de OUTILS>"
+msgstr ""
+
+msgid "<un outil [produces] de OUTILS>"
+msgstr ""
+
+msgid "<un outil avec argument 'target' de OUTILS>"
+msgstr ""
+
+msgid "<un outil d'action à cible de OUTILS>"
+msgstr ""
+
+msgid "<un outil hôte qui lit le monde de OUTILS>"
+msgstr ""
+
 msgid "=== RÉSUMÉ DE L'EXÉCUTION ===\n"
 msgstr ""
 
@@ -189,6 +255,9 @@ msgstr ""
 msgid "Ancrage incertain : aucune cible sûre dans l'observation, pas d'action aveugle."
 msgstr ""
 
+msgid "Ancres declarees :"
+msgstr ""
+
 msgid "Annulation demandée"
 msgstr ""
 
@@ -210,7 +279,22 @@ msgstr ""
 msgid "Arbre d'exécution du solver enfant (pour les sous-tâches abstraites)"
 msgstr ""
 
+msgid "Arguments d'étape illisibles même après parseur tolérant"
+msgstr ""
+
 msgid "Arguments de l'outil (dict)"
+msgstr ""
+
+msgid "Arguments de l'outil, en JSON d'objet valide : {\"button\": \"left\"}. Une chaîne JSON, SANS commentaire ni texte avant/après. Pour les données du registre, référencer $@_nom. Pour perceive_understand : {\"question\": \"...\", \"source_tool\": \"...\"} ou {\"question\": \"...\", \"source_data\": \"...\"} ou {\"question\": \"...\", \"target_producer\": \"...\", \"target_args\": {...}} ; pour le flux composite : {\"question\": \"...\", \"source_tool\": \"...\", \"target_producer\": \"...\", \"target_args\": {...}} (la source rend les candidates, le producteur en consomme une)."
+msgstr ""
+
+msgid "Arguments de l'outil, en JSON d'objet valide : {\"button\": \"left\"}. Une chaîne JSON, SANS commentaire ni texte avant/après. Pour les données du registre, référencer $@_nom. Pour perceive_understand : {\"question\": \"...\", \"source_tool\": \"...\"} ou {\"question\": \"...\", \"source_data\": \"...\"} ou {\"question\": \"...\", \"target_producer\": \"...\", \"target_args\": {...}}."
+msgstr ""
+
+msgid "Arguments de l'outil, en JSON d'objet valide : {\"button\": \"left\"}. Une chaîne JSON, SANS commentaire ni texte avant/après. Pour les données du registre, référencer $@_nom. Pour perceive_understand : {\"question\": \"...\", \"source_tool\": \"...\"} ou {\"question\": \"...\", \"source_data\": \"...\"}."
+msgstr ""
+
+msgid "Arrêt : divergence persistante après recul stratégique. Replanifier à l'identique ne la réparera pas."
 msgstr ""
 
 msgid "Arrêt : outil(s) en échec répété ({tools}) malgré 3 tentatives — le problème vient des outils, pas du plan."
@@ -264,6 +348,12 @@ msgstr ""
 msgid "Aucun gestionnaire d'outils pour appeler la source."
 msgstr ""
 
+msgid "Aucun gestionnaire d'outils pour appeler le producteur de cible."
+msgstr ""
+
+msgid "Aucun gestionnaire d'outils pour executer la sonde."
+msgstr ""
+
 msgid "Aucun gestionnaire d'outils pour percevoir/agir."
 msgstr ""
 
@@ -288,10 +378,19 @@ msgstr ""
 msgid "Aucun scope ne peut traiter cette demande : {question}"
 msgstr ""
 
+msgid "Aucune candidate ne correspond à « {q} » : ancrage refusé, aucune devinette."
+msgstr ""
+
 msgid "Aucune cible disponible pour '{name}'."
 msgstr ""
 
+msgid "Aucune cible locale ne correspond à « {q} » : ancrage refusé, aucune devinette."
+msgstr ""
+
 msgid "Aucune cible spécifiée."
+msgstr ""
+
+msgid "Aucune cible sure pour « {q} » : aucune devinette."
 msgstr ""
 
 msgid "Aucune cible sûre dans l'observation, pas d'action aveugle."
@@ -306,6 +405,12 @@ msgstr ""
 msgid "Aucune étape exécutée."
 msgstr ""
 
+msgid "Avertissements NON BLOQUANTS : doutes, ancrage faible, cible littérale ou vérification incertaine. Ne jamais refuser un plan à cause d'un avertissement ; la convergence finale les évaluera."
+msgstr ""
+
+msgid "Budget d'inspection epuise sans cible sure pour « {q} » : aucune devinette."
+msgstr ""
+
 msgid "Budget standard épuisé : {} exécution(s)."
 msgstr ""
 
@@ -316,6 +421,15 @@ msgid "But non atteint."
 msgstr ""
 
 msgid "Cache hit pour"
+msgstr ""
+
+msgid "Candidate inconnue pour la sonde '{id}' : {key!r}."
+msgstr ""
+
+msgid "Candidates :"
+msgstr ""
+
+msgid "Candidats plausibles observés (descriptions courtes, jamais des références brutes) pour aider à choisir une cible au tour suivant."
 msgstr ""
 
 msgid "Catégorie d'échec si outcome == failed"
@@ -330,6 +444,9 @@ msgstr ""
 msgid "Ce que tu cherches, en langage naturel (ex: « Est-ce que Paint est ouvert ? »)."
 msgstr ""
 
+msgid "Ce qui est RÉELLEMENT observé dans la source (éléments présents, état, texte). Rempli surtout quand l'élément cherché est absent : c'est la matière première du replan."
+msgstr ""
+
 msgid "Chat reset handled successfully"
 msgstr ""
 
@@ -337,6 +454,9 @@ msgid "Chaîne JSON contenant les arguments pour l'outil (si success=True)."
 msgstr ""
 
 msgid "Checkpoints validés par {}"
+msgstr ""
+
+msgid "Choisis une cible visible ou demande une inspection."
 msgstr ""
 
 msgid "Cible '{desc}' ({scope})"
@@ -354,6 +474,9 @@ msgstr ""
 msgid "Cible ancrée et action exécutée."
 msgstr ""
 
+msgid "Cible locale inconnue pour la sonde '{id}' : {key!r}."
+msgstr ""
+
 msgid "Cible non liée : contrat ou registre de cibles indisponible pour '{}'."
 msgstr ""
 
@@ -363,6 +486,9 @@ msgstr ""
 msgid "Cible non liée : liaison de '{}' impossible ({})."
 msgstr ""
 
+msgid "Cibles locales :"
+msgstr ""
+
 msgid "Cibles non déclarées : {vars}. Ces variables alimentent l'argument 'target' : déclarez chaque cible via 'output_target_name' sur l'étape qui la crée (outil producteur), et non via 'output_variable_name'."
 msgstr ""
 
@@ -370,6 +496,24 @@ msgid "Classe d'échec détectée par l'Executor (EXECUTION_FAILURE ou CONVERGEN
 msgstr ""
 
 msgid "Cle candidate inconnue : {key!r}"
+msgstr ""
+
+msgid "Cle locale exacte d'une candidate ou reference exacte d'une cellule de la grille. Vide si une inspection est demandee."
+msgstr ""
+
+msgid "Cle locale exacte d'une cible publiee, ou valeur brute d'une ancre declaree par l'hote. Vide si une inspection est demandee."
+msgstr ""
+
+msgid "Cle locale inconnue : {key!r}"
+msgstr ""
+
+msgid "Clé candidate inconnue : {key!r}"
+msgstr ""
+
+msgid "Clé locale inconnue : {key!r}"
+msgstr ""
+
+msgid "Code d'erreur fermé renvoyé par l'hôte ou l'outil, quand il est disponible."
 msgstr ""
 
 msgid "Compétence automatisée"
@@ -510,6 +654,9 @@ msgstr ""
 msgid "Exécution interrompue"
 msgstr ""
 
+msgid "Facon d'addresser la cible : 'local' (cle du registre) ou 'anchor' (valeur brute d'un type d'ancre declare par l'hote)."
+msgstr ""
+
 msgid "FactsExplorer n'a pas de LLM pour générer un plan."
 msgstr ""
 
@@ -538,6 +685,9 @@ msgid "Generation stoppee."
 msgstr ""
 
 msgid "Goal"
+msgstr ""
+
+msgid "Grille :"
 msgstr ""
 
 msgid "Groq API error {}: {}"
@@ -594,6 +744,9 @@ msgstr ""
 msgid "Inconnu"
 msgstr ""
 
+msgid "Justification courte, une phrase."
+msgstr ""
+
 msgid "Justification technique de la décision. Si is_conformant=False, doit être assez précise pour que le Planner puisse corriger son prochain plan. Ce texte est réinjecté tel quel dans le contexte du Planner en cas de refus."
 msgstr ""
 
@@ -601,6 +754,9 @@ msgid "Justification technique, assez précise pour comprendre le jugement même
 msgstr ""
 
 msgid "L'action '{tool}' a échoué : {err}"
+msgstr ""
+
+msgid "L'action '{tool}' est mal appelée : {err}"
 msgstr ""
 
 msgid "L'arbre d'exécution de cette mission est vide."
@@ -639,6 +795,9 @@ msgstr ""
 msgid "L'étape '{}' a des args illisibles ({}). Texte fautif : {}"
 msgstr ""
 
+msgid "L'étape '{}' a des args illisibles. Texte fautif : {}"
+msgstr ""
+
 msgid "L'étape '{}' déclare une cible '{}' qui entre en collision avec un nom déjà connu."
 msgstr ""
 
@@ -666,6 +825,12 @@ msgstr ""
 msgid "LIT le monde via un outil externe puis le fait comprendre par LLM. Seule voie autorisée pour lire le monde (jamais d'appel direct à un outil externe de perception). Paramètres : 'question' (que chercher, langage naturel), 'source_tool' (outil externe hôte) + 'source_args' ou 'source_data' (variable déjà disponible), 'format_response' optionnel (format strict attendu, vide = rapport libre)."
 msgstr ""
 
+msgid "LIT le monde via un outil externe puis le fait comprendre par LLM. Seule voie autorisée pour lire le monde (jamais d'appel direct à un outil externe de perception). Paramètres : 'question' (que chercher, langage naturel), 'source_tool' (outil externe hôte) + 'source_args' ou 'source_data' (variable déjà disponible), ou 'target_producer' (outil hôte kind=utility déclarant produces) + 'target_args' recopiés de son schéma + 'target_description' ; 'format_response' optionnel."
+msgstr ""
+
+msgid "LIT le monde via un outil externe puis le fait comprendre par LLM. Seule voie autorisée pour lire le monde (jamais d'appel direct à un outil externe de perception). Paramètres : 'question' (que chercher, langage naturel), 'source_tool' (outil externe hôte) + 'source_args' ou 'source_data' (variable déjà disponible), ou 'target_producer' (outil hôte kind=utility déclarant produces) + 'target_args' recopiés de son schéma + 'target_description' ; 'source_tool' + 'target_producer' enchaîne lecture de candidates et ancrage dans la même étape ; 'format_response' optionnel."
+msgstr ""
+
 msgid "La cible '{target}' n'existe pas dans les données fournies."
 msgstr ""
 
@@ -684,10 +849,37 @@ msgstr ""
 msgid "La réponse de l'analyse (peut être une chaîne, un nombre, une liste, etc.)."
 msgstr ""
 
+msgid "La sonde '{id}' a deja ete demandee pour ce sujet : inspection repetee refusee."
+msgstr ""
+
+msgid "La sonde '{id}' exige un sujet."
+msgstr ""
+
+msgid "La sonde '{id}' ne declare aucun outil : inspection impossible."
+msgstr ""
+
+msgid "La sonde '{id}' utilise le type d'ancre '{kind}', que l'hote ne declare pas."
+msgstr ""
+
+msgid "La sonde '{id}' vise une ancre brute mais le parametre '{param}' n'autorise pas les valeurs brutes."
+msgstr ""
+
+msgid "La sonde '{id}' vise une cellule brute mais le parametre '{param}' n'autorise pas les valeurs brutes."
+msgstr ""
+
 msgid "La source '{tool}' a échoué : {err}"
 msgstr ""
 
 msgid "La source '{tool}' est mal appelée : {err}"
+msgstr ""
+
+msgid "La source '{tool}' n'a produit aucune candidate ancrable."
+msgstr ""
+
+msgid "La source '{tool}' n'a produit aucune cible ancrable."
+msgstr ""
+
+msgid "La source '{tool}' n'a produit aucune cible locale ancrable."
 msgstr ""
 
 msgid "La stratégie globale d'approche à transmettre au Planner. Laisser vide si is_possible est False."
@@ -709,6 +901,15 @@ msgid "Le champ 'discovery_request' est obligatoire lorsque type='request'."
 msgstr ""
 
 msgid "Le contexte local, données ou prérequis spécifiques nécessaires à l'exécution."
+msgstr ""
+
+msgid "Le gabarit place $TARGET dans '{key}', mais la cible est une ancre brute : seul '{param}' est déclaré pour le type '{kind}'."
+msgstr ""
+
+msgid "Le gabarit place $TARGET dans '{key}', mais la cible est une cellule : seul '{param}' est déclaré pour les cellules."
+msgstr ""
+
+msgid "Le gabarit place $TARGET dans '{key}', qui n'est pas un paramètre cible déclaré par '{tool}'."
 msgstr ""
 
 msgid "Le goal technique '{tg}' n'est pas supporté par FactsExplorer. Goals disponibles : {goals}"
@@ -762,6 +963,21 @@ msgstr ""
 msgid "Le planner déclare-t-il qu'un changement du monde est attendu après cette action ? True = oui (ex : clic sur une icône), False = non, null (défaut) = indéterminé : l'executor ne change strictement rien."
 msgstr ""
 
+msgid "Le producteur '{tool}' a échoué : {err}"
+msgstr ""
+
+msgid "Le producteur '{tool}' ne déclare aucun paramètre consommateur compatible avec la candidate (scope '{scope}') : ancrage refusé, aucune devinette."
+msgstr ""
+
+msgid "Le producteur '{tool}' ne déclare aucun paramètre consommateur compatible avec la cible locale (scope '{scope}') : ancrage refusé, aucune devinette."
+msgstr ""
+
+msgid "Le producteur '{tool}' ne déclare aucun paramètre consommateur d'ancre brute pour le type '{kind}' (raw autorisé) : ancrage refusé, aucune devinette."
+msgstr ""
+
+msgid "Le producteur '{tool}' ne déclare aucun paramètre consommateur de cellule (scope 'cell', raw autorisé) : ancrage refusé, aucune devinette."
+msgstr ""
+
 msgid "Le provider '{}' est introuvable."
 msgstr ""
 
@@ -787,6 +1003,9 @@ msgid "Le système a rejeté votre plan pour l'erreur suivante :\n{}\n"
 msgstr ""
 
 msgid "Le type d'action à mener pour cette étape"
+msgstr ""
+
+msgid "Le type d'ancre '{kind}' n'est pas declare par l'hote (declare : {known})."
 msgstr ""
 
 msgid "Les arguments d'outil doivent être un dictionnaire JSON valide."
@@ -909,10 +1128,22 @@ msgstr ""
 msgid "Métadonnées libres"
 msgstr ""
 
+msgid "Même monde et même plan qu'une tentative précédente : rejouer à l'identique ne changera pas le résultat."
+msgstr ""
+
+msgid "N'utilisez que les outils listés et les skills en PRODUCTION, avec des arguments JSON valides."
+msgstr ""
+
+msgid "N'utilisez que les outils listés et les skills en PRODUCTION."
+msgstr ""
+
 msgid "Niveau de risque perçu du plan, indépendamment de sa conformité."
 msgstr ""
 
 msgid "No pending context found for call_id: {}"
+msgstr ""
+
+msgid "Nom EXACT de l'outil exécuté par ce step (celui de la liste des outils). Obligatoire non vide si type == 'tool_call'."
 msgstr ""
 
 msgid "Nom d'un outil [perception] du manifeste pour l'arbitrage si le changement attendu ne se produit pas. Optionnel ; sinon convention get_world_state ; sinon pas d'arbitrage (échec honnête)."
@@ -969,6 +1200,9 @@ msgstr ""
 msgid "Objectif du solver"
 msgstr ""
 
+msgid "Observation brute (ancrage seul)."
+msgstr ""
+
 msgid "OpenAI API error {}: {}"
 msgstr ""
 
@@ -987,7 +1221,16 @@ msgstr ""
 msgid "Outil de LECTURE du monde (méta-outil) : perçoit via un outil EXTERNE (hôte) puis fait comprendre le résultat par LLM. Seule voie autorisée pour lire le monde — jamais d'appel direct à un outil externe de perception. Requiert 'question' + ('source_tool' avec 'source_args' optionnels, ou 'source_data' déjà disponible) + 'format_response' optionnel (format strict attendu, ex: 'un identifiant', sinon rapport libre)."
 msgstr ""
 
+msgid "Outil de LECTURE du monde (méta-outil) : perçoit via un outil EXTERNE (hôte) puis fait comprendre le résultat par LLM. Seule voie autorisée pour lire le monde — jamais d'appel direct à un outil externe de perception. Requiert 'question' + une source : 'source_tool' avec 'source_args' optionnels, ou 'source_data' déjà disponible, ou 'target_producer' (outil hôte `kind=utility` déclarant `produces`) avec 'target_args' recopiés de SON schéma et 'target_description' en langage naturel. 'source_tool' + 'target_producer' = flux composite : la source rend des candidates fraîches, la meilleure est choisie puis injectée dans le paramètre consommateur DÉCLARÉ du producteur (même étape, aucune référence périmée). Le producteur ancre une cible fraîche, liée à 'output_target_name' du plan. 'format_response' optionnel."
+msgstr ""
+
+msgid "Outil de LECTURE du monde (méta-outil) : perçoit via un outil EXTERNE (hôte) puis fait comprendre le résultat par LLM. Seule voie autorisée pour lire le monde — jamais d'appel direct à un outil externe de perception. Requiert 'question' + une source : 'source_tool' avec 'source_args' optionnels, ou 'source_data' déjà disponible, ou 'target_producer' (outil hôte `kind=utility` déclarant `produces`) avec 'target_args' recopiés de SON schéma et 'target_description' en langage naturel. Le producteur ancre une cible fraîche, liée à 'output_target_name' du plan. 'format_response' optionnel."
+msgstr ""
+
 msgid "Outil de délégation et chef d'orchestre d'analyse de données. Il permet d'exécuter des traitements et des analyses avancées via ses sous-outils internes gérés.\nN'agit JAMAIS directement sur le monde : analyse, route et compose ; pour transformer le monde, passez par un outil hôte [action] ou une requête complète explicite.\nCapacités dynamiques supportées : {caps}.\nSous-outils actuellement gérés :\n{tools}\nFormulez simplement le besoin dans le paramètre 'request'."
+msgstr ""
+
+msgid "Outil dont l'étape a échoué, quand il est connu (diagnostic de signature)."
 msgstr ""
 
 msgid "Outil inconnu : {}"
@@ -1011,6 +1254,9 @@ msgstr ""
 msgid "Perception en échec."
 msgstr ""
 
+msgid "Perception non consommée : {ids}. Sa sortie n'est réutilisée par aucune étape postérieure — vérifiez qu'elle prouve le but."
+msgstr ""
+
 msgid "Permet d'injecter une valeur littérale brute (texte, JSON, liste, chiffre) dans le registre en la retournant telle quelle. Utilisez impérativement 'output_variable_name' dans l'étape du plan pour la sauvegarder."
 msgstr ""
 
@@ -1032,6 +1278,12 @@ msgstr ""
 msgid "Plan refusé sans appel au juge : {details}. N'utilisez que les outils listés et les skills en PRODUCTION, avec des arguments JSON valides ; sinon terminez en réponse directe motivée."
 msgstr ""
 
+msgid "Plan refusé sans appel au juge : {details}. {advice} Sinon, terminez en réponse directe motivée."
+msgstr ""
+
+msgid "Plan sans action matérielle : il lit, analyse ou répond mais ne change pas le monde. Un but d'action ne peut pas être prouvé ainsi."
+msgstr ""
+
 msgid "Pose une question en langage naturel sur l'état du monde, les fichiers, l'historique, les skills ou le registre. Le routeur choisit la source. Aucune action n'est exécutée."
 msgstr ""
 
@@ -1044,10 +1296,19 @@ msgstr ""
 msgid "Presentator requires a Llm instance or provider/model identifiers."
 msgstr ""
 
+msgid "Producteur '{tool}' mal appelé : {err}"
+msgstr ""
+
+msgid "Producteur en échec."
+msgstr ""
+
 msgid "Profondeur dans l'arbre (0 pour root)"
 msgstr ""
 
 msgid "Provider {provider_id} introuvable."
+msgstr ""
+
+msgid "Question : {question}"
 msgstr ""
 
 msgid "Question sémantique ou consigne d'analyse"
@@ -1194,10 +1455,19 @@ msgstr ""
 msgid "Résumer et analyser la valeur"
 msgstr ""
 
+msgid "Réécrivez les arguments des étapes citées en un objet JSON valide. Texte fautif à remplacer : {snips}."
+msgstr ""
+
 msgid "Scopes disponibles : {scopes} — utilise l'outil `investigate` pour poser ta question."
 msgstr ""
 
+msgid "Selection de cible impossible : reponse invalide."
+msgstr ""
+
 msgid "Selection de cible impossible : {err}"
+msgstr ""
+
+msgid "Selection de cible impossible."
 msgstr ""
 
 msgid "Session purged"
@@ -1215,6 +1485,12 @@ msgstr ""
 msgid "Si is_possible est False, l'explication polie et directe destinée à l'utilisateur. Si True, une courte justification technique."
 msgstr ""
 
+msgid "Si target_kind='anchor' : type d'ancre declare par l'hote (par exemple cell, file, key, joint, symbol...). Sinon vide."
+msgstr ""
+
+msgid "Si type == 'direct_answer' : la réponse intégrale destinée à l'utilisateur, en langage naturel. Sinon None."
+msgstr ""
+
 msgid "Si type == 'tool_call' : 'true', 'false' ou 'any'. Omis/null = 'true' (rigide). 'any' = la valeur n'est pas jugée, le plan branche dessus (un résultat négatif est accepté). Si type == 'abstract_task', décrit sémantiquement l'état attendu."
 msgstr ""
 
@@ -1222,6 +1498,18 @@ msgid "Si échec, raison détaillée"
 msgstr ""
 
 msgid "Solver requires a Llm instance or provider/model identifiers."
+msgstr ""
+
+msgid "Sonde '{id}' en echec : {err}"
+msgstr ""
+
+msgid "Sonde en echec."
+msgstr ""
+
+msgid "Sondes :"
+msgstr ""
+
+msgid "Sortie à critère 'any' non consommée : {ids}."
 msgstr ""
 
 msgid "Source en échec."
@@ -1326,7 +1614,22 @@ msgstr ""
 msgid "Type d'étape inconnu : {type}"
 msgstr ""
 
+msgid "Type de cible : 'candidate' (cle locale) ou 'cell' (cellule de la grille)."
+msgstr ""
+
 msgid "Un step de type 'tool_call' exige obligatoirement un 'tool_name' non vide."
+msgstr ""
+
+msgid "Une ancre brute a ete choisie mais l'hote n'en declare aucune pour cette etape."
+msgstr ""
+
+msgid "Une ancre brute ne peut pas être liée à une variable de plan : utilise `perceive_action` pour agir dans la même étape."
+msgstr ""
+
+msgid "Une cellule a ete choisie mais les cellules ne sont pas autorisées pour cette etape."
+msgstr ""
+
+msgid "Une cellule ne peut pas être liée à une variable de plan : utilise `perceive_action` pour agir dans la même étape."
 msgstr ""
 
 msgid "Une erreur technique inattendue est survenue côté fournisseur d'IA."
@@ -1341,10 +1644,19 @@ msgstr ""
 msgid "Unknown action: {}"
 msgstr ""
 
+msgid "VOIT puis AGIT en une seule étape (méta-outil composite) : `perceive_understand` lit et ancre une cible fraîche, puis l'outil d'action hôte la consomme aussitôt par son NOM LOCAL. Aucune référence brute (id/case) n'est écrite dans le plan, donc aucune devinette ni référence périmée. Requiert 'question' + une source (comme perceive_understand : 'source_tool' (+ 'target_producer'/'target_args' pour le flux composite lecture → candidate → producteur) ou 'source_data') + 'action_tool'. 'action_args' : gabarit ; toute valeur EXACTEMENT égale à \"$TARGET\" reçoit le nom local ancré. 'target_description' optionnel. Ancrage incertain = échec honnête, jamais d'action aveugle."
+msgstr ""
+
+msgid "VOIT puis AGIT en une seule étape (méta-outil composite) : `perceive_understand` lit et ancre une cible fraîche, puis l'outil d'action hôte la consomme aussitôt par son NOM LOCAL. Aucune référence brute (id/case) n'est écrite dans le plan, donc aucune devinette ni référence périmée. Requiert 'question' + une source (comme perceive_understand : 'source_tool' ou 'source_data' ou 'target_producer'/'target_args') + 'action_tool'. 'action_args' : gabarit ; toute valeur EXACTEMENT égale à \"$TARGET\" reçoit le nom local ancré. 'target_description' optionnel. Ancrage incertain = échec honnête, jamais d'action aveugle."
+msgstr ""
+
 msgid "VOIT puis AGIT en une seule étape (méta-outil) : perçoit via un outil EXTERNE, ancre la cible (référence exacte de l'observation fraîche), puis exécute l'action hôte aussitôt. À préférer dès qu'il faut agir sur ce qu'on voit (clic sur une icône, lecture puis saisie). Avantage : aucune référence (id/case) à écrire dans le plan, donc aucune devinette ni référence périmée. Requiert 'question' + 'source_tool' + 'action_tool'. 'action_args' : gabarit ; toute valeur EXACTEMENT égale à \"$TARGET\" reçoit la référence ancrée. 'target_hint' optionnel. Ancrage incertain = échec honnête, jamais d'action aveugle."
 msgstr ""
 
 msgid "Valeur brute 'result' renvoyée par l'outil C++ (avant tout jugement de convergence). None si non applicable (direct_answer, abstract_task)."
+msgstr ""
+
+msgid "Valeur de cible brute trop longue ({size} caracteres, maximum {limit})."
 msgstr ""
 
 msgid "Validation des cibles indisponible : {err}"
@@ -1372,6 +1684,12 @@ msgid "Votre réponse a été COUPÉE car trop longue : refaites un plan PLUS CO
 msgstr ""
 
 msgid "Vouliez-vous dire : {guess} ?"
+msgstr ""
+
+msgid "Vrai si aucune cible ne convient et qu'aucune inspection utile n'est possible."
+msgstr ""
+
+msgid "Vues declarees :"
 msgstr ""
 
 msgid "Vérification STRICTE : monde frais muet après échecs — réponse finale refusée."
@@ -1590,6 +1908,9 @@ msgstr ""
 msgid "perceive_understand exige 'source_tool' ou 'source_data' (d'où lire le monde)."
 msgstr ""
 
+msgid "perceive_understand exige 'source_tool', 'source_data' ou 'target_producer' (d'où lire le monde)."
+msgstr ""
+
 msgid "perception"
 msgstr ""
 
@@ -1636,6 +1957,9 @@ msgid "~{} minutes"
 msgstr ""
 
 msgid "~{} secondes"
+msgstr ""
+
+msgid "Écart précis entre ce qui était demandé et ce qui est observé. Vide si l'élément demandé est trouvé."
 msgstr ""
 
 msgid "Échec (Tentative {}/{})."

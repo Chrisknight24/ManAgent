@@ -23,6 +23,7 @@ class FailureClass(str, Enum):
     PLAN_REJECTED_SUPERVISOR = "plan_rejected_supervisor"   # Rejet par le superviseur (Orchestrator ou parent)
     EXECUTION_FAILURE = "execution_failure"                 # Échec lors de l'exécution d'une étape (outil ou convergence)
     CONVERGENCE_FAILURE = "convergence_failure"             # Échec de convergence sémantique (détectée par LLM)
+    ALIGNMENT_FAILURE = "alignment_failure"                 # Perception/alignement : le monde n'est pas en panne, la cible ne correspond pas
     USER_CANCELLED = "user_cancelled"                       # Annulation par l'utilisateur
     MAX_RETRIES_REACHED = "max_retries_reached"             # Épuisement des tentatives sans succès
 

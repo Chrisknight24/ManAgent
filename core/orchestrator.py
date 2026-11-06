@@ -84,6 +84,61 @@ def _strip_rules_comments(text: str) -> str:
     return cleaned.strip()
 
 
+def store_plan_warnings(
+    runtime_state: Any,
+    solver_id: Any,
+    partial_gaps: Any = None,
+    warnings: Any = None,
+) -> Dict[str, List[str]]:
+    """Range les avertissements d'un plan accepté dans DEUX canaux distincts.
+
+    - `plan_warnings_by_solver` : lacunes partielles seulement. Elles
+      alimentent la porte déterministe de convergence (elles doivent être
+      prouvées).
+    - `plan_soft_warnings_by_solver` : avertissements NON bloquants (signaux
+      déterministes + juge). Le juge final les lit, mais ils ne refusent
+      jamais un plan ni une convergence.
+
+    Pur vis-à-vis du plan (ne lit que les listes fournies), tolérant : un
+    `runtime_state` sans ces attributs est initialisé. Retourne les listes
+    rangées pour l'observabilité.
+    """
+    def _clean(values: Any) -> List[str]:
+        try:
+            return [str(v).strip() for v in (values or []) if str(v).strip()]
+        except Exception:
+            return []
+
+    gaps = _clean(partial_gaps)
+    warns = _clean(warnings)
+    try:
+        gaps_store = getattr(runtime_state, "plan_warnings_by_solver", None)
+        if not isinstance(gaps_store, dict):
+            gaps_store = {}
+            runtime_state.plan_warnings_by_solver = gaps_store
+        if gaps:
+            gaps_store[solver_id] = gaps
+        else:
+            gaps_store.pop(solver_id, None)
+
+        soft_store = getattr(runtime_state, "plan_soft_warnings_by_solver", None)
+        if not isinstance(soft_store, dict):
+            soft_store = {}
+            runtime_state.plan_soft_warnings_by_solver = soft_store
+        if warns:
+            soft_store[solver_id] = warns
+            Logger.event(
+                "plan_warnings",
+                solver_id=solver_id,
+                warnings=warns[:10],
+            )
+        else:
+            soft_store.pop(solver_id, None)
+    except Exception:
+        pass
+    return {"gaps": gaps, "warnings": warns}
+
+
 class Orchestrator(Supervisor, Entity):
     """
     Orchestrateur central – Point d'entrée unique du runtime.
@@ -2258,17 +2313,18 @@ class Orchestrator(Supervisor, Entity):
                         world_snapshot=_judge_world,
                     )
 
-        # Plan partiel accepté : warning pré-exécution, vérifié par la
-        # convergence finale. Un plan complet accepté efface l'ancien warning.
+        # Plan accepté : deux canaux DISTINCTS (voir `store_plan_warnings`).
         try:
             if outcome.is_valid:
                 _partial_gaps = list(getattr(outcome, "partial_gaps", None) or [])
-                _store = getattr(self.runtime_state, "plan_warnings_by_solver", None)
-                if not isinstance(_store, dict):
-                    _store = {}
-                    self.runtime_state.plan_warnings_by_solver = _store
+                _plan_warns = list(getattr(outcome, "warnings", None) or [])
+                store_plan_warnings(
+                    self.runtime_state,
+                    child_solver_id,
+                    partial_gaps=_partial_gaps,
+                    warnings=_plan_warns,
+                )
                 if _partial_gaps:
-                    _store[child_solver_id] = _partial_gaps
                     Logger.event(
                         "plan_partial_accepted",
                         solver_id=child_solver_id,
@@ -2279,8 +2335,6 @@ class Orchestrator(Supervisor, Entity):
                         ),
                         gaps=_partial_gaps[:8],
                     )
-                else:
-                    _store.pop(child_solver_id, None)
         except Exception:
             pass
 

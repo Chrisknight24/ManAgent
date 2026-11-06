@@ -144,3 +144,34 @@ def test_export_source_renders_world_snapshots():
     src = open(path, encoding="utf-8").read()
     assert "World state" in src
     assert "_world_snapshots" in src
+
+
+def test_finished_at_est_stocke_en_utc_naif():
+    """`created_at` (SQLite) est UTC : `finished_at` doit l'être aussi."""
+    from datetime import datetime, timedelta, timezone
+
+    from memory.mission_store import utc_naive
+
+    aware = datetime(2026, 11, 4, 12, 30, tzinfo=timezone(timedelta(hours=1)))
+    stored = utc_naive(aware)
+    assert stored.tzinfo is None
+    assert stored == datetime(2026, 11, 4, 11, 30)
+    assert utc_naive(None) is None
+
+    # Valeur naïve historique = heure locale : convertie, jamais recopiée.
+    local_naive = datetime(2026, 11, 4, 12, 30)
+    converted = utc_naive(local_naive)
+    assert converted.tzinfo is None
+    expected = local_naive.astimezone(timezone.utc).replace(tzinfo=None)
+    assert converted == expected
+
+
+def test_rapport_interprete_les_horodatages_naifs_comme_utc():
+    """Sans marqueur, le navigateur lirait l'heure locale : le rapport force UTC."""
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "tools", "build_observability_report.py",
+    )
+    src = open(path, encoding="utf-8").read()
+    assert "+ 'Z'" in src
+    assert "replace(' ', 'T')" in src

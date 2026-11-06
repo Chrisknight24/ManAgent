@@ -26,7 +26,12 @@ def args_signature(params: Any) -> str:
 
     Remplace le dump JSON complet (bruit + tokens) par une ligne utile pour
     remplir un appel : `nom` (+`*` si requis), valeurs fermées (`=a|b|...`),
-    type, et description courte. Pur, tolérant (schéma non conforme -> "").
+    type, et description COMPLÈTE. Pur, tolérant (schéma non conforme -> "").
+
+    La description n'est jamais tronquée : un argument comme `target`,
+    `clear_first` ou `await_change` porte son contrat dans sa description, et
+    la couper retire l'information qui permet de remplir l'appel. On replie
+    seulement les sauts de ligne pour garder une ligne par argument.
     """
     if not isinstance(params, dict):
         return ""
@@ -46,7 +51,9 @@ def args_signature(params: Any) -> str:
             piece += ":" + str(spec["type"])
         desc = spec.get("description")
         if desc:
-            piece += " — " + str(desc).strip()[:60]
+            desc = " ".join(str(desc).split())
+            if desc:
+                piece += " — " + desc
         parts.append(piece)
     return "; ".join(parts)
 
