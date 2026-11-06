@@ -836,6 +836,17 @@ inchangée à 564 tests.
   (résolution par `anchors`, puis `scope`, puis `param` — aucun littéral).
   Nouveaux bancs `tests/test_target_hosts_agnostic.py` : calculatrice
   déterministe sans perception, robot, IDE. Suite **808** verte.
+- 2026-11-06 : **Conformance manifeste réel CondiFlow (AutoCUse)**. L'hôte a
+  livré `views`/`anchors`/`fields.attributes` et les consommateurs bruts dans
+  les blocs réels `vision`/`target` (`rpahostprovider.h`). Les deux contrats
+  passent le parseur v1 sans erreur ni warning. Nouveau banc
+  `tests/test_target_condiflow_conformance.py` (6 tests) sur le manifeste
+  exact : candidate locale → `preset` résolu `t1` → `mouse` reçoit `ui:<id>` ;
+  ancre `cell=B3` → `target cell=B3` ; sondes `focus_candidate` (sujet
+  `local`) et `inspect_cell` (sujet `cell`) ; `keyboard` `raw: allow`
+  (`none` littéral en appel direct, nom local résolu). Correctif générique :
+  un `refresh` du monde efface une vue absente du nouveau payload (pas de
+  grille périmée). Suite **815** verte, i18n **640** chaînes.
 
 ---
 
@@ -903,4 +914,8 @@ une inspection déclarée par l'hôte.
 - Preuve multi-hôtes : `tests/test_target_hosts_agnostic.py` simule une
   calculatrice déterministe **sans aucun outil de perception**, un robot
   (articulations + attributs) et un IDE (ancre `file` puis cible locale).
+- Conformance hôte réel (06/11/2026) : `tests/test_target_condiflow_conformance.py`
+  rejoue sur les blocs exacts `vision`/`target` de CondiFlow les flux
+  `local`, `anchor` (`cell`), les sondes `focus_candidate`/`inspect_cell` et
+  le `keyboard` `raw: allow`.
 

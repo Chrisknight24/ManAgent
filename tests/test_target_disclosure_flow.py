@@ -180,6 +180,24 @@ def test_attributes_projetees_et_visibles_dans_le_monde():
     assert world.candidates[0].attributes["rect"]["w"] == 80
 
 
+def test_vue_absente_du_nouveau_payload_est_effacee():
+    contract = _scan_contract(disclosure={
+        "version": 1,
+        "views": [{"name": "grid", "path": "data.grid"}],
+    })
+    registry = TargetRegistry()
+    initial = project_target_payload(registry, contract, {
+        "result": True,
+        "data": {"candidates": [], "grid": {"cols": 12, "rows": 8}},
+    })[0]
+    world = ObservedWorld.from_payload(registry, contract, initial)
+    assert world.views["grid"]["cols"] == 12
+
+    # Le payload suivant ne declare pas la vue : elle ne doit pas rester.
+    world.refresh(registry, contract, {"result": True, "data": {"candidates": []}})
+    assert world.views == {}
+
+
 def test_resolve_target_demande_une_sonde_puis_retente():
     contract = _scan_contract(disclosure={
         "version": 1,

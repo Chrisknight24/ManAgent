@@ -158,10 +158,16 @@ class ObservedWorld:
             self.raw = _payload_data(payload)
         if media_assets is not None:
             self.media = [_media_ref(asset) for asset in media_assets]
+        if disclosure is None and contract is not None:
+            disclosure = contract.disclosure
         if registry is not None and contract is not None and self.payload is not None:
             entries = collect_projected_targets(registry, contract, self.payload)
             self.candidates = [_observed_candidate(entry) for entry in entries]
         if disclosure is not None and self.payload is not None:
+            # Un refresh remplace le monde : une vue absente du nouveau
+            # payload ne doit pas rester affichee comme si elle etait fraiche.
+            self.views = {}
+            self.view_meta = {}
             for view in disclosure.views:
                 value = _read_path(self.payload, view.path)
                 if value is not None:
