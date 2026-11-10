@@ -112,11 +112,33 @@ class Retriever:
                     Logger.warning("[Retriever] Aucun provider actif dans embedding_manager.")
                 else:
                     Logger.debug(f"[Retriever] Embedding manager actif : {embedding_manager.active_provider_id}")
+                    # La table est nommee d'apres `provider.model_name` (voir
+                    # `_store_mission_profiles_async`) : on interroge EXACTEMENT
+                    # le meme espace, jamais un identifiant de provider voisin.
+                    provider_model = getattr(
+                        embedding_manager.active_provider, "model_name", None
+                    )
+                    if provider_model:
+                        active_model = provider_model
 
         if not embedding_manager or not embedding_manager.active_provider:
             Logger.warning("[Retriever] Fallback sur le service d'embedding legacy.")
             from core.embedding_service import get_embedding_service
             legacy_service = get_embedding_service()
+
+        # R6 : chaque modele a SON espace vectoriel (`vec_mission_profiles__<hash>`).
+        # Le store est un singleton recree a chaque process mission : sans ce
+        # basculement explicite, il interroge la table historique vide
+        # (`vec_mission_profiles`) alors que les profils sont dans l'espace du
+        # modele actif -> 0 resultat a chaque mission (bug retrieval 08/11).
+        active_model = active_model or getattr(
+            getattr(embedding_manager, "active_provider", None), "model_name", None
+        )
+        if active_model:
+            try:
+                self.profile_store.use_embedding_model(active_model)
+            except Exception as e:
+                Logger.warning(f"[Retriever] Bascule d'espace memoire impossible ({e}).")
 
         all_candidates: Dict[str, Dict] = {}
 

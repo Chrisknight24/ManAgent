@@ -99,12 +99,19 @@ def bind_target_alias(
     variables: Any,
     alias: Any,
     entry: Any,
+    target_kind: Optional[str] = None,
+    attempt_no: Optional[int] = None,
 ) -> Optional[str]:
     """Publie un alias de plan vers le nom local d'une cible.
 
     Contrat runtime : `variables[alias]["value"] == entry.local_name`.
     La reference brute n'est jamais exposee dans le registre de variables ;
     la membrane egress la resout au dernier moment depuis `TargetRegistry`.
+
+    `target_kind` est le type semantique fourni par l'hote (vocabulaire du
+    manifeste, ex. `ui`, `img`, `ui_preset`) ; a defaut on publie le scope de
+    l'entree, deja significatif. `attempt_no` permet de marquer les alias des
+    tentatives precedentes comme non declarables dans le plan courant.
     """
     alias_value = alias.strip() if isinstance(alias, str) else ""
     if not _ALIAS_RE.fullmatch(alias_value):
@@ -115,7 +122,10 @@ def bind_target_alias(
         return "registre de variables indisponible pour lier la cible"
 
     description = getattr(entry, "description", "") or getattr(entry, "local_name", "")
-    variables[alias_value] = {
+    resolved_kind = str(target_kind).strip() if target_kind is not None else ""
+    if not resolved_kind:
+        resolved_kind = str(getattr(entry, "scope", "") or "").strip()
+    payload: Dict[str, Any] = {
         "value": entry.local_name,
         "type": "target",
         "kind": "target",
@@ -126,6 +136,11 @@ def bind_target_alias(
         "source": "target_registry",
         "timestamp": datetime.now().isoformat(),
     }
+    if resolved_kind:
+        payload["target_kind"] = resolved_kind
+    if isinstance(attempt_no, int) and not isinstance(attempt_no, bool):
+        payload["attempt_no"] = attempt_no
+    variables[alias_value] = payload
     if registry is not None:
         try:
             registry.note_bound(entry, alias=alias_value)

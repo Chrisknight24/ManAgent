@@ -38,6 +38,12 @@ class RuntimeState:
         self.embedding_manager = EmbeddingProviderManager()
         self.active_embedding_model: Optional[str] = None
 
+        # Garde de ciblage : apres selection LLM, une re-verification bornee
+        # confirme que la cible correspond a la question. Opt-in runtime pour
+        # que les bancs de test sans LLM scripte gardent le comportement
+        # historique (aucun appel supplementaire).
+        self.target_verification_enabled = True
+
         self.auto_learn_enabled = True
 
         # --- HITL (Human-In-The-Loop) POLICY & ACTIONS CACHE ---
@@ -52,6 +58,10 @@ class RuntimeState:
         }
         self.perception_warnings_by_solver: Dict[str, List[str]] = {}
         self.plan_warnings_by_solver: Dict[str, List[str]] = {}
+        # Doutes de ciblage non bloquants (verdict `uncertain`, fail-open).
+        # Canal dedie : le planner et la convergence doivent les voir, mais ils
+        # ne doivent jamais bloquer une execution saine.
+        self.target_warnings_by_solver: Dict[str, List[str]] = {}
         # Avertissements de sortie non consommée (ex : `any` sans branche).
         # Canal distinct de `world_warnings` et de `plan_gaps` : jamais un refus.
         self.expected_warnings_by_solver: Dict[str, List[str]] = {}
@@ -98,6 +108,10 @@ class RuntimeState:
             pass
         try:
             self.plan_warnings_by_solver = {}
+        except Exception:
+            pass
+        try:
+            self.target_warnings_by_solver = {}
         except Exception:
             pass
         try:

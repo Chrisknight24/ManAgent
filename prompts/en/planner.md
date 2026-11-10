@@ -32,7 +32,7 @@ Reports from past JUDGED missions (the judge can be wrong): suggestive leads, ne
 ## TARGETS
 - A target = a local name (`$@_<name>`), never a raw reference. The consuming action receives it, produced BEFORE it; a missing required target parameter invalidates the plan.
 - Never a legacy field (`cell`, `uia`, coordinates) instead of a target parameter.
-- `output_target_name`: only on a producer or a selection meta-tool. Anchor via `source_tool` (fresh candidates) + `target_producer` (tool declaring `produces`/`consumes`): the source reads, the producer consumes one candidate, `target_description` selects. Never a guessed host reference; no `output_target_name` without `produces`.
+- `output_target_name`: only on a producer or selection meta-tool; anchor = `source_tool` (fresh candidates) + `target_producer` (`produces`/`consumes`) + `target_description`. Never a guessed reference; without `produces`, forbidden. If `$@_<name>` is consumed, the anchor MUST declare `output_target_name: <name>`.
 {% if target_selection_enabled %}
 - Several candidates: the selection meta-tool picks a local key. Never invent a key.
 {% endif %}
@@ -90,7 +90,7 @@ A `tool_call` needs a `tool_name` copied from TOOLS. One action = one `tool_call
 5. Follow the goal exactly (target, values, language). Keep the goal's language in `response_text`.
 6. If no tool fits: `direct_answer` saying what is missing.
 7. If the goal contradicts itself: `direct_answer` saying so.
-8. If history shows a failure, examine what failed and propose a change when justified. If the same plan remains relevant (world state changed, transient failure, wait too short), you may explain and keep or adjust it; avoid changing only to look different.
+8. If history shows a failure, examine what failed and propose a change when justified. If the same plan remains relevant (world state changed, transient failure, wait too short), you may explain and keep or adjust it; avoid changing only to look different. Then fill `retry_rationale` (one sentence): what changes and which observed cause it addresses. The validator reads it, but it does not make a plan acceptable on its own.
 9. Your plans must fit the output limit: brief descriptions (one sentence), no repeating args in the description, typically 5 to 10 steps. Beyond that: narrow the goal or finish with an honest partial `direct_answer`.
 
 {% if world_guidance is not defined or world_guidance %}

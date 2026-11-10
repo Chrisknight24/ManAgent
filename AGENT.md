@@ -42,6 +42,7 @@ GO REQUIS : oui
 - Pont inter-agents : `C:\Users\CHRISTIAN\Documents\AgentBridge\` (`REGLES.md`, `host_to_brain.md` à vider après résumé, `brain_to_host.md` écriture avec GO, `brain_notes.md` = registre durable).
 - Discussion expert (depuis 2026-10-08, Christian intermédiaire) : l'expert écrit dans `AgentBridge/expert_proposal.txt`, je réponds dans `AgentBridge/expert_reponse.md` (nouveau fichier, à créer). L'expert N'EST PAS un agent : ne jamais vider/effacer son message après lecture (pas de protocole pont pour lui). Christian met à jour à la main et me tient au courant. Récap simple ici dans le tchat. Signature `— ManAgent` sur tous les messages.
 - Ce fichier + `brain_notes.md` = mémoire persistante : y inscrire règles, décisions, chemins.
+- Roadmap cible durable : `docs/TARGET_RELIABILITY_ROADMAP.md` (fiabilité des cibles, warnings partagés, zoom implicite) — à relire après toute compaction.
 
 ## 4. Agnosticisme ManAgent (CRITIQUE, non négociable)
 - ManAgent est 100% agnostique (indépendant) sur 3 axes :

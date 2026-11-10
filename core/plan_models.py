@@ -386,6 +386,16 @@ class PlanStep(BaseModel):
 class Plan(BaseDiscoverySchema):
     """Le plan global proposé par un Solver."""
     goal: str = Field(..., description=_("L'objectif global de ce plan"))
+    # Justification de reprise : quand le plan répond à un échec précédent,
+    # le planner explique CE QUI change et POURQUOI. Le juge la lit comme un
+    # fait, sans jamais l'imposer (elle ne rend pas un plan valide à elle seule).
+    retry_rationale: Optional[str] = Field(
+        default=None,
+        description=_(
+            "Si ce plan reprend après un échec : une phrase expliquant le "
+            "changement et la cause observée qu'il traite. Omis au premier plan."
+        ),
+    )
     steps: List[PlanStep] = Field(default_factory=list, description=_("Liste ordonnée des étapes à exécuter"))
     
     def is_complete(self) -> bool:

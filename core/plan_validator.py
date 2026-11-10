@@ -821,6 +821,12 @@ def find_unconsumed_perception_outputs(plan: Any, perception_tools: Any = None) 
                 r = str(raw).strip()
                 clean = re.sub(r"^(bool_|data_)+", "", r)
                 needles.update({f"$@_bool_{clean}", f"$@_data_{clean}", f"$@_{r}"})
+            # Une cible produite est une sortie à part entière : la consommer
+            # via `$@_<output_target_name>` est un usage légitime (mission
+            # YouTube : step_4/step_7 étaient signalés à tort).
+            target_name = getattr(step, "output_target_name", None)
+            if target_name and str(target_name).strip():
+                needles.add(f"$@_{str(target_name).strip()}")
             later_text = " ".join(
                 " ".join([
                     str(getattr(later, "tool_args_json", "") or ""),
@@ -881,6 +887,12 @@ def find_unconsumed_any_outputs(plan: Any, perception_tools: Any = None) -> List
                 r = str(raw).strip()
                 clean = re.sub(r"^(bool_|data_)+", "", r)
                 needles.update({f"$@_bool_{clean}", f"$@_data_{clean}", f"$@_{r}"})
+            # Une cible produite est une sortie à part entière : la consommer
+            # via `$@_<output_target_name>` est un usage légitime (mission
+            # YouTube : step_4/step_7 étaient signalés à tort).
+            target_name = getattr(step, "output_target_name", None)
+            if target_name and str(target_name).strip():
+                needles.add(f"$@_{str(target_name).strip()}")
             later_text = " ".join(
                 " ".join([
                     str(getattr(later, "tool_args_json", "") or ""),
@@ -902,6 +914,183 @@ def find_unconsumed_any_outputs(plan: Any, perception_tools: Any = None) -> List
         return hits
     except Exception:
         return []
+
+
+def _tool_parameters(tools_mgr: Any, tool_name: str) -> Dict[str, Any]:
+    """Schéma de paramètres d'un outil, ou {} si indisponible (pur)."""
+    if tools_mgr is None or not tool_name:
+        return {}
+    tools = getattr(tools_mgr, "_tools", None)
+    if isinstance(tools, dict):
+        meta = tools.get(tool_name)
+        if isinstance(meta, dict):
+            params = meta.get("parameters")
+            if isinstance(params, dict):
+                return params
+    getter = getattr(tools_mgr, "get_tool_parameters", None)
+    if callable(getter):
+        try:
+            params = getter(tool_name)
+        except Exception:
+            return {}
+        return params if isinstance(params, dict) else {}
+    return {}
+
+
+_CONTROL_CHARS = ("\n", "\r", "\t")
+
+
+def find_embedded_control_chars(plan: Any, tools_mgr: Any = None) -> List[str]:
+    """Refuse un saut de ligne/onglet encodé dans un argument `text`.
+
+    Un clavier reçoit UNE frappe par appel : `text="AutoCUse\\n"` tape le
+    caractère de contrôle au lieu de valider. L'outil réussit (`typed: true`),
+    puis l'étape suivante échoue sans que la cause soit visible (mission
+    YouTube, tentative 3 : `characters_sent: 9`).
+
+    Détection structurelle, jamais par nom d'outil : on ne bloque que si le
+    schéma expose aussi `key` ou `hotkey` (signature d'un clavier). Sinon,
+    aucune conclusion : l'outil peut légitimement accepter du multi-ligne.
+    Fonction pure.
+    """
+    hits: List[str] = []
+    for step in getattr(plan, "steps", []) or []:
+        stype = getattr(getattr(step, "type", None), "value", getattr(step, "type", None))
+        if stype != "tool_call":
+            continue
+        args = _parse_step_args(getattr(step, "tool_args_json", "{}"))
+        if not isinstance(args, dict):
+            continue
+        mode = str(args.get("mode") or "").strip().lower()
+        text = args.get("text")
+        if mode != "text" or not isinstance(text, str):
+            continue
+        found = [name for name, char in (("\\n", "\n"), ("\\r", "\r"), ("\\t", "\t")) if char in text]
+        if not found:
+            continue
+        params = _tool_parameters(tools_mgr, str(getattr(step, "tool_name", "") or ""))
+        properties = params.get("properties") if isinstance(params, dict) else None
+        if not isinstance(properties, dict):
+            continue
+        if "key" not in properties and "hotkey" not in properties:
+            continue
+        sid = str(getattr(step, "id", "?"))
+        hits.append(
+            f"{sid}: l'argument 'text' contient {', '.join(found)} alors que "
+            "l'outil expose key/hotkey — une frappe par appel : utilisez un "
+            "step `mode=key` (ex. key=enter), jamais un saut de ligne dans text"
+        )
+    return hits
+
+
+def find_target_kind_mismatches(plan: Any, tools_mgr: Any = None) -> List[str]:
+    """Refuse un consommateur qui exige un type de cible non prouvé.
+
+    Agnostique : le vocabulaire (`ui`, `img`, ...) et le nom du paramètre de
+    type (`kind_param`) viennent du manifeste de l'hôte. On ne vérifie que
+    lorsque le consommateur déclare `accepts` ET que le producteur fixe
+    explicitement un type incompatible. Sans déclaration : aucune conclusion
+    (rétro-compatibilité totale).
+
+    Mission YouTube : `target` produisait `kind=auto` (résolu en image) puis
+    `keyboard` le consommait — refus hôte APRÈS 4 étapes exécutées.
+    """
+    if tools_mgr is None:
+        return []
+    steps = list(getattr(plan, "steps", []) or [])
+    if not steps:
+        return []
+
+    produced: Dict[str, Dict[str, Any]] = {}
+    for step in steps:
+        alias = str(getattr(step, "output_target_name", "") or "").strip()
+        if not alias:
+            continue
+        args = _parse_step_args(getattr(step, "tool_args_json", "{}"))
+        if not isinstance(args, dict):
+            args = {}
+        tool_name = _step_tool_name(step)
+        if tool_name in _META_TARGET_TOOLS:
+            producer_name = _meta_producer_tool(step, args)
+            raw_target_args = args.get("target_args")
+            target_args = raw_target_args if isinstance(raw_target_args, dict) else {}
+        else:
+            producer_name = tool_name
+            target_args = args
+        contract = _target_contract(tools_mgr, producer_name)
+        kind_param = None
+        if contract is not None:
+            for producer in getattr(contract, "producers", ()):
+                if getattr(producer, "kind_param", None):
+                    kind_param = str(producer.kind_param)
+                    break
+        kind_param = kind_param or "kind"
+        explicit_kind = target_args.get(kind_param) if isinstance(target_args, dict) else None
+        produced[alias] = {
+            "step": step,
+            "kind_param": kind_param,
+            "kind": str(explicit_kind).strip() if explicit_kind is not None else "",
+        }
+
+    hits: List[str] = []
+    for step in steps:
+        args = _parse_step_args(getattr(step, "tool_args_json", "{}"))
+        if not isinstance(args, dict):
+            continue
+        step_id = str(getattr(step, "id", "?"))
+        specs = _step_consumer_specs(step, args, tools_mgr)
+        for path, consumer in specs.items():
+            accepts = tuple(getattr(consumer, "accepts", ()) or ())
+            if not accepts:
+                continue
+            value = _read_arg_path(args, path)
+            if not isinstance(value, str):
+                continue
+            match = _TARGET_REF_RE.fullmatch(value.strip())
+            if not match:
+                continue
+            alias = match.group(2)
+            info = produced.get(alias)
+            if info is None:
+                continue
+            kind = info["kind"]
+            if not kind:
+                continue
+            if kind not in accepts:
+                hits.append(
+                    f"{step_id}: {path} exige un type de cible {list(accepts)} ; "
+                    f"'{alias}' est produit avec {info['kind_param']}='{kind}' "
+                    f"(step {getattr(info['step'], 'id', '?')}) — fixez un type "
+                    "compatible ou changez de consommateur"
+                )
+    return hits
+
+
+_ENTER_HINT_RE = re.compile(r"\b(entr[ée]e?|enter|return)\b", re.IGNORECASE)
+_ENTER_STEP_RE = re.compile(
+    r'"key"\s*:\s*"enter"|"hotkey"\s*:\s*"[^"]*\benter\b', re.IGNORECASE
+)
+
+
+def find_strategy_step_gaps(plan: Any, strategy: Any = None) -> List[str]:
+    """Signale une stratégie explicite qu'aucun step n'implémente.
+
+    Cas réel : le recul du 06/11 disait « valider avec la touche Entrée » dès
+    12:33:18, mais la tentative 3 a encodé `\\n` dans `text`. Un signal de
+    validation (avertissement, jamais refus) rend l'oubli visible.
+    """
+    text = str(strategy or "")
+    if not _ENTER_HINT_RE.search(text):
+        return []
+    for step in getattr(plan, "steps", []) or []:
+        args_txt = str(getattr(step, "tool_args_json", "") or "")
+        if _ENTER_STEP_RE.search(args_txt):
+            return []
+    return [
+        "la stratégie demandée mentionne explicitement Entrée, mais aucun step "
+        "ne frappe `enter` (mode=key/hotkey) — la validation de saisie risque "
+        "d'être oubliée"
+    ]
 
 
 def find_invalid_perceive_sources(plan: Any, known_tool_names=None) -> List[str]:
@@ -1298,10 +1487,21 @@ class PlanValidator:
         if repeats == 0:
             return None
 
+        if repeats == 1:
+            # 1re répétition : signe à surveiller, jamais un motif de refus.
+            return _(
+                "⚠️ 1re RÉPÉTITION (avertissement non bloquant) : même structure "
+                "que 1 tentative déjà échouée à l'exécution. Un changement "
+                "d'argument, d'attente ou de texte peut suffire ; ne refusez pas "
+                "pour la seule structure."
+            )
+
         return _(
-            "⚠️ RÉPÉTITION D'ÉCHEC : Ce plan a EXACTEMENT la même structure (types d'étapes et outils, dans le "
-            "même ordre) que {repeats} tentative(s) précédente(s) de ce Solver, déjà en "
-            "échec sans adaptation."
+            "⚠️ RÉPÉTITION CONFIRMÉE ({repeats} échecs) : même structure (types "
+            "d'étapes et outils, dans le même ordre) que {repeats} tentative(s) "
+            "précédente(s) déjà en échec à l'exécution. La répétition ne suffit "
+            "pas à refuser : exigez un changement qui traite la cause observée "
+            "(ou une justification explicite du planner)."
         ).format(repeats=repeats)
 
     def detect_lazy_delegation_and_tree_recursion(
@@ -1540,8 +1740,19 @@ class PlanValidator:
         if not preexec and not executed:
             return None
         parts = []
-        if executed:
-            parts.append(_("{n} échec(s) À L'EXÉCUTION à structure égale").format(n=executed))
+        if executed == 1:
+            # Échelle de sévérité : la 1re redite est un AVERTISSEMENT. Le juge
+            # ne doit pas refuser un plan qui corrige un argument ou une attente
+            # au seul motif que la structure se répète (mission bureau 08/11).
+            parts.append(_(
+                "1 échec À L'EXÉCUTION à structure égale (1re répétition : "
+                "avertissement non bloquant — la structure seule ne prouve pas "
+                "une redite ; un argument, une attente ou un texte modifié suffit)")
+            )
+        elif executed:
+            parts.append(_("{n} échecs À L'EXÉCUTION à structure égale (répétition "
+                           "confirmée : exiger un changement qui traite la cause "
+                           "observée)").format(n=executed))
         if preexec:
             parts.append(_("{n} rejet(s) AVANT exécution à structure égale (pas chers, pas une preuve d'échec)").format(n=preexec))
         return _("Répétition : ") + " ; ".join(parts) + "."
@@ -1580,6 +1791,7 @@ class PlanValidator:
         previous_attempts: Optional[List[PlanAttempt]] = None,
         mission_history_tree: Optional[Any] = None,
         world_snapshot: Optional[str] = None,
+        strategy: Optional[str] = None,
     ) -> PlanValidationOutcome:
         # Signaux de convergence : jamais réutiliser ceux d'un plan précédent.
         self._last_unconsumed_warnings = []
@@ -1614,6 +1826,7 @@ class PlanValidator:
         all_warnings.extend(recursion_warnings)
         if mechanical_note:
             all_warnings.append(mechanical_note)
+        all_warnings.extend(find_strategy_step_gaps(plan, strategy))
         pattern_warning = "\n\n".join(all_warnings) if all_warnings else None
 
         # Nouveauté calculée (fait déterministe) : le juge voit les arguments
@@ -1679,6 +1892,11 @@ class PlanValidator:
         ]
         problems += [f"délégation incomplète {u}" for u in incomplete_delegation]
         problems += [f"cible invalide {u}" for u in target_problems]
+        problems += find_target_kind_mismatches(plan, self._tools_manager)
+        # P1-4 : un saut de ligne dans `text` est un risque réel, mais l'outil
+        # expose légitimement `text` ; un refus déterministe brûlait des plans
+        # valides (ex. commande shell terminée par \n). Signal au juge, pas mur.
+        control_char_warnings = find_embedded_control_chars(plan, self._tools_manager)
         # P2 doctrine : la non-consommation ne refuse plus. Signal
         # pour la convergence finale (garde-fou déplacé début→fin).
         if unconsumed:
@@ -1729,6 +1947,8 @@ class PlanValidator:
             )
         if mechanical_note:
             deterministic_warnings.append(mechanical_note)
+        if control_char_warnings:
+            deterministic_warnings.extend(control_char_warnings)
         if find_plan_without_action(plan):
             deterministic_warnings.append(
                 _("Plan sans action matérielle : il lit, analyse ou répond mais "
@@ -1813,6 +2033,7 @@ class PlanValidator:
             pattern_warning=pattern_warning,
             novelty_assessment=novelty_assessment,
             repetition_fact=repetition_fact,
+            retry_rationale=str(getattr(plan, "retry_rationale", "") or "").strip() or None,
             direct_perception_note=direct_perception_note,
             hitl_policy_text=self.hitl_policy_text(self._hitl_policy),
             mission_history_summary=mission_history_summary,

@@ -77,7 +77,11 @@ def registry_compact(view: Any, prefix: str = "") -> str:
             desc = desc[:119] + "…"
         head = f"- {prefix}{name}"
         if typ:
-            head += f" ({typ})"
+            kind = str(meta.get("target_kind") or "").strip() if typ == "target" else ""
+            head += f" ({typ} {kind})" if kind else f" ({typ})"
+        stale = str(meta.get("stale_reason") or "").strip()
+        if stale:
+            head += f" [⚠️ {stale}]"
         if desc:
             head += f" : {desc}"
         if hint:

@@ -81,6 +81,52 @@ def _compact_field(key: str, value: Any) -> str:
     return f"{key}: …"
 
 
+def derive_world_facts(data: Any) -> List[str]:
+    """Faits génériques dérivés de la STRUCTURE du snapshot.
+
+    L'hôte décrit rarement « le bureau est déjà visible » : il publie des
+    fenêtres et un avant-plan. Ces faits rendent explicite ce que la structure
+    implique, pour qu'un modèle ne lance pas une bascule (afficher/masquer) qui
+    ferait l'inverse de ce que l'état montre. Aucun vocabulaire d'hôte n'est
+    supposé : seuls des champs booléens/identifiants déjà présents sont lus.
+    """
+    if not isinstance(data, dict):
+        return []
+    facts: List[str] = []
+    windows = data.get("windows")
+    minimized_flags: List[bool] = []
+    non_minimized_classes: set = set()
+    if isinstance(windows, list):
+        for window in windows:
+            if not isinstance(window, dict):
+                continue
+            flag = window.get("minimized")
+            if isinstance(flag, bool):
+                minimized_flags.append(flag)
+                if not flag and window.get("class"):
+                    non_minimized_classes.add(str(window.get("class")))
+    if minimized_flags and all(minimized_flags):
+        facts.append(
+            "toutes les fenêtres listées sont réduites : aucune ne recouvre l'avant-plan"
+        )
+    elif minimized_flags and not any(minimized_flags):
+        facts.append(
+            "aucune fenêtre listée n'est réduite : l'avant-plan peut être recouvert"
+        )
+
+    foreground = data.get("foreground_class")
+    if (
+        isinstance(foreground, str)
+        and foreground.strip()
+        and non_minimized_classes
+        and foreground.strip() not in non_minimized_classes
+    ):
+        facts.append(
+            "l'avant-plan n'appartient à aucune fenêtre non réduite listée"
+        )
+    return facts
+
+
 def render_world_snapshot(data: Any, limit: int = 800) -> str:
     """Rend le world state en texte capé, sans jamais casser un mot.
 
@@ -134,6 +180,13 @@ def render_world_snapshot(data: Any, limit: int = 800) -> str:
         marker = f" (+{omitted_fields} champs omis)"
         if len(text) + len(marker) <= limit:
             text += marker
+    # Faits dérivés : seulement s'ils tiennent dans le budget (jamais de
+    # troncature qui masquerait le JSON). Ils complètent, ils ne remplacent pas.
+    facts = derive_world_facts(capped)
+    if facts:
+        suffix = "\nFaits dérivés : " + "; ".join(facts)
+        if len(text) + len(suffix) <= limit:
+            text += suffix
     if len(text) > limit:
         text = _fit_text(text, limit)
     return text

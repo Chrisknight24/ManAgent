@@ -126,6 +126,12 @@ msgstr ""
 msgid "(chaîne: {preview}...)"
 msgstr ""
 
+msgid "(cible {scope} · {kind})"
+msgstr ""
+
+msgid "(cible {scope})"
+msgstr ""
+
 msgid "(disponibilités non transmises — jugez sur le plan seul)"
 msgstr ""
 
@@ -172,6 +178,9 @@ msgid "- [{}] {} {} : {}"
 msgstr ""
 
 msgid "--- DIRECTIVE LOCALE SPÉCIFIQUE À CETTE TÂCHE ---\n"
+msgstr ""
+
+msgid "1 échec À L'EXÉCUTION à structure égale (1re répétition : avertissement non bloquant — la structure seule ne prouve pas une redite ; un argument, une attente ou un texte modifié suffit)"
 msgstr ""
 
 msgid "3 lectures consécutives sans alignement : la cible ou l'ancre ne correspond pas au monde. Ne relis pas à l'identique — change d'ancre (description sémantique, autre producteur) ou d'approche, ou explique honnêtement l'impossibilité."
@@ -232,6 +241,9 @@ msgid "Alias pour rejection_reason si disponible."
 msgstr ""
 
 msgid "Analyse CONJOINTE de plusieurs variables à l'aide d'un LLM : comparaison, cohérence, calcul croisé entre DEUX variables ou plus. Requiert 'sources' (liste d'AU MOINS DEUX noms de variables) et 'query' (question en langage naturel portant sur l'ensemble des sources). N'utilisez PAS cet outil pour une seule variable : dans ce cas, utilisez 'llm_analyze_data' à la place."
+msgstr ""
+
+msgid "Analyse négative : {gap}"
 msgstr ""
 
 msgid "Analyse sémantique du registre des variables résolues d'une mission. Paramètres requis : 'target' (mission_id) et 'question' (langage naturel)."
@@ -459,7 +471,19 @@ msgstr ""
 msgid "Choisis une cible visible ou demande une inspection."
 msgstr ""
 
+msgid "Cible"
+msgstr ""
+
 msgid "Cible '{desc}' ({scope})"
+msgstr ""
+
+msgid "Cible '{label}' acceptee sous reserve : {why}"
+msgstr ""
+
+msgid "Cible '{label}' ecartee : {why}"
+msgstr ""
+
+msgid "Cible '{label}' ecartee par verification : {why}. Aucune cible promue (approfondir ou replanifier)."
 msgstr ""
 
 msgid "Cible '{target}' invalide pour registry."
@@ -496,6 +520,9 @@ msgid "Classe d'échec détectée par l'Executor (EXECUTION_FAILURE ou CONVERGEN
 msgstr ""
 
 msgid "Cle candidate inconnue : {key!r}"
+msgstr ""
+
+msgid "Cle locale d'une cible INTERNE qui semble meilleure. Indicateur pour le selecteur, pas une selection."
 msgstr ""
 
 msgid "Cle locale exacte d'une candidate ou reference exacte d'une cellule de la grille. Vide si une inspection est demandee."
@@ -538,6 +565,9 @@ msgid "Convergence acceptée : 'any' accepte la valeur retournée (statut outil 
 msgstr ""
 
 msgid "Convergence acceptée : Le plan accepte toute valeur de retour pour traitement conditionnel ultérieur."
+msgstr ""
+
+msgid "Correspondance exacte unique avec « {q} »."
 msgstr ""
 
 msgid "Critère de réussite attendu"
@@ -744,6 +774,9 @@ msgstr ""
 msgid "Inconnu"
 msgstr ""
 
+msgid "Indice precedent"
+msgstr ""
+
 msgid "Justification courte, une phrase."
 msgstr ""
 
@@ -801,6 +834,9 @@ msgstr ""
 msgid "L'étape '{}' déclare une cible '{}' qui entre en collision avec un nom déjà connu."
 msgstr ""
 
+msgid "L'étape '{}' déclare une cible '{}' qui entre en collision avec un nom déjà déclaré dans CE plan."
+msgstr ""
+
 msgid "L'étape '{}' définit '{}' dans tool_args_json, ce qui est interdit. Utilisez uniquement le champ output_variable_name de l'étape pour nommer des variables."
 msgstr ""
 
@@ -832,6 +868,9 @@ msgid "LIT le monde via un outil externe puis le fait comprendre par LLM. Seule 
 msgstr ""
 
 msgid "La cible '{target}' n'existe pas dans les données fournies."
+msgstr ""
+
+msgid "La cible choisie satisfait-elle REELLEMENT la question ?"
 msgstr ""
 
 msgid "La décision a indiqué un succès mais tool_args_json est vide."
@@ -1308,6 +1347,9 @@ msgstr ""
 msgid "Provider {provider_id} introuvable."
 msgstr ""
 
+msgid "Question"
+msgstr ""
+
 msgid "Question : {question}"
 msgstr ""
 
@@ -1428,6 +1470,9 @@ msgstr ""
 msgid "Références inconnues : {refs}. Aucune étape antérieure ne produit ces noms."
 msgstr ""
 
+msgid "Réparation automatique : l'étape '{}' déclare la cible '{}' consommée par '{}' (le plan omettait ce nom de sortie)."
+msgstr ""
+
 msgid "Réponse de l'étape abstraite {}"
 msgstr ""
 
@@ -1477,6 +1522,9 @@ msgid "Si True, cette variable sera ajoutée au Registre Utile de Mission (RUM) 
 msgstr ""
 
 msgid "Si True, cette étape a un effet difficilement ou pas réversible une fois exécuté (suppression, envoi, paiement, écrasement de données, etc.). C'est une DÉCLARATION du Planner, pas une déduction automatique : soyez honnête, l'Orchestrateur peut contester ce jugement lors de la validation finale mais part de votre déclaration."
+msgstr ""
+
+msgid "Si ce plan reprend après un échec : une phrase expliquant le changement et la cause observée qu'il traite. Omis au premier plan."
 msgstr ""
 
 msgid "Si is_irreversible=True, explique brièvement en quoi l'effet est irréversible."
@@ -1635,6 +1683,9 @@ msgstr ""
 msgid "Une erreur technique inattendue est survenue côté fournisseur d'IA."
 msgstr ""
 
+msgid "Une phrase : pourquoi la cible correspond ou non."
+msgstr ""
+
 msgid "Une étape de type 'semantic' doit avoir une question."
 msgstr ""
 
@@ -1684,6 +1735,9 @@ msgid "Votre réponse a été COUPÉE car trop longue : refaites un plan PLUS CO
 msgstr ""
 
 msgid "Vouliez-vous dire : {guess} ?"
+msgstr ""
+
+msgid "Vrai seulement si la cible decrite satisfait REELLEMENT la question (meme nature d'objet, meme role). Une simple proximite ou un libelle proche ne suffit pas."
 msgstr ""
 
 msgid "Vrai si aucune cible ne convient et qu'aucune inspection utile n'est possible."
@@ -1869,6 +1923,9 @@ msgstr ""
 msgid "[Solver:{}] 🔥 Erreur critique inattendue : {}"
 msgstr ""
 
+msgid "accept | zoom | replan. Vide = deduction. `zoom` demande une inspection de l'ancienne candidate, jamais un nouveau choix."
+msgstr ""
+
 msgid "action"
 msgstr ""
 
@@ -1878,10 +1935,16 @@ msgstr ""
 msgid "aucune"
 msgstr ""
 
+msgid "aucune preuve disponible pour verifier la cible"
+msgstr ""
+
 msgid "avant"
 msgstr ""
 
 msgid "cause inconnue"
+msgstr ""
+
+msgid "cible interne suggeree"
 msgstr ""
 
 msgid "erreur inconnue"
@@ -1891,6 +1954,18 @@ msgid "inconnu : déclarez ce nom via output_target_name sur l'outil producteur 
 msgstr ""
 
 msgid "inconnu : déclarez via output_variable_name d'un step antérieur"
+msgstr ""
+
+msgid "la cible ne correspond pas a la question"
+msgstr ""
+
+msgid "low, medium ou high : confiance dans ce verdict."
+msgstr ""
+
+msgid "match | mismatch | uncertain. Vide = deduit de `matches` et `confidence` (compatibilite)."
+msgstr ""
+
+msgid "nature incompatible avec la question"
 msgstr ""
 
 msgid "non disponible pour"
@@ -1914,7 +1989,19 @@ msgstr ""
 msgid "perception"
 msgstr ""
 
+msgid "preuves insuffisantes"
+msgstr ""
+
+msgid "preuves insuffisantes pour conclure"
+msgstr ""
+
+msgid "reponse de verification invalide"
+msgstr ""
+
 msgid "source_tool et action_tool doivent être des outils externes (hôte)."
+msgstr ""
+
+msgid "tentative {attempt} — non déclarable dans ce plan"
 msgstr ""
 
 msgid "tool_args_json invalide pour l'étape {idx}"
@@ -1924,6 +2011,9 @@ msgid "tool_args_json n'est pas un JSON valide."
 msgstr ""
 
 msgid "traitement et analyse de données"
+msgstr ""
+
+msgid "verificateur indisponible"
 msgstr ""
 
 msgid "{\"result\": false, \"message\": \"Exécution interrompue par l'utilisateur.\"}"
@@ -1939,6 +2029,9 @@ msgid "{n} rejet(s) AVANT exécution à structure égale (pas chers, pas une pre
 msgstr ""
 
 msgid "{n} échec(s) À L'EXÉCUTION à structure égale"
+msgstr ""
+
+msgid "{n} échecs À L'EXÉCUTION à structure égale (répétition confirmée : exiger un changement qui traite la cause observée)"
 msgstr ""
 
 msgid "{question}\nSi tu TROUVES ce qui est demandé : réponds UNIQUEMENT avec le format strict suivant : {format_response}. Rien d'autre.\nSinon (cible absente/introuvable) : décris en une phrase ce que tu VOIS à la place (écran, éléments présents, texte) et mets success=false."
@@ -2019,6 +2112,9 @@ msgstr ""
 msgid "… (profondeur max d'affichage atteinte)"
 msgstr ""
 
+msgid "⚠️ 1re RÉPÉTITION (avertissement non bloquant) : même structure que 1 tentative déjà échouée à l'exécution. Un changement d'argument, d'attente ou de texte peut suffire ; ne refusez pas pour la seule structure."
+msgstr ""
+
 msgid "⚠️ AUTO-DÉLÉGATION RÉCURSIVE : L'étape `{step_id}` délègue la sous-tâche '{desc}' qui est STRICTEMENT IDENTIQUE à l'objectif du Solver courant. Un Solver ne doit pas déléguer son propre mandat sans le décomposer."
 msgstr ""
 
@@ -2035,6 +2131,9 @@ msgid "⚠️ OBLIGATOIRE : Ce champ est requis dans la réponse JSON (même pou
 msgstr ""
 
 msgid "⚠️ RÉCURSION D'ARBRE D'EXÉCUTION : L'étape `{step_id}` propose de déléguer '{desc}' alors que cet objectif exact a déjà été exécuté dans l'arbre de la mission (statut: {status})."
+msgstr ""
+
+msgid "⚠️ RÉPÉTITION CONFIRMÉE ({repeats} échecs) : même structure (types d'étapes et outils, dans le même ordre) que {repeats} tentative(s) précédente(s) déjà en échec à l'exécution. La répétition ne suffit pas à refuser : exigez un changement qui traite la cause observée (ou une justification explicite du planner)."
 msgstr ""
 
 msgid "⚠️ RÉPÉTITION D'ÉCHEC : Ce plan a EXACTEMENT la même structure (types d'étapes et outils, dans le même ordre) que {repeats} tentative(s) précédente(s) de ce Solver, déjà en échec sans adaptation."

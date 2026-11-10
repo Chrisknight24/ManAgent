@@ -414,12 +414,15 @@ contrat reste en `version: 1` ; `disclosure` est optionnel et non cassant.
 ```json
 "disclosure": {
   "version": 1,
+  "reliability": "medium",
+  "evidence": ["metadata"],
+  "zoom_probe": "zoomer",
   "views": [
     {"name": "grid", "path": "data.grid", "description": "Grille de cellules"},
     {"name": "tree", "path": "data.tree", "description": "Arborescence"}
   ],
   "anchors": [
-    {"kind": "cell", "param": "cell", "description": "Cellule brute"},
+    {"kind": "cell", "param": "cell", "description": "Cellule brute", "reliability": "high"},
     {"kind": "file", "param": "path", "description": "Chemin de fichier"}
   ],
   "probes": [
@@ -438,10 +441,51 @@ contrat reste en `version: 1` ; `disclosure` est optionnel et non cassant.
       "tool": "lire_ecran",
       "subject": {"kind": "cell", "param": "cell"},
       "produces": ["candidates"]
+    },
+    {
+      "id": "zoomer",
+      "kind": "zoom",
+      "tool": "lire_ecran",
+      "subject": {"kind": "local", "param": "target"},
+      "produces": ["candidates"]
     }
   ]
 }
 ```
+
+- `reliability` (optionnel) : `high` | `medium` | `low`, défaut `medium`.
+  Profil **déclaré** de fiabilité des cibles. Il choisit la profondeur de
+  vérification : `high` = légère, `medium` = standard, `low` = approfondie et
+  zoom automatique. Surcharges possibles : `produces[].reliability` et
+  `anchors[].reliability` (le plus spécifique gagne). Absent = comportement
+  actuel, aucune régression.
+- `evidence` (optionnel) : liste de types de preuve que l'hôte sait joindre à
+  une candidate. Valeurs : `metadata` (défaut), `image`, `rect`,
+  `nested_targets`, `invariants`. Ce ne sont **pas des noms d'outils** : le
+  cerveau ne lit que les preuves réellement présentes. Les images passent par
+  le canal média, jamais en base64 dans le prompt.
+- `zoom_probe` (optionnel) : `id` d'une sonde de `probes[]` qui inspecte une
+  **candidate locale** (`subject.kind = "local"`). Le harnais l'utilise pour un
+  zoom implicite après un verdict `mismatch` : il réinterroge le sélecteur sur
+  **l'ancienne candidate**, avec la proposition du vérificateur en contexte.
+  Le vérificateur ne choisit jamais ; il oriente (`next`, `prefer_internal`).
+  Borne stricte : **1 zoom + 1 re-sélection**.
+
+#### Verdict de vérification (interne)
+
+Le vérificateur renvoie `verdict` (`match` | `mismatch` | `uncertain`),
+`confidence` (`low` | `medium` | `high`), `next` (`accept` | `zoom` | `replan`)
+et `prefer_internal` (clé locale d'une cible interne, **indicateur**).
+
+- `uncertain` → la cible est **acceptée avec un avertissement partagé**
+  (planner + convergence) : jamais de fallback silencieux ni de refus dur.
+- `mismatch` moyen/haut → zoom si possible, sinon replanification
+  (`TARGET_MISMATCH`).
+- `match` → acceptation, aucune suite.
+
+Ces champs restent **optionnels** : sans `disclosure`, le comportement
+historique est conservé à l'identique.
+
 
 - `views[]` : `name` libre (grille, arborescence, capteurs...) et `path`
   pointé relatif au résultat complet. La vue est montrée au sélecteur, jamais

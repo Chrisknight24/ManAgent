@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -35,7 +36,11 @@ from pydantic import BaseModel, Field
 from core.base_schema import BaseDiscoverySchema
 from core.i18n import _
 from core.target_contract import (
+    DEFAULT_EVIDENCE,
+    DEFAULT_RELIABILITY,
+    EVIDENCE_VALUES,
     LOCAL_SUBJECT_KIND,
+    RELIABILITY_VALUES,
     DisclosureSpec,
     ProbeSpec,
     TargetContract,
@@ -206,6 +211,13 @@ class TargetingResult:
     world: Optional[ObservedWorld] = None
     error_code: str = ""
     error_message: str = ""
+    # `deterministic` quand une correspondance exacte unique a evite le LLM.
+    strategy: str = ""
+    # Doutes non bloquants (fail-open, preuves insuffisantes) destines au
+    # planner (retries) et a la convergence. Jamais une liste de candidats.
+    warnings: List[str] = field(default_factory=list)
+    # Trace de verification (verdict, fiabilite, suite). Optionnelle.
+    verification: Optional[Dict[str, Any]] = None
 
     @property
     def ok(self) -> bool:
@@ -265,6 +277,103 @@ class TargetDecision(BaseDiscoverySchema):
     )
 
 
+class TargetVerification(BaseDiscoverySchema):
+    """Re-verification finale d'une cible choisie (garde anti-substitution).
+
+    Le selecteur peut choisir l'element « le plus proche » alors que la
+    question demande une nature differente (zone vide vs fichier). Ce schema
+    ne sert qu'a confirmer/infirmer la correspondance semantique ; il ne
+    choisit jamais une autre cible. Il peut seulement ORIENTER (`next`,
+    `prefer_internal`) : c'est le harnais qui reinterroge le selecteur.
+    """
+
+    matches: bool = Field(
+        default=False,
+        description=_(
+            "Vrai seulement si la cible decrite satisfait REELLEMENT la "
+            "question (meme nature d'objet, meme role). Une simple proximite "
+            "ou un libelle proche ne suffit pas."
+        ),
+    )
+    confidence: str = Field(
+        default="low",
+        description=_("low, medium ou high : confiance dans ce verdict."),
+    )
+    verdict: str = Field(
+        default="",
+        description=_(
+            "match | mismatch | uncertain. Vide = deduit de `matches` et "
+            "`confidence` (compatibilite)."
+        ),
+    )
+    next: str = Field(
+        default="",
+        description=_(
+            "accept | zoom | replan. Vide = deduction. `zoom` demande une "
+            "inspection de l'ancienne candidate, jamais un nouveau choix."
+        ),
+    )
+    prefer_internal: str = Field(
+        default="",
+        description=_(
+            "Cle locale d'une cible INTERNE qui semble meilleure. Indicateur "
+            "pour le selecteur, pas une selection."
+        ),
+    )
+    reason: str = Field(
+        default="",
+        description=_("Une phrase : pourquoi la cible correspond ou non."),
+    )
+
+    def effective_verdict(self) -> str:
+        value = str(self.verdict or "").strip().lower()
+        if value in ("match", "mismatch", "uncertain"):
+            return value
+        if self.matches:
+            return "match"
+        if str(self.confidence or "").strip().lower() in ("medium", "high"):
+            return "mismatch"
+        return "uncertain"
+
+    def effective_next(self) -> str:
+        value = str(self.next or "").strip().lower()
+        if value in ("accept", "zoom", "replan"):
+            return value
+        return ""
+
+
+@dataclass
+class VerificationOutcome:
+    """Resultat de verification, plus riche qu'un booleen.
+
+    `verdict` tranche (match/mismatch/uncertain), `next` oriente la suite.
+    Aucune cible n'est choisie ici : `prefer_internal` reste un indicateur.
+    """
+
+    verdict: str = "match"
+    confidence: str = "low"
+    reason: str = ""
+    next: str = "accept"
+    prefer_internal: str = ""
+    reliability: str = DEFAULT_RELIABILITY
+    verified: bool = False
+
+    @property
+    def matches(self) -> bool:
+        return self.verdict == "match"
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "verdict": self.verdict,
+            "confidence": self.confidence,
+            "reason": self.reason[:300],
+            "next": self.next,
+            "prefer_internal": self.prefer_internal,
+            "reliability": self.reliability,
+            "verified": self.verified,
+        }
+
+
 def _payload_data(payload: Any) -> Any:
     if isinstance(payload, dict) and "data" in payload:
         return payload.get("data")
@@ -296,6 +405,46 @@ def _observed_candidate(entry: TargetEntry) -> ObservedCandidate:
     )
 
 
+_NORMALIZE_RE = re.compile(r"[^0-9a-z\u00c0-\u024f]+", re.IGNORECASE)
+
+
+def _normalize_label(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return _NORMALIZE_RE.sub(" ", text).strip()
+
+
+def exact_candidate(
+    world: ObservedWorld, question: str
+) -> Optional[ObservedCandidate]:
+    """Candidate dont un libelle EGALE exactement la question (P2-10).
+
+    Resolution deterministe et conservatrice : on ne retient que l'egalite
+    (normalisee) avec la description ou avec une valeur d'attribut textuelle
+    suffisamment longue, et seulement si elle est UNIQUE. Des qu'il y a
+    ambiguite ou simple similarite, on renvoie `None` et le selecteur LLM
+    garde la main. Aucun vocabulaire d'hote n'est suppose. Fonction pure.
+    """
+    query = _normalize_label(question)
+    if not query:
+        return None
+    matches: List[ObservedCandidate] = []
+    for candidate in getattr(world, "candidates", []) or []:
+        labels = [_normalize_label(candidate.description)]
+        attributes = candidate.attributes if isinstance(candidate.attributes, dict) else {}
+        for name, value in attributes.items():
+            if not isinstance(value, str):
+                continue
+            normalized = _normalize_label(value)
+            # Un attribut court (`true`, `A1`, `ui`) egale trop de choses.
+            if len(normalized) >= 3:
+                labels.append(normalized)
+        if query in labels and candidate not in matches:
+            matches.append(candidate)
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
 def _trim_attributes(attributes: Any) -> Any:
     if not isinstance(attributes, dict):
         return {}
@@ -309,6 +458,82 @@ def _trim_attributes(attributes: Any) -> Any:
             encoded = encoded[:MAX_PROMPT_ATTRIBUTE_CHARS] + "..."
         trimmed[str(name)] = encoded
     return trimmed
+
+
+def effective_reliability(
+    disclosure: Optional[DisclosureSpec],
+    contract: Optional[TargetContract],
+    scope: str,
+) -> str:
+    """Fiabilite declaree pour un scope de cible (agnostique).
+
+    Ordre : surcharge d'ancre (meme kind) > surcharge de producteur (meme
+    scope ou `usable_as`) > defaut global `disclosure.reliability` > medium.
+    """
+    scope = str(scope or "").strip()
+    if disclosure is not None:
+        for anchor in disclosure.anchors:
+            if anchor.kind == scope and anchor.reliability:
+                return anchor.reliability
+    if contract is not None and scope:
+        for producer in contract.producers:
+            if producer.reliability and (
+                producer.scope == scope or scope in producer.usable_as
+            ):
+                return producer.reliability
+    if disclosure is not None and disclosure.reliability in RELIABILITY_VALUES:
+        return disclosure.reliability
+    return DEFAULT_RELIABILITY
+
+
+def _declared_evidence(disclosure: Optional[DisclosureSpec]) -> Tuple[str, ...]:
+    if disclosure is not None and disclosure.evidence:
+        return tuple(disclosure.evidence)
+    return DEFAULT_EVIDENCE
+
+
+def build_target_evidence(
+    entry: TargetEntry,
+    world: Optional["ObservedWorld"],
+    disclosure: Optional[DisclosureSpec],
+) -> Dict[str, Any]:
+    """Bundle de preuves generique, selon les capacites declarees.
+
+    Ne code aucune semantique d'hote : `image` vient du canal media,
+    `rect`/`invariants` sont des attributs declares, `nested_targets` sont
+    les autres candidates visibles du monde courant.
+    """
+    attributes = getattr(entry, "attributes", {}) or {}
+    evidence: Dict[str, Any] = {
+        "description": str(getattr(entry, "description", "") or "")[:300],
+        "scope": str(getattr(entry, "scope", "") or ""),
+        "attributes": _trim_attributes(attributes),
+    }
+    caps = set(_declared_evidence(disclosure))
+    if "image" in caps and world is not None:
+        media = [
+            {"uri": m.uri, "mime": m.mime, "name": m.name}
+            for m in getattr(world, "media", []) or []
+        ]
+        if media:
+            evidence["image"] = media[:4]
+    if "rect" in caps and isinstance(attributes, dict):
+        rect = attributes.get("rect") or attributes.get("bbox")
+        if rect is not None:
+            evidence["rect"] = rect
+    if "nested_targets" in caps and world is not None:
+        nested = [
+            candidate.as_prompt()
+            for candidate in getattr(world, "candidates", []) or []
+            if candidate.key != getattr(entry, "local_name", "")
+        ][:MAX_PROMPT_CANDIDATES]
+        if nested:
+            evidence["nested"] = nested
+    if "invariants" in caps and isinstance(attributes, dict):
+        invariants = attributes.get("invariants")
+        if invariants is not None:
+            evidence["invariants"] = invariants
+    return evidence
 
 
 def _read_path(obj: Any, path: Optional[str]) -> Any:
@@ -541,6 +766,7 @@ def _build_prompt(
     anchor_kinds: Optional[List[str]],
     allow_probes: bool,
     language: str,
+    verifier_hint: str = "",
 ) -> str:
     from core.prompt_loader import get_prompt_loader
 
@@ -599,6 +825,9 @@ def _build_prompt(
         "anchors_json": _json_block(anchor_specs, 4000),
         "allow_anchor": bool(allow_anchor and anchor_specs),
         "allow_probes": bool(allow_probes),
+        # Indice du verificateur apres un rejet : oriente le selecteur vers
+        # l'ancienne candidate, sans jamais imposer un choix.
+        "verifier_hint": verifier_hint or "",
         # Le selecteur n'est appele que lorsque le ciblage est actif : le
         # gabarit reste vide pour tout rendu generique (capacite OFF).
         "target_selection_enabled": True,
@@ -635,6 +864,7 @@ async def _ask_selector(
     allow_probes: bool,
     language: str,
     tag: str,
+    verifier_hint: str = "",
 ) -> Optional[TargetDecision]:
     prompt = _build_prompt(
         question=question,
@@ -644,6 +874,7 @@ async def _ask_selector(
         anchor_kinds=anchor_kinds,
         allow_probes=allow_probes,
         language=language,
+        verifier_hint=verifier_hint,
     )
     try:
         decision = await llm.generate_structured(
@@ -679,6 +910,193 @@ async def _ask_selector(
         except Exception:
             return None
     return None
+
+
+def _build_verification_prompt(
+    *,
+    question: str,
+    entry: Any,
+    language: str,
+    evidence: Optional[Dict[str, Any]] = None,
+    verifier_hint: str = "",
+) -> str:
+    """Prompt de re-verification generique (metadonnees + preuves declarees).
+
+    L'image eventuelle passe par le canal media (jamais en base64 dans le
+    texte). Le prompt ne suppose aucune semantique d'hote.
+    """
+    if evidence is None:
+        description = str(getattr(entry, "description", "") or "")
+        scope = str(getattr(entry, "scope", "") or "")
+        attributes = _trim_attributes(getattr(entry, "attributes", {}) or {})
+        evidence = {
+            "description": description[:300],
+            "scope": scope,
+            "attributes": attributes,
+        }
+    target_info = evidence
+    try:
+        from core.prompt_loader import get_prompt_loader
+
+        return get_prompt_loader().load(
+            "target_verification.md",
+            lang=language,
+            question=question,
+            target_json=json.dumps(target_info, ensure_ascii=False, indent=1),
+            verifier_hint=verifier_hint or "",
+        )
+    except Exception:
+        return (
+            _("La cible choisie satisfait-elle REELLEMENT la question ?")
+            + f"\n{_('Question')} : {question}"
+            + f"\n{_('Cible')} : {json.dumps(target_info, ensure_ascii=False)}"
+            + (f"\n{_('Indice precedent')} : {verifier_hint}" if verifier_hint else "")
+        )
+
+
+def _derive_next(
+    parsed: TargetVerification,
+    *,
+    reliability: str,
+    zoom_available: bool,
+) -> str:
+    """Traduit un verdict en suite, sans jamais choisir de cible.
+
+    - `match` / `uncertain` -> `accept` (un `uncertain` sera porte par un
+      warning, jamais par un fallback silencieux) ;
+    - `mismatch` -> `zoom` si une inspection de l'ancienne candidate est
+      possible et si la fiabilite est faible ou qu'une cible interne est
+      indiquee ; sinon `replan`.
+    """
+    explicit = parsed.effective_next()
+    verdict = parsed.effective_verdict()
+    if verdict in ("match", "uncertain"):
+        return "accept"
+    if explicit == "replan":
+        return "replan"
+    if explicit == "zoom" and zoom_available:
+        return "zoom"
+    if zoom_available and (
+        reliability == "low" or str(parsed.prefer_internal or "").strip()
+    ):
+        return "zoom"
+    return "replan"
+
+
+async def _verify_target(
+    *,
+    llm: Any,
+    question: str,
+    entry: Any,
+    language: str,
+    tag: str,
+    disclosure: Optional[DisclosureSpec] = None,
+    contract: Optional[TargetContract] = None,
+    world: Optional["ObservedWorld"] = None,
+    verifier_hint: str = "",
+) -> VerificationOutcome:
+    """Verifie une cible choisie avec les preuves declarees par l'hote.
+
+    Fail-open controle : une absence de preuve, une panne du verificateur ou
+    un verdict `uncertain` n'ecartent jamais la cible ; ils produisent un
+    `VerificationOutcome` que l'appelant peut transformer en warning. Seul un
+    `mismatch` explicite demande une suite (`zoom` ou `replan`).
+    Cout borne : UN appel, jamais de boucle.
+    """
+    scope = str(getattr(entry, "scope", "") or "")
+    reliability = effective_reliability(disclosure, contract, scope)
+    caps = set(_declared_evidence(disclosure))
+    description = str(getattr(entry, "description", "") or "").strip()
+    attributes = getattr(entry, "attributes", {}) or {}
+    has_meta = bool(description or attributes)
+    has_image = "image" in caps and world is not None and bool(world.media)
+
+    if not has_meta and not has_image:
+        return VerificationOutcome(
+            verdict="uncertain",
+            confidence="low",
+            reason=_("aucune preuve disponible pour verifier la cible"),
+            next="accept",
+            reliability=reliability,
+            verified=False,
+        )
+
+    evidence = build_target_evidence(entry, world, disclosure)
+    prompt = _build_verification_prompt(
+        question=question,
+        entry=entry,
+        language=language,
+        evidence=evidence,
+        verifier_hint=verifier_hint,
+    )
+    media_assets = world.media_assets() if has_image else None
+    try:
+        verdict = await llm.generate_structured(
+            prompt=prompt,
+            schema=TargetVerification,
+            tag=f"{tag}_verify",
+            with_discovery=False,
+            media_assets=media_assets,
+        )
+    except Exception:
+        return VerificationOutcome(
+            verdict="uncertain",
+            confidence="low",
+            reason=_("verificateur indisponible"),
+            next="accept",
+            reliability=reliability,
+            verified=False,
+        )
+    if isinstance(verdict, TargetVerification):
+        parsed = verdict
+    else:
+        try:
+            parsed = TargetVerification.model_validate(verdict)
+        except Exception:
+            return VerificationOutcome(
+                verdict="uncertain",
+                confidence="low",
+                reason=_("reponse de verification invalide"),
+                next="accept",
+                reliability=reliability,
+                verified=False,
+            )
+    verdict_value = parsed.effective_verdict()
+    confidence = str(getattr(parsed, "confidence", "") or "").strip().lower()
+    reason = str(getattr(parsed, "reason", "") or "").strip()
+    zoom_available = bool(disclosure is not None and disclosure.zoom_probe)
+    next_action = _derive_next(
+        parsed, reliability=reliability, zoom_available=zoom_available
+    )
+    if verdict_value == "match":
+        return VerificationOutcome(
+            verdict="match",
+            confidence=confidence or "medium",
+            reason=reason,
+            next="accept",
+            prefer_internal=str(getattr(parsed, "prefer_internal", "") or "").strip(),
+            reliability=reliability,
+            verified=True,
+        )
+    if verdict_value == "uncertain":
+        return VerificationOutcome(
+            verdict="uncertain",
+            confidence=confidence or "low",
+            reason=reason or _("preuves insuffisantes pour conclure"),
+            next="accept",
+            prefer_internal=str(getattr(parsed, "prefer_internal", "") or "").strip(),
+            reliability=reliability,
+            verified=True,
+        )
+    return VerificationOutcome(
+        verdict="mismatch",
+        confidence=confidence or "medium",
+        reason=reason or _("la cible ne correspond pas a la question"),
+        next=next_action,
+        prefer_internal=str(getattr(parsed, "prefer_internal", "") or "").strip(),
+        reliability=reliability,
+        verified=True,
+    )
 
 
 def extract_media_assets(
@@ -755,6 +1173,8 @@ async def resolve_target(
     language: str = "fr",
     max_rounds: int = MAX_TARGETING_ROUNDS,
     tag: str = "target_selection",
+    deterministic: bool = False,
+    verify: bool = False,
 ) -> TargetingResult:
     """Choisit une cible visible, avec inspections bornees.
 
@@ -776,6 +1196,28 @@ async def resolve_target(
     budget = max(0, int(max_rounds))
     decision: Optional[TargetDecision] = None
     used: set = set()
+    # Doutes non bloquants et trace de verification, portes jusqu'au resultat.
+    warnings: List[str] = []
+    verification_trace: Optional[Dict[str, Any]] = None
+    verifier_hint = ""
+
+    # P2-10 : une correspondance exacte ET unique avec la question (ou un
+    # attribut declare) est resolue sans appel de selection. Conserve le
+    # determinisme, economise un appel LLM, et n'introduit aucune guess :
+    # des qu'il y a ambiguite ou similarite, le selecteur garde la main.
+    preset = exact_candidate(world, question) if deterministic else None
+    if preset is not None and registry is not None:
+        preset_entry = world.find_entry(registry, preset.key)
+        if preset_entry is not None:
+            return TargetingResult(
+                kind=TARGET_KIND_LOCAL,
+                entry=preset_entry,
+                reason=_(
+                    "Correspondance exacte unique avec « {q} »."
+                ).format(q=question[:120]),
+                world=world,
+                strategy="deterministic",
+            )
 
     for _round in range(budget + 1):
         allow_probes = budget > 0
@@ -789,6 +1231,7 @@ async def resolve_target(
             allow_probes=allow_probes,
             language=language,
             tag=tag,
+            verifier_hint=verifier_hint,
         )
         if decision is None:
             return TargetingResult(
@@ -800,6 +1243,149 @@ async def resolve_target(
 
         request = _probe_request(decision, disclosure) if allow_probes else None
         if request is None:
+            if verify:
+                _key = (decision.target_key or "").strip().strip("\"'")
+                _kind = (decision.target_kind or TARGET_KIND_LOCAL).strip().lower()
+                _entry = (
+                    world.find_entry(registry, _key)
+                    if _kind == TARGET_KIND_LOCAL and _key and registry is not None
+                    else None
+                )
+                if _entry is not None:
+                    _outcome = await _verify_target(
+                        llm=llm,
+                        question=question,
+                        entry=_entry,
+                        language=language,
+                        tag=tag,
+                        disclosure=disclosure,
+                        contract=contract,
+                        world=world,
+                        verifier_hint=verifier_hint,
+                    )
+                    verification_trace = _outcome.as_dict()
+                    _label = str(
+                        getattr(_entry, "description", "") or _key
+                    )[:120]
+                    if _outcome.verdict == "uncertain":
+                        # Fail-open controle : on accepte, mais le doute doit
+                        # atteindre le planner et la convergence.
+                        warnings.append(
+                            _(
+                                "Cible '{label}' acceptee sous reserve : {why}"
+                            ).format(
+                                label=_label,
+                                why=_outcome.reason
+                                or _("preuves insuffisantes"),
+                            )
+                        )
+                        break
+                    if _outcome.verdict == "mismatch":
+                        _reason = _outcome.reason or _(
+                            "nature incompatible avec la question"
+                        )
+                        _zoom_id = (
+                            disclosure.zoom_probe
+                            if disclosure is not None
+                            else None
+                        )
+                        if (
+                            _outcome.next == "zoom"
+                            and budget > 0
+                            and _zoom_id
+                        ):
+                            # Zoom implicite sur l'ANCIENNE candidate : on ne
+                            # relit pas tout l'ecran, et le selecteur garde le
+                            # choix apres inspection.
+                            budget -= 1
+                            _zoom_probe = (
+                                disclosure.probe(_zoom_id)
+                                if disclosure is not None
+                                else None
+                            )
+                            if _zoom_probe is not None:
+                                _record, _error = await _run_probe(
+                                    probe=_zoom_probe,
+                                    subject=_key,
+                                    world=world,
+                                    registry=registry,
+                                    contract=contract,
+                                    disclosure=disclosure,
+                                    tools_mgr=tools_mgr,
+                                    question=question,
+                                )
+                                if _record is not None:
+                                    world.probes.append(_record)
+                                if _error:
+                                    world.probes.append(
+                                        ProbeRecord(
+                                            probe_id=_zoom_probe.id,
+                                            kind=_zoom_probe.kind,
+                                            subject=_key,
+                                            ok=False,
+                                            message=_error,
+                                        )
+                                    )
+                                # Le selecteur doit voir l'ANCIENNE candidate ET
+                                # les cibles internes proposees. Un zoom hote
+                                # peut ne renvoyer que les internes : on remet
+                                # l'ancienne, si elle est encore active.
+                                try:
+                                    _known = {
+                                        c.key for c in world.candidates
+                                    }
+                                    if (
+                                        registry is not None
+                                        and _key not in _known
+                                    ):
+                                        _old = registry.get(_key)
+                                        if _old is not None and _old.active:
+                                            world.candidates.append(
+                                                _observed_candidate(_old)
+                                            )
+                                except Exception:
+                                    pass
+                            _hint = _outcome.reason or _reason
+                            _prefer = str(
+                                getattr(_outcome, "prefer_internal", "") or ""
+                            ).strip()
+                            if _prefer:
+                                _hint = (
+                                    f"{_hint} ({_('cible interne suggeree')} : "
+                                    f"{_prefer})"
+                                )
+                            verifier_hint = _hint
+                            continue
+                        if budget > 0:
+                            # Creuser sans zoom declare : la cible rejetee
+                            # devient une trace visible pour le selecteur.
+                            budget -= 1
+                            world.probes.append(
+                                ProbeRecord(
+                                    probe_id="target_verification",
+                                    kind="verification",
+                                    subject=_key,
+                                    ok=False,
+                                    message=_(
+                                        "Cible '{label}' ecartee : {why}"
+                                    ).format(label=_label, why=_reason),
+                                )
+                            )
+                            verifier_hint = _outcome.reason or _reason
+                            continue
+                        return TargetingResult(
+                            kind="none",
+                            world=world,
+                            error_code="TARGET_MISMATCH",
+                            error_message=_(
+                                "Cible '{label}' ecartee par verification : "
+                                "{why}. Aucune cible promue (approfondir ou "
+                                "replanifier)."
+                            ).format(label=_label, why=_reason),
+                            reason=_reason,
+                            warnings=warnings,
+                            verification=verification_trace,
+                        )
             break
 
         probe, subject = request
@@ -846,6 +1432,8 @@ async def resolve_target(
             world=world,
             error_code="TARGET_NOT_FOUND",
             error_message=_("Selection de cible impossible."),
+            warnings=warnings,
+            verification=verification_trace,
         )
 
     key = (decision.target_key or "").strip().strip("\"'")
@@ -869,6 +1457,8 @@ async def resolve_target(
             world=world,
             error_code="TARGET_ANCHOR_UNSUPPORTED",
             error_message=message,
+            warnings=warnings,
+            verification=verification_trace,
         )
 
     if len(key) > MAX_RAW_ANCHOR_CHARS:
@@ -920,6 +1510,8 @@ async def resolve_target(
             anchor_value=key,
             reason=reason,
             world=world,
+            warnings=warnings,
+            verification=verification_trace,
         )
 
     entry = world.find_entry(registry, key)
@@ -936,4 +1528,6 @@ async def resolve_target(
         entry=entry,
         reason=reason,
         world=world,
+        warnings=warnings,
+        verification=verification_trace,
     )

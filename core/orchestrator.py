@@ -2178,6 +2178,7 @@ class Orchestrator(Supervisor, Entity):
         previous_attempts: Optional[List[PlanAttempt]] = None,
         mission_history_tree: Optional[Any] = None,
         plan_id: Optional[str] = None,
+        strategy: Optional[str] = None,
     ) -> PlanValidationOutcome:
         """
         Validation finale d'un plan proposé par un Solver, avant exécution.
@@ -2246,6 +2247,7 @@ class Orchestrator(Supervisor, Entity):
             previous_attempts=previous_attempts,
             mission_history_tree=mission_history_tree,
             world_snapshot=_judge_world,
+            strategy=strategy,
         )
         # P2 : garde-fou déplacé. La non-consommation ne bloque plus,
         # elle est stockée pour la convergence finale (juge prudent).
@@ -2311,6 +2313,7 @@ class Orchestrator(Supervisor, Entity):
                         previous_attempts=previous_attempts,
                         mission_history_tree=mission_history_tree,
                         world_snapshot=_judge_world,
+                        strategy=strategy,
                     )
 
         # Plan accepté : deux canaux DISTINCTS (voir `store_plan_warnings`).

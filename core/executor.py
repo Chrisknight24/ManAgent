@@ -312,6 +312,7 @@ class Executor:
                             tool_name=str(getattr(step, "tool_name", "") or ""),
                         )
                         node.ended_at = time.time()
+                        self._drop_failed_target_alias(step)
 
                         await self.solver.propagate_event(Events.STEP_STATUS_CHANGED, {
                             "step_id": step.id,
@@ -321,7 +322,8 @@ class Executor:
                         })
 
                         failure_trace = self._build_failure_trace(
-                            executed_steps_trace, step, _("Échec d'exécution de l'action"), step.result_context
+                            executed_steps_trace, step, _("Échec d'exécution de l'action"), step.result_context,
+                            observation=getattr(node, "result", None),
                         )
                         registry_meta = self.solver._get_registry_metadata_view()
                         # F-blk6 : failure_trace re-liste déjà les étapes réussies ->
@@ -439,7 +441,8 @@ class Executor:
                         })
 
                         failure_trace = self._build_failure_trace(
-                            executed_steps_trace, step, _("Divergence de résultat (Non-convergence)"), convergence.reason
+                            executed_steps_trace, step, _("Divergence de résultat (Non-convergence)"), convergence.reason,
+                            observation=getattr(node, "result", None),
                         )
                         registry_meta = self.solver._get_registry_metadata_view()
                         # F-blk6 : failure_trace re-liste déjà les étapes réussies ->
@@ -505,6 +508,26 @@ class Executor:
         except Exception:
             pass
         return entry
+
+    def _drop_failed_target_alias(self, step: Any) -> None:
+        """Retire du registre l'alias de cible d'une étape en échec (P1-6).
+
+        `perceive_understand` lie l'alias avant l'analyse : si l'analyse
+        échoue, l'alias resterait publié avec une cible dont la sémantique
+        n'a pas été vérifiée. Ne pas publier est plus sûr que publier faux :
+        le nom local reste dans `TargetRegistry` (la cible peut être
+        re-sélectionnée), seul l'alias de plan est retiré.
+        """
+        alias = getattr(step, "output_target_name", None)
+        if not isinstance(alias, str) or not alias.strip():
+            return
+        alias = alias.strip()
+        registry = getattr(self.solver, "variable_registry", None)
+        if not isinstance(registry, dict):
+            return
+        entry = registry.get(alias)
+        if isinstance(entry, dict) and entry.get("type") == "target":
+            registry.pop(alias, None)
 
     def _note_perception_output(self, step: Any, var_names: Any) -> None:
         """Mémorise les sorties des steps de perception (kind hôte ou
@@ -1415,6 +1438,7 @@ class Executor:
                         bind_target_alias,
                         collect_projected_targets,
                     )
+                    from core.target_contract import declared_target_kind
                     _projected_entries = collect_projected_targets(
                         _target_registry, _target_contract, parsed_result
                     )
@@ -1430,6 +1454,12 @@ class Executor:
                         self.solver.variable_registry,
                         _alias,
                         _projected_entries[0],
+                        target_kind=declared_target_kind(_target_contract, tool_args),
+                        attempt_no=getattr(
+                            getattr(self.solver, "current_attempt", None),
+                            "attempt_number",
+                            None,
+                        ),
                     )
                 except Exception as e:
                     return False, "", _(
@@ -1858,6 +1888,48 @@ class Executor:
                 self.solver.runtime_state, max_chars=600)
         except Exception:
             _conv_snapshot = ""
+        # Avertissements non bloquants : perception + doutes de ciblage.
+        # Avant, l'etape ne les recevait pas du tout (seule la convergence
+        # finale les lisait) : un doute de cible restait invisible ici.
+        _world_warns = []
+        try:
+            _runtime = self.solver.runtime_state
+            _solver_id = getattr(self.solver, "id", None)
+            for _attr in (
+                "perception_warnings_by_solver",
+                "target_warnings_by_solver",
+            ):
+                _store = getattr(_runtime, _attr, None)
+                if isinstance(_store, dict):
+                    for _w in (_store.get(_solver_id, None) or []):
+                        _text = str(_w).strip()
+                        if _text and _text not in _world_warns:
+                            _world_warns.append(_text)
+        except Exception:
+            _world_warns = []
+        world_warnings = "\n".join(
+            f"[AVERTISSEMENT] {w}" for w in _world_warns[:5]
+        )
+        expected_warnings = ""
+        try:
+            _exp_store = getattr(
+                self.solver.runtime_state, "expected_warnings_by_solver", None
+            )
+            if isinstance(_exp_store, dict):
+                _exp = [
+                    str(w).strip()
+                    for w in (
+                        _exp_store.get(
+                            getattr(self.solver, "id", None), None
+                        ) or []
+                    )
+                    if str(w).strip()
+                ]
+            else:
+                _exp = []
+            expected_warnings = "\n".join(f"- {w}" for w in _exp[:5])
+        except Exception:
+            expected_warnings = ""
         prompt = loader.load(
             "convergence.md",
             lang=self.solver.runtime_state.language,
@@ -1866,6 +1938,8 @@ class Executor:
             actual_result=clean_text,
             tool_status=tool_status,
             world_snapshot=_conv_snapshot,
+            world_warnings=world_warnings,
+            expected_warnings=expected_warnings,
         )
         # Juge isolé : clone dédié, PD restreinte (registre + monde). Le juge
         # peut re-percevoir en cas de doute, sans le bruit des autres axes.
@@ -1924,7 +1998,7 @@ class Executor:
         expr = expr.replace('___NEQ___', '!=')
         return expr
 
-    def _build_failure_trace(self, executed_steps_trace: List[str], current_step: PlanStep, failure_type: str, details: str) -> str:
+    def _build_failure_trace(self, executed_steps_trace: List[str], current_step: PlanStep, failure_type: str, details: str, observation: Any = None) -> str:
         trace_lines = []
         trace_lines.append("=== RAPPORT D’ÉCHEC POUR RE-PLANIFICATION ===")
 
@@ -1945,9 +2019,88 @@ class Executor:
         trace_lines.append(f"- Nature de l’échec : {failure_type}")
         trace_lines.append(f"- Détail technique : {details}")
 
+        perception = self._format_failure_observation(observation)
+        if perception:
+            trace_lines.append("")
+            trace_lines.append("👁️ CE QUE LA PERCEPTION A RÉELLEMENT VU :")
+            trace_lines.extend(perception)
+
+        control_hint = self._control_char_failure_hint(current_step)
+        if control_hint:
+            trace_lines.append(f"- ⚠️ {control_hint}")
+
         trace_lines.append("")
         trace_lines.append("============================================")
         return "\n".join(trace_lines)
+
+    @staticmethod
+    def _bounded_text(value: Any, limit: int = 400) -> str:
+        try:
+            text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        except Exception:
+            text = str(value)
+        text = " ".join(str(text).split())
+        if len(text) > limit:
+            text = text[: limit - 1] + "…"
+        return text
+
+    def _format_failure_observation(self, observation: Any) -> List[str]:
+        """Rend exploitable ce que la perception a vu, sans noyer le prompt.
+
+        Le payload complet existe déjà (`observed`/`gap`/`suggested_targets`
+        sont retournés par `perceive_understand`), mais l'ancien rapport
+        d'échec ne transmettait que `details` (une phrase courte). Le planner
+        devait alors reconstituer l'état du monde — mission YouTube, où la
+        description « résultats non encore chargés » n'a jamais atteint le
+        prompt de replan.
+        """
+        if observation is None:
+            return []
+        if isinstance(observation, str):
+            text = self._bounded_text(observation)
+            return [f"- Observation : {text}"] if text else []
+        if not isinstance(observation, dict):
+            return []
+        lines: List[str] = []
+        seen: set = set()
+        for key, label in (
+            ("data", "Vu"),
+            ("observed", "Observé"),
+            ("gap", "Écart"),
+            ("suggested_targets", "Candidats suggérés"),
+        ):
+            value = observation.get(key)
+            if value in (None, "", [], {}):
+                continue
+            text = self._bounded_text(value)
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            lines.append(f"- {label} : {text}")
+        return lines
+
+    @staticmethod
+    def _control_char_failure_hint(step: Any) -> str:
+        """Signale un `\\n` encodé dans un texte (tape un caractère, ne valide pas)."""
+        try:
+            args = json.loads(str(getattr(step, "tool_args_json", "") or "{}"))
+        except Exception:
+            return ""
+        if not isinstance(args, dict):
+            return ""
+        if str(args.get("mode") or "").strip().lower() != "text":
+            return ""
+        text = args.get("text")
+        if not isinstance(text, str):
+            return ""
+        found = [name for name, char in (("\\n", "\n"), ("\\r", "\r"), ("\\t", "\t")) if char in text]
+        if not found:
+            return ""
+        return (
+            f"l'argument 'text' contient {', '.join(found)} : ces caractères sont "
+            "tapés littéralement, ils ne valident pas la saisie. Une frappe par "
+            "appel ; utilisez un step `mode=key` (ex. key=enter)."
+        )
 
     def _evaluate_condition(self, condition_raw: str) -> bool:
         import ast

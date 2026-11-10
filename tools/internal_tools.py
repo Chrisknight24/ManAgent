@@ -16,6 +16,7 @@ from core.target_ingress import (
     project_target_payload,
     selection_from_payload,
 )
+from core.target_contract import declared_target_kind
 from core.targets import TargetEntry, TargetSelection
 from core.targeting import (
     ObservedWorld,
@@ -311,7 +312,15 @@ async def _run_llm_analysis(data: Any, query: str, runtime_state, tag: str, medi
             media_assets=media_assets,
             mission_id=explicit_mid
         )
-        msg = getattr(analysis, "message", None) or getattr(analysis, "error_reason", None) or _("Analyse terminée.")
+        msg = getattr(analysis, "message", None) or getattr(analysis, "error_reason", None)
+        # Un échec sans `message` explicite ne doit pas devenir « Analyse
+        # terminée. » (faux succès narratif). L'écart perçu est la meilleure
+        # explication disponible, sinon la raison générique reste honnête.
+        if not analysis.success and not msg:
+            gap = getattr(analysis, "gap", None)
+            if gap:
+                msg = _("Analyse négative : {gap}").format(gap=str(gap)[:300])
+        msg = msg or _("Analyse terminée.")
         # Canal de repli perception : MÊME en échec, ce que l'on voit doit
         # survivre dans `data` (le `message` porte « ce qui EST visible »).
         # Sinon l'info est perdue pour le registre de variables / le RUM et le
@@ -863,10 +872,15 @@ async def _resolve_target_with_llm(
     anchor_kinds: Optional[List[str]] = None,
     tag: str,
     media_assets: Optional[List[Any]] = None,
+    requested_kind: str = "",
 ):
     """Boucle de ciblage visible (candidates + sondes déclarées).
 
     Retourne `(TargetingResult, error_dict|None)`. Aucune cible devinée.
+    `requested_kind` (vocabulaire hôte, vide si non déclaré) autorise la
+    résolution déterministe d'une correspondance exacte unique : quand le plan
+    demande explicitement un type de cible, une correspondance lexicale
+    certaine ne justifie pas un appel LLM. Vide = sélecteur LLM, comme avant.
     """
     registry = _target_registry(runtime_state)
     if registry is None or contract is None:
@@ -899,12 +913,26 @@ async def _resolve_target_with_llm(
         anchor_kinds=list(anchor_kinds or []),
         language=getattr(runtime_state, "language", "fr") or "fr",
         tag=tag,
+        deterministic=bool(requested_kind),
+        # Garde anti-substitution : activée par le runtime. Un hôte de test
+        # sans ce drapeau garde le comportement historique.
+        verify=bool(getattr(runtime_state, "target_verification_enabled", False)),
     )
     if not result.ok:
-        return result, _target_error(
-            result.error_code or "TARGET_NOT_FOUND",
-            result.error_message or _("Selection de cible impossible."),
+        rich = str(getattr(result, "reason", "") or "").strip()
+        code = result.error_code or "TARGET_NOT_FOUND"
+        message = result.error_message or _("Selection de cible impossible.")
+        _store_target_warnings(runtime_state, result, source=tag)
+        _emit_target_resolve_failed(
+            runtime_state,
+            code=code,
+            question=target_description or question,
+            source=tag,
+            observed=rich,
+            reason=rich,
         )
+        return result, _target_error(code, message, observed=rich)
+    _store_target_warnings(runtime_state, result, source=tag)
     return result, None
 
 
@@ -954,14 +982,33 @@ def _emit_alignment_failure(runtime_state, *, tool: str, question: str, source: 
                 solver_id = ctx.get("solver_id")
         except Exception:
             pass
-        observed = out.get("data")
-        if observed is None:
+        # `observed` porte ce que l'analyse a RÉELLEMENT vu (texte). Le
+        # `data` brut peut contenir la grille et l'image base64 : le préférer
+        # noyait le fait utile dans les 500 premiers caractères (mission
+        # bureau, événements alignment_failure illisibles).
+        observed = out.get("observed")
+        if observed in (None, "", [], {}):
             observed = out.get("message") or out.get("error_reason")
+        if observed in (None, "", [], {}):
+            observed = out.get("data")
+        observed_text = str(observed or "")
+        if "image_base64" in observed_text or "'grid'" in observed_text:
+            try:
+                payload = out.get("data")
+                if isinstance(payload, dict):
+                    trimmed = {
+                        key: value
+                        for key, value in payload.items()
+                        if key not in ("image_base64", "grid")
+                    }
+                    observed_text = str(trimmed)
+            except Exception:
+                pass
         fields = {
             "tool": tool,
             "question": str(question or "")[:300],
             "source": str(source or "")[:120],
-            "observed": str(observed or "")[:500],
+            "observed": observed_text[:500],
             "reason": str(out.get("error_reason") or out.get("message") or "")[:300],
         }
         if mission_id:
@@ -973,22 +1020,211 @@ def _emit_alignment_failure(runtime_state, *, tool: str, question: str, source: 
         pass
 
 
-def _target_error(code: str, message: str) -> Dict[str, Any]:
-    return {
+def _target_error(
+    code: str,
+    message: str,
+    *,
+    observed: str = "",
+    reason: str = "",
+) -> Dict[str, Any]:
+    """Erreur de ciblage fermee, enrichie si le selecteur a explique son refus.
+
+    `observed`/`reason` portent la phrase RICHE du selecteur (ce qu'il a vu),
+    sans jamais exposer une liste de candidats. Le rapport d'echec et le
+    planner peuvent ainsi comprendre le monde au lieu d'un message creux.
+    """
+    out: Dict[str, Any] = {
         "result": False,
         "data": None,
         "error_reason": message,
         "message": message,
         "error": {"code": code, "message": message},
     }
+    rich = str(observed or reason or "").strip()
+    if rich:
+        out["observed"] = rich
+        out["reason"] = rich
+    return out
 
 
-def _bind_target_alias(runtime_state, alias: str, entry: TargetEntry) -> Optional[str]:
+async def _enrich_failed_target_error(
+    runtime_state,
+    err: Dict[str, Any],
+    *,
+    raw_data: Any,
+    question: str,
+    media_assets: Optional[List[Any]] = None,
+) -> Dict[str, Any]:
+    """Repli borne : si le selecteur n'a rien explique, demander UNE analyse.
+
+    Ajoute `observed`/`gap`/`suggested_targets` au dict d'erreur pour que le
+    rapport d'echec et le planner voient ce que la perception a vraiment vu.
+    Ne s'execute que si la raison riche est absente et qu'une source existe.
+    """
+    if not isinstance(err, dict):
+        return err
+    if err.get("observed") or err.get("reason"):
+        return err
+    if raw_data is None:
+        return err
+    try:
+        fb = await _run_llm_analysis(
+            raw_data,
+            question,
+            runtime_state,
+            tag="perceive_understand",
+            media_assets=media_assets,
+        )
+    except Exception:
+        return err
+    if not isinstance(fb, dict):
+        return err
+    for key in ("observed", "gap", "suggested_targets"):
+        value = fb.get(key)
+        if value not in (None, "", [], {}):
+            err[key] = value
+    if not err.get("observed"):
+        text = fb.get("error_reason") or fb.get("message")
+        if text:
+            err["observed"] = str(text)
+    return err
+
+
+def _store_target_warnings(runtime_state, result, *, source: str = "") -> None:
+    """Range les doutes de ciblage et trace la verification.
+
+    Deux sorties :
+      - `target_warnings_by_solver` : canal non bloquant lu par le planner
+        (retries) et par la convergence (etape + finale) ;
+      - `target.verification` : evenement d'observabilite (verdict, fiabilite,
+        suite), emis aussi quand le verdict est `match`.
+
+    Tolerant : un `runtime_state` sans ces attributs est initialise. Aucune
+    liste de candidats n'est stockee, seulement des phrases de doute.
+    """
+    if result is None:
+        return
+    try:
+        ctx = getattr(runtime_state, "execution_context", None) or {}
+        solver_id = ctx.get("solver_id") if isinstance(ctx, dict) else None
+        mission_id = ctx.get("mission_id") if isinstance(ctx, dict) else None
+    except Exception:
+        solver_id = None
+        mission_id = None
+    try:
+        warnings = [
+            str(w).strip()
+            for w in (getattr(result, "warnings", None) or [])
+            if str(w).strip()
+        ]
+    except Exception:
+        warnings = []
+    if warnings and solver_id:
+        try:
+            store = getattr(runtime_state, "target_warnings_by_solver", None)
+            if not isinstance(store, dict):
+                store = {}
+                runtime_state.target_warnings_by_solver = store
+            current = list(store.get(solver_id, None) or [])
+            for warning in warnings:
+                if warning not in current:
+                    current.append(warning)
+            store[solver_id] = current[-10:]
+        except Exception:
+            pass
+    trace = getattr(result, "verification", None)
+    if not isinstance(trace, dict):
+        return
+    try:
+        fields: Dict[str, Any] = {
+            "verdict": str(trace.get("verdict") or "")[:24],
+            "confidence": str(trace.get("confidence") or "")[:24],
+            "next": str(trace.get("next") or "")[:24],
+            "reliability": str(trace.get("reliability") or "")[:24],
+            "reason": str(trace.get("reason") or "")[:300],
+            "source": str(source or "")[:120],
+            "warnings": warnings[:5],
+        }
+        _entry = getattr(result, "entry", None)
+        _local_name = str(getattr(_entry, "local_name", "") or "")
+        if _local_name:
+            fields["local_name"] = _local_name
+        if mission_id:
+            fields["mission_id"] = mission_id
+        if solver_id:
+            fields["solver_id"] = solver_id
+        Logger.event("target.verification", **fields)
+    except Exception:
+        pass
+
+
+def _emit_target_resolve_failed(
+    runtime_state,
+    *,
+    code: str,
+    question: str,
+    source: str,
+    observed: str = "",
+    reason: str = "",
+) -> None:
+    """Trace un echec de resolution de cible, avec la raison riche.
+
+    Evenement dedie (`target.resolve_failed`) : l'observabilite et le replan
+    ne dependent plus d'un `alignment_failure` generique.
+    """
+    try:
+        mission_id = None
+        solver_id = None
+        try:
+            ctx = getattr(runtime_state, "execution_context", None)
+            if ctx is not None:
+                mission_id = ctx.get("mission_id")
+                solver_id = ctx.get("solver_id")
+        except Exception:
+            pass
+        fields: Dict[str, Any] = {
+            "code": str(code or "")[:80],
+            "question": str(question or "")[:300],
+            "source": str(source or "")[:120],
+            "observed": str(observed or "")[:500],
+            "reason": str(reason or "")[:500],
+        }
+        if mission_id:
+            fields["mission_id"] = mission_id
+        if solver_id:
+            fields["solver_id"] = solver_id
+        Logger.event("target.resolve_failed", **fields)
+    except Exception:
+        pass
+
+
+def _bind_target_alias(
+    runtime_state,
+    alias: str,
+    entry: TargetEntry,
+    target_kind: Optional[str] = None,
+) -> Optional[str]:
     """Lie un nom de variable de plan au nom local de la cible (jamais la ref)."""
     variables = getattr(runtime_state, "_solver_registry_for_tools", None)
     if not isinstance(variables, dict):
         return "registre de variables indisponible pour lier la cible"
-    return bind_target_alias(_target_registry(runtime_state), variables, alias, entry)
+    attempt_no = None
+    try:
+        ctx = getattr(runtime_state, "execution_context", None)
+        if ctx is not None:
+            candidate = ctx.get("attempt_number")
+            if isinstance(candidate, int) and not isinstance(candidate, bool):
+                attempt_no = candidate
+    except Exception:
+        attempt_no = None
+    return bind_target_alias(
+        _target_registry(runtime_state),
+        variables,
+        alias,
+        entry,
+        target_kind=target_kind,
+        attempt_no=attempt_no,
+    )
 
 
 async def _choose_target_with_llm(
@@ -1046,6 +1282,53 @@ async def _choose_target_with_llm(
     return by_key[key], None
 
 
+async def _widen_crop_analysis(
+    *,
+    query: str,
+    runtime_state,
+    cropped_out: Dict[str, Any],
+    full_observation: Any,
+    full_media_assets: Optional[List[Any]],
+) -> Dict[str, Any]:
+    """P0-3 : relance UNE fois l'analyse sur la frame complète.
+
+    Le sélecteur peut ne produire qu'un crop ; si l'analyse de ce crop échoue,
+    la cause peut être « il ne voit pas assez » et non « la cible n'existe
+    pas ». On rejoue l'analyse sur la première observation (frame complète)
+    sans nouvel appel hôte. Une seule relance : borne stricte à +1 appel LLM.
+
+    Si l'élargissement réussit, son résultat remplace le crop. Sinon, les deux
+    observations remontent (`widened_attempt`) pour que le replan décide sur
+    pièces. Fonction pure vis-à-vis de l'hôte (aucun nom d'outil).
+    """
+    try:
+        if full_media_assets:
+            widened = await _run_llm_analysis(
+                full_observation, query, runtime_state,
+                tag="perceive_understand", media_assets=full_media_assets,
+            )
+        else:
+            widened = await _run_llm_analysis(
+                full_observation, query, runtime_state,
+                tag="perceive_understand",
+            )
+    except Exception as exc:
+        widened = {"result": False, "data": None, "error_reason": str(exc)}
+    if isinstance(widened, dict) and widened.get("result"):
+        widened["widened"] = True
+        widened["widened_from"] = "crop"
+        return widened
+    crop_out = dict(cropped_out) if isinstance(cropped_out, dict) else {}
+    if isinstance(widened, dict):
+        crop_out["widened_attempt"] = {
+            "data": widened.get("data"),
+            "error_reason": (
+                widened.get("error_reason") or widened.get("message") or ""
+            ),
+        }
+    return crop_out
+
+
 async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, Any]:
     """
     Méta-outil de lecture : perçoit le monde via un outil EXTERNE (hôte),
@@ -1101,6 +1384,14 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
     _registry = _target_registry(runtime_state)
     _producer_payload = None
     _producer_contract = None
+    _producer_args: Dict[str, Any] = {}
+    # P0-3 : une analyse peut échouer parce qu'elle ne voit qu'un crop choisi
+    # par le sélecteur. On garde la première observation (frame complète)
+    # avant tout écrasement par `TargetWorld.raw`, pour pouvoir élargir UNE
+    # fois l'analyse si le crop ne suffit pas.
+    _full_observation = None
+    _full_media_assets = None
+    _observation_cropped = False
     # Composite phase 2b : la source lit des candidates fraîches, le
     # producteur en consomme une dans la MÊME étape (aucune référence périmée).
     _composite = bool(source_tool and target_producer)
@@ -1272,6 +1563,13 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
                     media_assets=media_assets,
                 )
                 if _cand_err:
+                    _cand_err = await _enrich_failed_target_error(
+                        runtime_state,
+                        _cand_err,
+                        raw_data=raw_data,
+                        question=question,
+                        media_assets=media_assets,
+                    )
                     _emit_alignment_failure(
                         runtime_state,
                         tool="perceive_understand",
@@ -1280,19 +1578,29 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
                         out={
                             "data": str(parsed)[:500],
                             "message": str(_cand_err.get("message") or ""),
+                            "observed": (
+                                _cand_err.get("observed")
+                                or _cand_err.get("reason")
+                                or ""
+                            ),
                         },
                     )
                     return _cand_err
                 _target_world = getattr(_target_result, "world", None)
                 if _target_world is not None:
+                    if _full_observation is None and not _observation_cropped:
+                        _full_observation = raw_data
+                        _full_media_assets = media_assets
                     if _target_world.media_assets():
                         media_assets = _target_world.media_assets()
                     if _target_world.raw is not None:
                         raw_data = _target_world.raw
+                        _observation_cropped = True
                 if _target_result.kind == "local":
                     _candidate = _target_result.entry
                     _note_target_selected(
-                        runtime_state, _candidate, strategy="llm",
+                        runtime_state, _candidate,
+                        strategy=getattr(_target_result, "strategy", "") or "llm",
                         source="perceive_understand",
                     )
                 elif _target_result.kind == "anchor":
@@ -1418,11 +1726,15 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
         if _composite:
             # L'observation à comprendre est la cible FRAÎCHE produite, pas
             # la liste de candidates qui a servi à l'ancrer.
+            if _full_observation is None and not _observation_cropped:
+                _full_observation = raw_data
+                _full_media_assets = media_assets
             raw_data = (
                 _producer_payload.get("data", _producer_payload)
                 if isinstance(_producer_payload, dict)
                 else _producer_payload
             )
+            _observation_cropped = True
 
     if raw_data is None and _producer_payload is not None:
         # Producteur seul : son diagnostic EST l'observation à comprendre.
@@ -1487,8 +1799,18 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
                 anchor_kinds=_selection_anchor_kinds,
                 tag="perceive_understand",
                 media_assets=media_assets,
+                requested_kind=declared_target_kind(
+                    _producer_contract, _producer_args
+                ),
             )
             if _sel_err:
+                _sel_err = await _enrich_failed_target_error(
+                    runtime_state,
+                    _sel_err,
+                    raw_data=raw_data,
+                    question=question,
+                    media_assets=media_assets,
+                )
                 _emit_alignment_failure(
                     runtime_state,
                     tool="perceive_understand",
@@ -1497,19 +1819,30 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
                     out={
                         "data": str(_selection_payload)[:500],
                         "message": str(_sel_err.get("message") or ""),
+                        "observed": (
+                            _sel_err.get("observed")
+                            or _sel_err.get("reason")
+                            or ""
+                        ),
                     },
                 )
                 return _sel_err
             _target_world = getattr(_target_result, "world", None)
             if _target_world is not None:
+                if _full_observation is None and not _observation_cropped:
+                    _full_observation = raw_data
+                    _full_media_assets = media_assets
                 if _target_world.media_assets():
                     media_assets = _target_world.media_assets()
                 if _target_world.raw is not None:
                     raw_data = _target_world.raw
+                    _observation_cropped = True
             if _target_result.kind == "local":
                 _selected_target = _target_result.entry
                 _note_target_selected(
-                    runtime_state, _selected_target, strategy="llm", source="perceive_understand"
+                    runtime_state, _selected_target,
+                    strategy=getattr(_target_result, "strategy", "") or "llm",
+                    source="perceive_understand"
                 )
             elif _target_result.kind == "anchor":
                 _selected_anchor = (
@@ -1542,7 +1875,12 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
             return _target_error("TARGET_NOT_FOUND", _msg)
         if _selected_target is not None and _output_alias:
             _bind_err = _bind_target_alias(
-                runtime_state, _output_alias, _selected_target
+                runtime_state,
+                _output_alias,
+                _selected_target,
+                target_kind=declared_target_kind(
+                    _producer_contract or _selection_contract, _producer_args
+                ),
             )
             if _bind_err:
                 return _target_error("TARGET_SCHEMA_INVALID", _bind_err)
@@ -1585,6 +1923,20 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
         _out = await _run_llm_analysis(raw_data, query, runtime_state, tag="perceive_understand", media_assets=media_assets)
     else:
         _out = await _run_llm_analysis(raw_data, query, runtime_state, tag="perceive_understand")
+
+    if (
+        not _out.get("result")
+        and not args.get("_anchor_only")
+        and _observation_cropped
+        and _full_observation is not None
+    ):
+        _out = await _widen_crop_analysis(
+            query=query,
+            runtime_state=runtime_state,
+            cropped_out=_out,
+            full_observation=_full_observation,
+            full_media_assets=_full_media_assets,
+        )
     if not _out.get("result"):
         # `false` = echec d'alignement (le monde n'est pas en panne).
         _emit_alignment_failure(

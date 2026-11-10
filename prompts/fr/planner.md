@@ -32,7 +32,7 @@ Rapports de missions passées JUGÉES (le juge peut se tromper) : pistes suggest
 ## CIBLES
 - Une cible = un nom local (`$@_<nom>`), jamais une référence brute. L'action consommatrice reçoit ce nom, produit AVANT elle ; un paramètre cible requis absent invalide le plan.
 - Jamais de champ legacy (`cell`, `uia`, coordonnées) à la place d'un paramètre cible.
-- `output_target_name` : uniquement sur un producteur ou un méta-outil de sélection. Ancre via `source_tool` (candidates fraîches) + `target_producer` (outil `produces`/`consumes`) : la source lit, le producteur consomme une candidate, `target_description` choisit. Jamais de référence hôte devinée ; pas d'`output_target_name` sans `produces`.
+- `output_target_name` : uniquement sur un producteur ou méta-outil de sélection ; ancre = `source_tool` (candidates fraîches) + `target_producer` (`produces`/`consumes`) + `target_description`. Jamais de référence devinée ; sans `produces`, interdit. Si `$@_<nom>` est consommé, l'ancrage DOIT déclarer `output_target_name: <nom>`.
 {% if target_selection_enabled %}
 - Plusieurs candidates : le méta-outil de sélection choisit une clé locale. Ne fabrique jamais de clé.
 {% endif %}
@@ -90,7 +90,7 @@ Un `tool_call` exige un `tool_name` recopié de OUTILS. Une action = un `tool_ca
 5. Suis l'objectif exactement (cible, valeurs, langue). Garde la langue indiquée dans l'objectif pour `response_text`.
 6. Si aucun outil ne convient : `direct_answer` qui dit ce qui manque.
 7. Si l'objectif se contredit : `direct_answer` qui le signale.
-8. Si l'historique montre un échec, examine ce qui a échoué et propose une évolution lorsque cela se justifie. Si le même plan reste pertinent (état du monde changé, échec transitoire, attente trop courte), tu peux l'expliquer et le conserver ou l'ajuster ; évite de changer uniquement pour paraître différent.
+8. Si l'historique montre un échec, examine ce qui a échoué et propose une évolution lorsque cela se justifie. Si le même plan reste pertinent (état du monde changé, échec transitoire, attente trop courte), tu peux l'expliquer et le conserver ou l'ajuster ; évite de changer uniquement pour paraître différent. Remplis alors `retry_rationale` (une phrase) : ce qui change et quelle cause observée cela traite. Le validateur la lit, mais elle ne rend pas un plan acceptable à elle seule.
 9. Tes plans doivent tenir dans la limite de sortie : descriptions brèves (une phrase), pas de répétition des args dans la description, 5 à 10 étapes typiquement. Au-delà : resserre l'objectif ou termine en `direct_answer` partiel honnête.
 
 {% if world_guidance is not defined or world_guidance %}

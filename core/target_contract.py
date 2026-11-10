@@ -28,6 +28,15 @@ FIELD_ROLES = frozenset(
 #   code en dur ici.
 LOCAL_SUBJECT_KIND = "local"
 
+# Fiabilite declaree par l'hote pour une cible (ou un type de cible).
+# Vocabulaire neutre : le cerveau ne connait aucune semantique de monde.
+RELIABILITY_VALUES = ("high", "medium", "low")
+DEFAULT_RELIABILITY = "medium"
+# Types de preuve qu'un hote sait joindre a une candidate. Absent =
+# metadonnees seules (comportement historique).
+EVIDENCE_VALUES = ("metadata", "image", "rect", "nested_targets", "invariants")
+DEFAULT_EVIDENCE = ("metadata",)
+
 _SCOPE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
 _PATH_RE = re.compile(r"^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$")
 
@@ -41,6 +50,11 @@ class ConsumerSpec:
     # Type JSON declare par le manifeste pour ce parametre (ex: "string").
     # `None` = non declare : la reference brute est transmise telle quelle.
     wire_type: Optional[str] = None
+    # Types de cible acceptes par ce consommateur, dans le vocabulaire de
+    # l'hote (ex: ["ui"]). Vide = non declare : aucune verification possible.
+    # Sert a refuser un plan avant execution quand le producteur ne peut pas
+    # prouver un type compatible (mismatch `img` vs clavier, mission YouTube).
+    accepts: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -53,6 +67,11 @@ class ProducerSpec:
     # Declaration explicite : `fields.attributes: {nom: chemin}`.
     attributes: Dict[str, str] = field(default_factory=dict)
     usable_as: Tuple[str, ...] = ()
+    # Nom du parametre du producteur qui choisit le type de cible produite
+    # (ex: "kind"). `None` = "kind" par convention si present dans l'appel.
+    kind_param: Optional[str] = None
+    # Surcharge de fiabilite pour les cibles de ce producteur (sinon global).
+    reliability: Optional[str] = None
 
     @property
     def has_static_scope(self) -> bool:
@@ -84,6 +103,8 @@ class AnchorSpec:
     kind: str
     param: str
     description: str = ""
+    # Surcharge de fiabilite pour ce type d'ancre (sinon disclosure global).
+    reliability: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +142,12 @@ class DisclosureSpec:
     views: Tuple[ViewSpec, ...] = ()
     anchors: Tuple[AnchorSpec, ...] = ()
     probes: Tuple[ProbeSpec, ...] = ()
+    # Profil de fiabilite global (`high`/`medium`/`low`). Absent = `medium`.
+    reliability: str = DEFAULT_RELIABILITY
+    # Types de preuve declares. Absent = metadonnees seules.
+    evidence: Tuple[str, ...] = DEFAULT_EVIDENCE
+    # Id de la probe qui inspecte/zoome une candidate locale. Optionnel.
+    zoom_probe: Optional[str] = None
 
     def probe(self, probe_id: str) -> Optional[ProbeSpec]:
         for probe in self.probes:
@@ -195,6 +222,23 @@ def declared_consumer_params(tools_mgr: Any, tool_name: str) -> set:
 
 def producer_specs(contract: TargetContract) -> Tuple[ProducerSpec, ...]:
     return contract.producer_specs()
+
+
+def declared_target_kind(contract: Optional[TargetContract], args: Any) -> str:
+    """Type de cible explicitement declare dans les args d'un producteur.
+
+    Le nom du parametre vient du manifeste (`produces[].kind_param`,
+    convention `kind`). Retourne "" quand aucun type n'est declare : le
+    runtime n'invente jamais un type. Fonction pure, sans nom d'outil.
+    """
+    if contract is None or not isinstance(args, dict):
+        return ""
+    for producer in getattr(contract, "producers", ()) or ():
+        param = getattr(producer, "kind_param", None) or "kind"
+        value = args.get(param)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 _REFERENCE_TOKEN_RE = re.compile(r"(\$@_|@\$_)[A-Za-z0-9_-]+")
@@ -420,6 +464,48 @@ def parse_target_contract(
     return TargetContractResult(contract=contract, warnings=warnings)
 
 
+def _parse_reliability(raw: Any, *, field_name: str, error, warning) -> Optional[str]:
+    """Lit un profil de fiabilite declare par l'hote.
+
+    Retourne `None` si absent (l'appelant garde le defaut), sinon une valeur
+    de `RELIABILITY_VALUES`. Une valeur inconnue est un diagnostic, pas une
+    exception : on retombe sur le defaut.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or raw.strip().lower() not in RELIABILITY_VALUES:
+        warning(
+            f"{field_name} must be one of {list(RELIABILITY_VALUES)}: {raw!r}"
+        )
+        return None
+    return raw.strip().lower()
+
+
+def _parse_evidence(raw: Any, *, field_name: str, error, warning) -> Optional[Tuple[str, ...]]:
+    """Lit la liste des types de preuve declares par l'hote.
+
+    Absent = `DEFAULT_EVIDENCE`. Les valeurs inconnues sont ignorees avec un
+    warning ; une liste vide retombe sur le defaut.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        warning(f"{field_name} must be a list: {raw!r}")
+        return None
+    cleaned: List[str] = []
+    for value in raw:
+        if not isinstance(value, str) or not value.strip():
+            warning(f"{field_name} has an invalid value: {value!r}")
+            continue
+        normalized = value.strip().lower()
+        if normalized not in EVIDENCE_VALUES:
+            warning(f"{field_name} has an unknown value: {value!r}")
+            continue
+        if normalized not in cleaned:
+            cleaned.append(normalized)
+    return tuple(cleaned) if cleaned else None
+
+
 def _parse_disclosure(raw: Any, *, error, warning) -> Optional[DisclosureSpec]:
     """Parse le bloc optionnel `disclosure` (version 1).
 
@@ -435,7 +521,10 @@ def _parse_disclosure(raw: Any, *, error, warning) -> Optional[DisclosureSpec]:
         error("disclosure must be an object")
         return None
 
-    unknown = set(raw) - {"version", "views", "anchors", "probes"}
+    unknown = set(raw) - {
+        "version", "views", "anchors", "probes",
+        "reliability", "evidence", "zoom_probe",
+    }
     for key in sorted(unknown):
         warning(f"disclosure has unknown key: {key}")
 
@@ -471,11 +560,36 @@ def _parse_disclosure(raw: Any, *, error, warning) -> Optional[DisclosureSpec]:
     if not probes:
         warning("disclosure declares no probe; inspections stay unavailable")
 
+    reliability = _parse_reliability(
+        raw.get("reliability"), field_name="disclosure.reliability",
+        error=error, warning=warning,
+    )
+    evidence = _parse_evidence(
+        raw.get("evidence"), field_name="disclosure.evidence",
+        error=error, warning=warning,
+    )
+    zoom_probe = raw.get("zoom_probe")
+    if zoom_probe is not None:
+        if not isinstance(zoom_probe, str) or not zoom_probe.strip():
+            warning(f"disclosure.zoom_probe is invalid: {zoom_probe!r}")
+            zoom_probe = None
+        else:
+            zoom_probe = zoom_probe.strip()
+            if not any(probe.id == zoom_probe for probe in probes):
+                warning(
+                    f"disclosure.zoom_probe references an unknown probe: "
+                    f"{zoom_probe!r}"
+                )
+                zoom_probe = None
+
     return DisclosureSpec(
         version=1,
         views=tuple(views),
         anchors=tuple(anchors),
         probes=tuple(probes),
+        reliability=reliability or DEFAULT_RELIABILITY,
+        evidence=tuple(evidence) if evidence else DEFAULT_EVIDENCE,
+        zoom_probe=zoom_probe,
     )
 
 
@@ -561,11 +675,18 @@ def _parse_anchors(raw: Any, *, error, warning) -> Optional[List[AnchorSpec]]:
         if not isinstance(description, str):
             error(f"disclosure.anchors[{index}].description must be a string")
             return None
+        reliability = _parse_reliability(
+            item.get("reliability"),
+            field_name=f"disclosure.anchors[{index}].reliability",
+            error=error,
+            warning=warning,
+        )
         anchors.append(
             AnchorSpec(
                 kind=kind,
                 param=param.strip(),
                 description=description,
+                reliability=reliability,
             )
         )
     return anchors
@@ -755,12 +876,29 @@ def _parse_consumer(
                     if isinstance(declared_type, str) and declared_type.strip():
                         wire_type = declared_type.strip()
 
+    accepts_raw = item.get("accepts")
+    accepts: Tuple[str, ...] = ()
+    if accepts_raw is not None:
+        if not isinstance(accepts_raw, list):
+            error(f"consumes[{index}].accepts must be a list")
+        else:
+            cleaned_accepts: List[str] = []
+            for value in accepts_raw:
+                if not isinstance(value, str) or not value.strip():
+                    error(f"consumes[{index}].accepts has an invalid value: {value!r}")
+                    continue
+                normalized = value.strip()
+                if normalized not in cleaned_accepts:
+                    cleaned_accepts.append(normalized)
+            accepts = tuple(cleaned_accepts)
+
     return ConsumerSpec(
         param=param,
         scope=scope,
         required=required,
         raw_allow=raw_allow,
         wire_type=wire_type,
+        accepts=accepts,
     )
 
 
@@ -870,6 +1008,22 @@ def _parse_producer(
                 f"'{scope}'"
             )
 
+    kind_param_raw = item.get("kind_param")
+    kind_param: Optional[str] = None
+    if kind_param_raw is not None:
+        if not isinstance(kind_param_raw, str) or not _PATH_RE.fullmatch(
+            kind_param_raw.strip()
+        ):
+            error(f"produces[{index}].kind_param is invalid: {kind_param_raw!r}")
+        else:
+            kind_param = kind_param_raw.strip()
+
+    reliability = _parse_reliability(
+        item.get("reliability"),
+        field_name=f"produces[{index}].reliability",
+        error=error,
+        warning=warning,
+    )
     return ProducerSpec(
         path=path,
         mode=mode,
@@ -877,4 +1031,6 @@ def _parse_producer(
         fields=cleaned_fields,
         attributes=cleaned_attributes,
         usable_as=usable,
+        kind_param=kind_param,
+        reliability=reliability,
     )

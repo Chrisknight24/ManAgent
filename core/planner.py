@@ -168,6 +168,111 @@ class PlannerRegistryProvider:
         }
 
 
+# Producteurs internes qui peuvent ancrer une cible. Noms des méta-outils du
+# cerveau (pas d'un hôte) : la réparation reste agnostique.
+_TARGET_ANCHOR_TOOLS = ("perceive_understand", "perceive_action")
+_TARGET_ANCHOR_ARGS = ("target_producer", "target_description")
+
+
+def _step_target_refs(step: Any) -> List[str]:
+    """Références `$@_...` utilisées comme argument `target` d'une étape."""
+    try:
+        from core.plan_models import parse_tool_args_json
+        args = parse_tool_args_json(getattr(step, "tool_args_json", "") or "{}")
+    except Exception:
+        return []
+    if not isinstance(args, dict):
+        return []
+    refs: List[str] = []
+
+    def _scan(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, sub in value.items():
+                if str(key).lower() == "target" and isinstance(sub, str):
+                    match = re.fullmatch(r"\s*(?:\$@_|@\$_)([A-Za-z0-9_-]+)\s*", sub)
+                    if match and match.group(1) not in refs:
+                        refs.append(match.group(1))
+                else:
+                    _scan(sub)
+        elif isinstance(value, list):
+            for sub in value:
+                _scan(sub)
+
+    _scan(args)
+    return refs
+
+
+def repair_missing_target_declarations(plan: Plan) -> List[str]:
+    """Réparer l'omission mécanique `output_target_name` sur un ancrage.
+
+    Cas réel (mission bureau, tentative 3) : `step_8` ancre une cible via
+    `target_producer`/`target_description`, `step_9` la consomme via
+    `$@_option_vider`, mais `step_8` n'a pas `output_target_name` -> plan
+    rejeté, tentative brûlée, alors que l'intention est non ambiguë.
+
+    Réparation CONSERVATRICE : uniquement si l'alias inconnu est unique ET
+    qu'un SEUL ancrage précédent n'a pas encore de nom de sortie. Sinon, on
+    ne devine rien et la validation signale l'erreur. Toute réparation est
+    rendue visible en avertissement (jamais silencieuse). Fonction pure
+    vis-à-vis de l'hôte.
+    """
+    steps = list(getattr(plan, "steps", []) or [])
+    if not steps:
+        return []
+
+    anchors: List[tuple] = []
+    for position, step in enumerate(steps):
+        stype = getattr(getattr(step, "type", None), "value", getattr(step, "type", None))
+        if stype != "tool_call":
+            continue
+        if str(getattr(step, "tool_name", "") or "") not in _TARGET_ANCHOR_TOOLS:
+            continue
+        try:
+            from core.plan_models import parse_tool_args_json
+            args = parse_tool_args_json(getattr(step, "tool_args_json", "") or "{}")
+        except Exception:
+            args = {}
+        if not isinstance(args, dict):
+            continue
+        if not any(args.get(name) for name in _TARGET_ANCHOR_ARGS):
+            continue
+        if str(getattr(step, "output_target_name", "") or "").strip():
+            continue
+        anchors.append((position, step))
+
+    warnings: List[str] = []
+    declared = {
+        str(getattr(step, "output_target_name", "") or "").strip()
+        for step in steps
+    }
+    declared.discard("")
+
+    for position, step in enumerate(steps):
+        unknown = [ref for ref in _step_target_refs(step) if ref not in declared]
+        if len(unknown) != 1:
+            continue
+        candidates = [
+            (pos, anchor)
+            for pos, anchor in anchors
+            if pos < position
+            and not str(getattr(anchor, "output_target_name", "") or "").strip()
+        ]
+        if len(candidates) != 1:
+            continue
+        producer = candidates[0][1]
+        producer.output_target_name = unknown[0]
+        declared.add(unknown[0])
+        anchors = [
+            (pos, anchor) for pos, anchor in anchors if anchor is not producer
+        ]
+        warnings.append(
+            _("Réparation automatique : l'étape '{}' déclare la cible '{}' "
+              "consommée par '{}' (le plan omettait ce nom de sortie).")
+            .format(getattr(producer, "id", "?"), unknown[0], getattr(step, "id", "?"))
+        )
+    return warnings
+
+
 class Planner(Entity):
     """
     Planner – construit des plans d'action.
@@ -436,7 +541,9 @@ class Planner(Entity):
 
         Logger.info(f"[Planner] ✅ Plan structuré reçu avec {len(proposed_plan.steps)} étapes.")
 
+        repair_warnings = repair_missing_target_declarations(proposed_plan)
         is_valid, warnings = self._validate_plan(proposed_plan, variable_registry)
+        warnings = list(repair_warnings) + list(warnings)
         if not is_valid:
             raise ValueError(_("Plan invalide :\n") + "\n".join(warnings))
         elif warnings:
@@ -456,6 +563,11 @@ class Planner(Entity):
         errors = []
         warnings = []
         all_steps_by_id = {step.id: step for step in plan.steps}
+        # Les noms déclarés PAR LE PLAN COURANT peuvent légitimement réutiliser
+        # un alias hérité du registre (tentative précédente). Sinon une cible
+        # re-déclarée (`zone_bureau`, `desktop_empty_area`, ...) était traitée
+        # comme une collision dure -> plan rejeté, tentative brûlée.
+        declared_targets_in_plan: set = set()
         try:
             from core.plan_validator import find_duplicate_step_ids
             _dup_ids = find_duplicate_step_ids(plan)
@@ -645,11 +757,12 @@ class Planner(Entity):
             target_name = getattr(step, "output_target_name", None)
             if target_name and str(target_name).strip():
                 target_name = str(target_name).strip()
-                if target_name in known_vars:
+                if target_name in declared_targets_in_plan:
                     errors.append(
                         _("L'étape '{}' déclare une cible '{}' qui entre en collision "
-                          "avec un nom déjà connu.").format(step.id, target_name)
+                          "avec un nom déjà déclaré dans CE plan.").format(step.id, target_name)
                     )
+                declared_targets_in_plan.add(target_name)
                 known_vars.add(target_name)
 
             # 4. Vérifications d'intégrité tool_args_json

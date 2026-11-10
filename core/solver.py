@@ -403,6 +403,9 @@ class Solver(Supervisor, Entity):
     def _get_registry_metadata_view(self) -> Dict[str, Any]:
         view = {}
         target_registry = getattr(self.runtime_state, "target_registry", None)
+        current_attempt_no = getattr(
+            getattr(self, "current_attempt", None), "attempt_number", None
+        )
         for key, info in self.variable_registry.items():
             value = info.get("value")
             var_type = info.get("type", self._get_type_string(value))
@@ -417,6 +420,13 @@ class Solver(Supervisor, Entity):
                 hint = _("(DataAsset: {})").format(uri_str)
             elif var_type == "data":
                 hint = _("(donnée masquée – utilisez Progressive Disclosure pour inspecter)")
+            elif var_type == "target":
+                scope = str(info.get("scope") or "?")
+                kind = str(info.get("target_kind") or "").strip()
+                if kind and kind != scope:
+                    hint = _("(cible {scope} · {kind})").format(scope=scope, kind=kind)
+                else:
+                    hint = _("(cible {scope})").format(scope=scope)
             else:
                 # Fallback
                 hint = _("(donnée cachée, accessible via Progressive Disclosure)")
@@ -435,13 +445,37 @@ class Solver(Supervisor, Entity):
                 else:
                     hint = _("(type: {type})").format(type=type(value).__name__)
 
-            view[key] = {
+            entry_meta: Dict[str, Any] = {
                 "description": info.get("description", _("Pas de description")),
                 "source": info.get("source", _("Inconnu")),
                 "timestamp": info.get("timestamp", "N/A"),
                 "type": var_type,
                 "value_hint": hint,
             }
+            if var_type == "target":
+                # P1-6 : exposer le type reel et l'origine (tentative) pour que
+                # le planner ne raisonne pas sur un alias perime comme s'il
+                # etait declarable dans le plan courant.
+                entry_meta["target_kind"] = str(
+                    info.get("target_kind") or info.get("scope") or ""
+                )
+                entry_no = info.get("attempt_no")
+                declarable = True
+                stale_reason = ""
+                if (
+                    isinstance(entry_no, int)
+                    and not isinstance(entry_no, bool)
+                    and isinstance(current_attempt_no, int)
+                    and entry_no < current_attempt_no
+                ):
+                    declarable = False
+                    stale_reason = _(
+                        "tentative {attempt} — non déclarable dans ce plan"
+                    ).format(attempt=entry_no)
+                entry_meta["declarable"] = declarable
+                if stale_reason:
+                    entry_meta["stale_reason"] = stale_reason
+            view[key] = entry_meta
         return view
 
     def _get_type_string(self, value) -> str:
@@ -798,6 +832,28 @@ class Solver(Supervisor, Entity):
                                             )
                                 except Exception:
                                     _past_failures = []
+                                # Doutes de ciblage (verdict `uncertain`,
+                                # fail-open) : le planner doit les voir pour ne
+                                # pas rejouer la meme cible a l'aveugle.
+                                try:
+                                    _tgt_store = getattr(
+                                        self.runtime_state,
+                                        "target_warnings_by_solver",
+                                        None,
+                                    )
+                                    _tgt_warns = (
+                                        list(_tgt_store.get(self.id, None) or [])
+                                        if isinstance(_tgt_store, dict)
+                                        else []
+                                    )
+                                    for _w in _tgt_warns[-3:]:
+                                        _txt = f"- (cible) {str(_w).strip()}"
+                                        if _txt in _seen_reasons:
+                                            continue
+                                        _seen_reasons.add(_txt)
+                                        _past_failures.append(_txt)
+                                except Exception:
+                                    pass
                                 proposed_plan = await self.planner.propose_plan(
                                     goal=self.goal,
                                     context=self.context,
@@ -900,7 +956,7 @@ class Solver(Supervisor, Entity):
                         else:
                             validation_outcome = await self.validate_plan(
                                 proposed_plan, self.id, previous_attempts=previous_attempts,
-                                plan_id=plan_id
+                                plan_id=plan_id, strategy=decision.refined_strategy,
                             )
                             is_valid = bool(validation_outcome)
                             rejection_reason = getattr(
@@ -1533,25 +1589,43 @@ class Solver(Supervisor, Entity):
         previous_attempts: Optional[List] = None,
         mission_history_tree: Optional[Any] = None,
         plan_id: Optional[str] = None,
+        strategy: Optional[str] = None,
     ):
         root_solver = self._get_root_solver()
         mission_history_tree = mission_history_tree or (root_solver.execution_tree if root_solver else self.execution_tree)
+        kwargs = {
+            "previous_attempts": previous_attempts,
+            "mission_history_tree": mission_history_tree,
+            "plan_id": plan_id,
+        }
+        # Rétro-compatibilité : n'envoyer `strategy` que s'il est fourni, pour
+        # ne pas casser un parent qui implémente encore l'ancienne signature.
+        if strategy is not None:
+            kwargs["strategy"] = strategy
         try:
             return await self.parent.validate_plan(
                 plan,
                 child_solver_id,
-                previous_attempts=previous_attempts,
-                mission_history_tree=mission_history_tree,
-                plan_id=plan_id,
+                **kwargs,
             )
         except TypeError as e:
-            if "mission_history_tree" not in str(e):
+            message = str(e)
+            if "strategy" in message and "strategy" in kwargs:
+                Logger.warning(
+                    f"[Solver:{self.id}] validate_plan : parent sans 'strategy', repli ({e})."
+                )
+                kwargs.pop("strategy", None)
+                return await self.parent.validate_plan(
+                    plan, child_solver_id, **kwargs
+                )
+            if "mission_history_tree" not in message:
                 raise
             Logger.warning(
                 f"[Solver:{self.id}] validate_plan : repli sur l'appel sans mission_history_tree ({e})."
             )
+            kwargs.pop("mission_history_tree", None)
             return await self.parent.validate_plan(
-                plan, child_solver_id, previous_attempts=previous_attempts, plan_id=plan_id
+                plan, child_solver_id, **kwargs
             )
 
     def _last_failed_step_id(self) -> Optional[str]:
@@ -1608,11 +1682,13 @@ class Solver(Supervisor, Entity):
             return _("(registre vide)")
         lines = []
         for key, meta in registry_view.items():
-            marker = (
-                " (target)"
-                if targets_enabled and meta.get("type") == "target"
-                else ""
-            )
+            marker = ""
+            if targets_enabled and meta.get("type") == "target":
+                kind = str(meta.get("target_kind") or "").strip()
+                marker = f" (target {kind})" if kind else " (target)"
+            stale = str(meta.get("stale_reason") or "").strip()
+            if stale:
+                marker += f" [⚠️ {stale}]"
             lines.append(f"- **`$@_{key}`**{marker} : {meta.get('description', '')}")
             lines.append(f"  - Type : {meta.get('type', 'unknown')} | Source : {meta.get('source', 'N/A')}")
             lines.append(f"  - Hint : {meta.get('value_hint', '')}")
@@ -1671,12 +1747,35 @@ class Solver(Supervisor, Entity):
         """
         try:
             failure_class = getattr(attempt, "failure_class", None)
+            failure_value = getattr(failure_class, "value", failure_class)
+            # P1-8 : distinguer « plan proposé » (attempt_number) de « plan
+            # réellement exécuté » (execution_attempt). Un rejet avant action
+            # ne consomme pas le budget : l'événement doit le dire, pas le
+            # laisser deviner. Mission YouTube : 4 tentatives pour 3 exécutions.
+            execution_no = None
+            try:
+                execution_no = (
+                    getattr(self.runtime_state, "execution_markers", {}) or {}
+                ).get("execution_attempt")
+            except Exception:
+                execution_no = None
+            non_budget = {
+                FailureClass.PLAN_REJECTED_VALIDATION.value,
+                FailureClass.PLAN_REJECTED_SUPERVISOR.value,
+                FailureClass.USER_CANCELLED.value,
+            }
+            if str(name).endswith("started"):
+                counts_toward_budget: Optional[bool] = None
+            else:
+                counts_toward_budget = str(failure_value or "") not in non_budget
             fields = {
                 "solver_id": self.id,
                 "attempt_number": getattr(attempt, "attempt_number", None),
+                "execution_attempt": execution_no,
+                "counts_toward_budget": counts_toward_budget,
                 "plan_id": getattr(attempt, "plan_id", None),
                 "outcome": getattr(attempt, "outcome", None),
-                "failure_class": getattr(failure_class, "value", failure_class),
+                "failure_class": failure_value,
             }
             if reason:
                 fields["reason"] = str(reason)
@@ -1853,9 +1952,17 @@ class Solver(Supervisor, Entity):
             try:
                 _warns = []
                 try:
-                    _store = getattr(self.runtime_state, "perception_warnings_by_solver", None)
-                    if isinstance(_store, dict):
-                        _warns = list(_store.get(self.id, None) or [])
+                    _runtime = self.runtime_state
+                    for _attr in (
+                        "perception_warnings_by_solver",
+                        "target_warnings_by_solver",
+                    ):
+                        _store = getattr(_runtime, _attr, None)
+                        if isinstance(_store, dict):
+                            for _w in (_store.get(self.id, None) or []):
+                                _text = str(_w).strip()
+                                if _text and _text not in _warns:
+                                    _warns.append(_text)
                 except Exception:
                     _warns = []
                 # A1 : warnings = variable dédiée, HORS du cap `evidence` (jamais tronqués).

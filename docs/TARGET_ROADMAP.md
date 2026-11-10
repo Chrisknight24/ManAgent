@@ -6,6 +6,8 @@ Ce document est la **source de vérité** du chantier ; il remplace
 conception, propriété de l'Expert).
 
 - Spec : [`TARGET_REGISTRY.md`](TARGET_REGISTRY.md)
+- Fiabilité des cibles (chantier 2026-11-09) :
+  [`TARGET_RELIABILITY_ROADMAP.md`](TARGET_RELIABILITY_ROADMAP.md)
 - Contrat hôte : [`HOST_CONTRACT.md`](HOST_CONTRACT.md) (mis à jour en S5/S6)
 - Décisions verrouillées : voir §2
 - Dette et reports : voir §8 (à ne jamais perdre)

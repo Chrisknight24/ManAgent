@@ -43,6 +43,12 @@ Each step shows: id, type, tool, full arguments, outputs, `execute_if`, `expecte
 This computation is a clue, not proof: modified arguments may indicate a new plan, even with equal structure, but they may also be cosmetic. Check them against the observed cause.
 {% endif %}
 
+{% if retry_rationale %}
+## RETRY RATIONALE (from the planner — context, never proof)
+{{ retry_rationale }}
+Check that it explains the OBSERVED CAUSE. A vague rationale does not make an identical plan acceptable.
+{% endif %}
+
 ## HISTORY (`[failed]` = ran and failed, `[rejected]` = refused before running and never ran)
 {{ mission_history_summary }}
 
@@ -73,6 +79,8 @@ Answer `false` when:
 - The plan hands GOAL to a sub-task with the same words, and does nothing else.
 - Its declared goal differs from GOAL.
 - The plan is partial with `critical` risk, an irreversible step, a required human confirmation, or gaps too vague to verify.
+
+Repetition scale (repetition fact): ONE repeated structure is a WARNING, not a rejection ground. From TWO executed failures with equal structure, be strict: require a change that addresses the observed cause, or an explicit planner rationale. Even then, if the change is plausible against the cause, validate.
 
 Good signs (clues, not requirements): a fresh perception after a stale reference, a new tool, a new branch, a changed argument that addresses the observed cause, a verification step instead of redoing proven state.
 A plan with the same structure may be valid when its arguments or wait changed in response to the observed cause.

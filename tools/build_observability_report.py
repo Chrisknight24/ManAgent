@@ -243,6 +243,7 @@ COMPACTOR_TAGS = {"MissionCompactor"}
 LEARNER_TAGS = {"ExtractedLesson", "Learner"}
 POST_EXECUTION_TAGS = COMPACTOR_TAGS | LEARNER_TAGS
 CONVERGENCE_TAGS = {"ConvergenceDecision"}
+RETRY_EXTENSION_TAGS = {"RetryExtensionDecision"}
 ANALYSIS_TAGS = {"perceive_understand", "llm_analyze_data", "tools_manager_decision"}
 EXPLORER_PLAN_TAGS = {"explorer_plan_generation", "explorer_plan_generation_mission"}
 DISCOVERY_LLM_TAGS = EXPLORER_PLAN_TAGS | {"analyze_registry", "analyze_execution_tree", "discovery_semantic"}
@@ -719,6 +720,17 @@ def attach_llm_calls_by_mission(episodes, llm_calls, events):
                             break
             continue
 
+        # 9.4 Juge de rallonge (retry extension) : appel LLM explicite,
+        # jamais laissé dans `_other_calls` (qui n'était pas rendu).
+        if tag in RETRY_EXTENSION_TAGS:
+            if ep:
+                ep.setdefault("_retry_extension_calls", []).append(call)
+                if solver_id is not None and attempt_num is not None:
+                    attempt = attempt_index_global.get((solver_id, attempt_num))
+                    if attempt:
+                        attempt.setdefault("_retry_extension_calls", []).append(call)
+            continue
+
         # 9.5 Skill Engine (Synthesis & Repair)
         if tag in {"SkillSynthesis", "SkillRepair"}:
             if not ep and solver_id and solver_id in solver_to_mission:
@@ -859,12 +871,160 @@ def build_skill_summaries(episodes):
 
 CODE_VALIDATION_EVENTS = ("plan_validation_decision", "plan_rejected_validation", "plan_rejected_supervisor", "plan_validation_skipped", "skill_params_warning", "skill_params_refused")
 
+SOLVER_LIFECYCLE_EVENTS = (
+    "attempt_started",
+    "attempt_failed",
+    "solver_recul",
+    "retry_extension_decision",
+    "plan_warnings",
+    "perception_unconsumed_warning",
+    "any_unconsumed_warning",
+    "unused_declared_output",
+    "alignment_failure",
+    "target_args_source",
+    "target.verification",
+    "target.resolve_failed",
+    "convergence.check",
+)
+
+
+def _sort_events_chronologically(events):
+    """Tri stable par `ts` ISO ; les events sans `ts` restent à la fin.
+
+    L'ordre du fichier events.jsonl n'est pas garanti après fusion de sources
+    (tentatives, étape, mission). On ne perd aucun event : à timestamp égal,
+    l'ordre d'origine est conservé.
+    """
+    indexed = list(enumerate(events or []))
+    indexed.sort(
+        key=lambda pair: (
+            not str(pair[1].get("ts") or ""),
+            str(pair[1].get("ts") or ""),
+            pair[0],
+        )
+    )
+    return [ev for _, ev in indexed]
+
+
+def _event_attempt_number(ev: Dict[str, Any]) -> Optional[int]:
+    """Numéro de tentative, quel que soit le nom de champ émis.
+
+    Les events historiques utilisent `attempt_number`, `attempt` ou
+    `attempt_num` selon le producteur (solver vs gates code).
+    """
+    for key in ("attempt_number", "attempt", "attempt_num"):
+        value = ev.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _find_step_node(attempt: Optional[Dict[str, Any]], step_id: Any):
+    if attempt is None or not step_id:
+        return None
+    for node in attempt.get("nodes", []) or []:
+        if node.get("step_id") == step_id:
+            return node
+    return None
+
+
+def attach_solver_lifecycle_events(episodes, events):
+    """Rattache les traces de retry/stratégie du solver.
+
+    Avant : `attempt_started`, `attempt_failed`, `solver_recul`,
+    `retry_extension_decision`, `plan_warnings`, `alignment_failure`,
+    `target_args_source` et `any_unconsumed_warning` vivaient dans
+    events.jsonl mais n'apparaissaient
+    jamais dans le HTML. On voyait la tentative et son statut, pas la cause
+    du retry ni la décision de rallonge.
+
+    Règle de placement, du plus précis au plus large :
+      1. nœud d'étape (solver_id + attempt_number + step_id),
+      2. tentative (solver_id + attempt_number),
+      3. mission (mission_id / solver_id / session).
+
+    Aucun event n'est jeté : les irrésolubles sont retournés pour être
+    affichés comme orphelins.
+    """
+    ep_index = {ep["mission_id"]: ep for ep in episodes if ep.get("mission_id")}
+    solver_to_mission = build_solver_to_mission_map(episodes)
+    attempt_index: Dict[Any, Any] = {}
+    all_attempts: list = []
+    for ep in episodes:
+        _collect_attempts(ep.get("execution_tree") or {}, attempt_index, all_attempts)
+
+    unattached: List[Dict[str, Any]] = []
+    for ev in events or []:
+        if ev.get("event") not in SOLVER_LIFECYCLE_EVENTS:
+            continue
+        solver_id = ev.get("solver_id") or ev.get("child_solver_id")
+        attempt_num = _event_attempt_number(ev)
+        mid = ev.get("mission_id") or ev.get("child_mission_id")
+
+        target_mid = mid
+        if not target_mid or target_mid not in ep_index:
+            if solver_id and str(solver_id) in solver_to_mission:
+                target_mid = solver_to_mission[str(solver_id)]
+            elif (
+                solver_id
+                and str(solver_id).replace("solver_", "") in solver_to_mission
+            ):
+                target_mid = solver_to_mission[str(solver_id).replace("solver_", "")]
+            elif mid and mid in solver_to_mission:
+                target_mid = solver_to_mission[mid]
+        ep = ep_index.get(target_mid) if target_mid else None
+        if ep is None:
+            sess = ev.get("session_id")
+            if sess:
+                for cand in episodes:
+                    if cand.get("session_id") == sess:
+                        ep = cand
+                        break
+        if ep is None:
+            unattached.append(ev)
+            continue
+
+        attempt = None
+        if solver_id is not None and attempt_num is not None:
+            attempt = attempt_index.get((str(solver_id), attempt_num))
+            if attempt is None:
+                attempt = attempt_index.get(
+                    (str(solver_id).replace("solver_", ""), attempt_num)
+                )
+
+        node = _find_step_node(attempt, ev.get("step_id"))
+        if node is not None:
+            node.setdefault("_step_events", []).append(ev)
+            continue
+        if attempt is not None:
+            attempt.setdefault("_solver_events", []).append(ev)
+            continue
+        ep.setdefault("_solver_events", []).append(ev)
+
+    # Ordre naturel garanti quel que soit l'ordre de lecture du JSONL.
+    for ep in episodes:
+        if ep.get("_solver_events"):
+            ep["_solver_events"] = _sort_events_chronologically(ep["_solver_events"])
+    for attempt, _start, _end in all_attempts:
+        if attempt.get("_solver_events"):
+            attempt["_solver_events"] = _sort_events_chronologically(
+                attempt["_solver_events"]
+            )
+        for node in attempt.get("nodes", []) or []:
+            if node.get("_step_events"):
+                node["_step_events"] = _sort_events_chronologically(
+                    node["_step_events"]
+                )
+    return _sort_events_chronologically(unattached)
+
+
 TARGET_EVENTS = (
     "target.discovered",
     "target.registered",
     "target.refreshed",
     "target.selected",
     "target.bound",
+    "target.verification",
     "target.resolve_failed",
     "target.invalidated",
     "target.purged",
@@ -1090,6 +1250,7 @@ def build_data(
 
     unattached_llm_calls = attach_llm_calls_by_mission(episodes, llm_calls, events) or []
     unattached_code = attach_code_validation_events(episodes, events) or []
+    unattached_lifecycle = attach_solver_lifecycle_events(episodes, events) or []
     attach_world_snapshot_events(episodes, events)
 
     # Retrieval indexation par mission et par solver
@@ -1240,6 +1401,7 @@ def build_data(
         "unattached_skill_events": unattached_skill_events,
         "unattached_llm_calls": unattached_llm_calls,
         "unattached_code_validations": unattached_code,
+        "unattached_solver_events": unattached_lifecycle,
     }
 
 # =====================================================
@@ -2715,6 +2877,9 @@ function renderMissionDetail(missionId) {
   // Panneau central : cycle de vie des cibles (TargetRegistry).
   html += renderCentralTargets(ep);
 
+  // Panneau central : retries/reculs/décisions du solver + appels hors étape.
+  html += renderCentralSolverLifecycle(ep);
+
   // Panneau central : world state lu (mission, taille, hash, troncature).
   html += renderCentralWorldSnapshots(ep);
 
@@ -2828,6 +2993,7 @@ function renderCentralTargets(ep) {
     'target.refreshed': '♻️ rafraîchie',
     'target.selected': '🎯 sélectionnée',
     'target.bound': '🔗 liée',
+    'target.verification': '✅ vérifiée',
     'target.resolve_failed': '⛔ résolution échouée',
     'target.invalidated': '🗑️ invalidée',
     'target.purged': '🧹 purgée',
@@ -2881,6 +3047,185 @@ function inspectOrphanCall(key) {
     <div style="font-size:12px; font-family:var(--mono); color:var(--text-muted);">Solver : ${esc(String(call.solver_id || '?'))} · Étape : ${esc(String(call.step_id || '?'))} · Raison : ${esc(call._unattached_reason || '?')}</div>
   </div>`;
   updateInspector('Appel Orphelin', call.tag || 'LLM', overview, [call], call);
+}
+
+// Appels LLM rattachés mais hors étape (juge de rallonge, autres).
+// Avant : rangés dans `_other_calls`, jamais rendus → invisibles.
+const LOOSE_CALL_REGISTRY = {};
+function inspectLooseCall(key, title) {
+  const call = LOOSE_CALL_REGISTRY[key];
+  if (!call) return;
+  const overview = `<div style="display:flex; flex-direction:column; gap:10px;">
+    <div style="font-size:11px; font-weight:700; color:var(--text-faint); text-transform:uppercase;">${esc(title || 'Appel LLM')}</div>
+    <div style="font-size:13px;">Tag : <code>${esc(call.tag || '?')}</code></div>
+    <div style="font-size:12px; font-family:var(--mono); color:var(--text-muted);">Solver : ${esc(String(call.solver_id || '?'))} · Tentative : ${esc(String(call.attempt_number ?? '?'))} · Étape : ${esc(String(call.step_id || '?'))}</div>
+  </div>`;
+  updateInspector(title || 'Appel LLM', call.tag || 'LLM', overview, [call], call);
+}
+
+function renderLooseCalls(ep, calls, solverId, attemptNum, title) {
+  if (!calls || calls.length === 0) return '';
+  return calls.map((c, idx) => {
+    const key = `loose_${String(ep.mission_id || 'm')}_${String(solverId || 'x')}_${attemptNum ?? 'm'}_${idx}`;
+    LOOSE_CALL_REGISTRY[key] = c;
+    return `<button class="tree-node-card tree-node-card--plan" style="padding:4px 10px; font-size:11.5px; font-weight:700; cursor:pointer;" onclick="event.stopPropagation(); inspectLooseCall('${esc(key)}', '${esc(title || 'Appel LLM hors étape')}')">
+      🧠 ${esc(c.tag || 'LLM Call')} (${formatDuration(c.duration_ms)}) ${modelBadge(c)}
+    </button>`;
+  }).join('');
+}
+
+// ==========================================
+// TRACES DE RETRY / STRATÉGIE / ALIGNEMENT
+// ==========================================
+const SOLVER_EVENT_META = {
+  attempt_started: { label: '▶ Début de tentative', color: 'var(--primary)' },
+  attempt_failed: { label: '⛔ Fin de tentative', color: 'var(--failure)' },
+  solver_recul: { label: '🔄 Recul stratégie', color: 'var(--warning)' },
+  retry_extension_decision: { label: '➕ Décision de rallonge', color: 'var(--primary)' },
+  plan_warnings: { label: '⚠️ Avertissements de plan', color: 'var(--warning)' },
+  perception_unconsumed_warning: { label: '👁️ Perception non consommée', color: 'var(--warning)' },
+  any_unconsumed_warning: { label: '🎯 Sortie \'any\' non consommée', color: 'var(--warning)' },
+  unused_declared_output: { label: '📦 Sortie déclarée inutilisée', color: 'var(--warning)' },
+  alignment_failure: { label: '🎯 Échec d\'alignement', color: 'var(--failure)' },
+  target_args_source: { label: '🧩 Sources des arguments de cible', color: 'var(--text-muted)' },
+  'target.verification': { label: '✅ Vérification de cible', color: 'var(--primary)' },
+  'target.resolve_failed': { label: '⛔ Résolution de cible échouée', color: 'var(--failure)' },
+  'convergence.check': { label: '🎯 Vérification de convergence', color: 'var(--primary)' },
+};
+
+function lifecycleValue(v) {
+  if (v == null) return '';
+  if (Array.isArray(v)) return v.join(' | ');
+  return String(v);
+}
+
+function lifecycleSummary(ev) {
+  switch (ev.event) {
+    case 'attempt_started':
+      return [
+        ev.plan_id ? 'plan ' + ev.plan_id : '',
+        ev.execution_attempt != null ? 'exécution #' + ev.execution_attempt : '',
+        ev.max_attempts ? 'max ' + ev.max_attempts : '',
+      ].filter(Boolean).join(' · ');
+    case 'attempt_failed': {
+      const budget = ev.counts_toward_budget === false ? 'hors budget' : (ev.counts_toward_budget === true ? 'budget consommé' : '');
+      return [
+        ev.failure_class,
+        ev.outcome,
+        budget,
+        ev.execution_attempt != null ? 'exécution #' + ev.execution_attempt : '',
+      ].filter(Boolean).join(' · ');
+    }
+    case 'solver_recul':
+      return lifecycleValue(ev.reason);
+    case 'retry_extension_decision':
+      return (ev.approved ? 'accordée' : 'refusée') + (ev.reason ? ' — ' + lifecycleValue(ev.reason) : '');
+    case 'plan_warnings':
+      return lifecycleValue(ev.warnings);
+    case 'perception_unconsumed_warning':
+      return lifecycleValue(ev.unconsumed);
+    case 'any_unconsumed_warning':
+      return lifecycleValue(ev.unconsumed);
+    case 'unused_declared_output':
+      return lifecycleValue(ev.unused);
+    case 'alignment_failure':
+      return [ev.source ? 'source ' + ev.source : '', ev.reason || ''].filter(Boolean).join(' · ');
+    case 'target_args_source':
+      return [ev.tool ? 'outil ' + ev.tool : '', lifecycleValue(ev.sources)].filter(Boolean).join(' · ');
+    case 'target.verification':
+      return [
+        ev.verdict ? 'verdict ' + ev.verdict : '',
+        ev.reliability ? 'fiabilité ' + ev.reliability : '',
+        ev.next ? 'suite ' + ev.next : '',
+        ev.reason || '',
+      ].filter(Boolean).join(' · ');
+    case 'target.resolve_failed':
+      return [ev.code || '', ev.reason || ''].filter(Boolean).join(' · ');
+    case 'convergence.check':
+      return [ev.verdict || '', ev.detail || ''].filter(Boolean).join(' · ');
+    default:
+      return '';
+  }
+}
+
+function lifecycleDetail(ev) {
+  if (ev.event === 'alignment_failure') {
+    return [
+      ev.question ? 'Question : ' + ev.question : '',
+      ev.observed ? 'Observé : ' + ev.observed : '',
+    ].filter(Boolean).join('\n');
+  }
+  if (ev.event === 'target.resolve_failed') {
+    return [
+      ev.question ? 'Question : ' + ev.question : '',
+      ev.observed ? 'Observé : ' + ev.observed : '',
+    ].filter(Boolean).join('\n');
+  }
+  if (ev.event === 'convergence.check') return ev.full || '';
+  return '';
+}
+
+function sortEventsByTs(events) {
+  // Fil d'exécution : ordre chronologique stable, sans perdre les events
+  // dépourvus de timestamp (ils restent à la fin, dans leur ordre d'origine).
+  return (events || []).map((ev, idx) => ({ ev, idx })).sort((a, b) => {
+    const ta = String(a.ev.ts || ''), tb = String(b.ev.ts || '');
+    if (!ta && !tb) return a.idx - b.idx;
+    if (!ta) return 1;
+    if (!tb) return -1;
+    if (ta === tb) return a.idx - b.idx;
+    return ta < tb ? -1 : 1;
+  }).map((item) => item.ev);
+}
+
+function renderLifecycleEvents(events, opts) {
+  if (!events || events.length === 0) return '';
+  const compact = !!(opts && opts.compact);
+  const rows = sortEventsByTs(events).map((ev) => {
+    const meta = SOLVER_EVENT_META[ev.event] || { label: ev.event || '?', color: 'var(--text-muted)' };
+    let summary = lifecycleSummary(ev);
+    if (compact && summary && summary.length > 280) summary = summary.slice(0, 280) + '…';
+    const detail = lifecycleDetail(ev);
+    return `<details style="border-left:3px solid ${meta.color}; background:var(--surface); border-radius:6px; padding:5px 9px; margin-top:4px;">
+      <summary style="cursor:pointer; font-size:12px; font-weight:700; color:var(--text); display:flex; gap:8px; align-items:baseline; flex-wrap:wrap;">
+        <span>${esc(meta.label)}</span>
+        <span style="font-weight:500; color:var(--text-faint); font-family:var(--mono); font-size:10.5px;">${esc(formatTimestamp(ev.ts))}</span>
+        ${summary ? `<span style="font-weight:600; font-size:11.5px;">${esc(summary)}</span>` : ''}
+      </summary>
+      ${detail ? `<div style="margin-top:6px; font-size:11.5px; color:var(--text-muted); white-space:pre-wrap; font-family:var(--mono);">${esc(detail)}</div>` : ''}
+    </details>`;
+  }).join('');
+  return `<div style="margin-bottom:8px;">${rows}</div>`;
+}
+
+function renderCentralSolverLifecycle(ep) {
+  const events = ep._solver_events || [];
+  const extensionCalls = ep._retry_extension_calls || [];
+  const otherCalls = ep._other_calls || [];
+  // Orphelins : une seule fois par session (sinon dupliqués sur chaque mission).
+  const sameSession = (DATA.episodes || []).filter(e =>
+    ep.session_id && e.session_id && String(e.session_id) === String(ep.session_id));
+  const firstOfSession = sameSession.length === 0 || sameSession[0].mission_id === ep.mission_id;
+  const unattached = firstOfSession ? (DATA.unattached_solver_events || []).filter(ev =>
+    ep.session_id && ev.session_id && String(ev.session_id) === String(ep.session_id)) : [];
+  const total = events.length + extensionCalls.length + otherCalls.length + unattached.length;
+  if (total === 0) return '';
+  // Timeline unique : les events de mission et les orphelins de session sont
+  // entrelacés par timestamp, pas empilés en deux blocs séparés.
+  const timeline = sortEventsByTs([...events, ...unattached]);
+  let body = renderLifecycleEvents(timeline, { compact: true });
+  if (extensionCalls.length + otherCalls.length > 0) {
+    body += `<div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">
+      ${renderLooseCalls(ep, extensionCalls, 'mission', null, 'Juge de rallonge (LLM)')}
+      ${renderLooseCalls(ep, otherCalls, 'mission', null, 'Appel LLM hors étape')}
+    </div>`;
+  }
+  return `<div style="margin-top:10px; margin-bottom:6px;">
+    <div class="discovery-accordion-header" onclick="toggleAccordion('central-solver-lifecycle-${esc(ep.mission_id)}')">
+      <span>🔁 Retries, reculs & décisions Solver (${total})</span><span>▼</span>
+    </div>
+    <div id="central-solver-lifecycle-${esc(ep.mission_id)}"><div class="discovery-container-scroll">${body}</div></div>
+  </div>`;
 }
 
 // ==========================================
@@ -3184,6 +3529,23 @@ function renderSolverNodeModern(ep, treeNode, depth) {
             + `</div>`;
         });
         html += `</div>`;
+      }
+
+      // Traces de retry/stratégie rattachées à CETTE tentative
+      // (attempt_started/failed, recul, avertissements, rallonge).
+      // Avant : invisibles dans le HTML.
+      const attEvents = att._solver_events || [];
+      if (attEvents.length > 0) {
+        html += `<div style="margin-left:8px; margin-bottom:12px;">
+          <div style="font-size:11px; font-weight:800; color:var(--text-muted); text-transform:uppercase; margin-bottom:4px;">🔁 Cycle de retry</div>
+          ${renderLifecycleEvents(attEvents, { compact: true })}
+        </div>`;
+      }
+      const attLooseCalls = [...(att._retry_extension_calls || []), ...(att._other_calls || [])];
+      if (attLooseCalls.length > 0) {
+        html += `<div style="margin-left:8px; margin-bottom:12px; display:flex; gap:6px; flex-wrap:wrap;">
+          ${renderLooseCalls(ep, attLooseCalls, solverId, attNum, 'Appel LLM de tentative')}
+        </div>`;
       }
 
       // Plan proposé mais jamais exécuté (refusé avant exécution) : le montrer,
@@ -4011,6 +4373,13 @@ function inspectStep(missionId, solverId, attemptNum, stepId) {
              return '';
           }).join('')}
         </div>
+      </div>
+    ` : ''}
+
+    ${targetNode._step_events && targetNode._step_events.length > 0 ? `
+      <div>
+        <div style="font-size:11px; font-weight:700; color:var(--text-faint); text-transform:uppercase; margin-bottom:4px;">Traces de cible & d'alignement (${targetNode._step_events.length})</div>
+        ${renderLifecycleEvents(targetNode._step_events, { compact: false })}
       </div>
     ` : ''}
 

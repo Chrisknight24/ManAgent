@@ -43,6 +43,12 @@ Chaque étape montre : id, type, outil, arguments complets, sorties, `execute_if
 Ce calcul est un indice, pas une preuve : des arguments modifiés peuvent indiquer un plan nouveau, même à structure égale, mais ils peuvent aussi être cosmétiques. Confronte-les à la cause observée.
 {% endif %}
 
+{% if retry_rationale %}
+## JUSTIFICATION DE REPRISE (du planner — contexte, jamais une preuve)
+{{ retry_rationale }}
+Vérifie qu'elle explique la CAUSE observée. Une justification vague ne rend pas un plan identique acceptable.
+{% endif %}
+
 ## HISTORIQUE (`[failed]` = exécutée et échouée, `[rejected]` = refusée avant exécution, jamais exécutée)
 {{ mission_history_summary }}
 
@@ -73,6 +79,8 @@ Ce calcul est un indice, pas une preuve : des arguments modifiés peuvent indiqu
 - Le plan redonne l'objectif tel quel à une sous-tâche, sans rien faire d'autre.
 - Son objectif déclaré diffère de l'OBJECTIF.
 - Le plan est partiel avec un risque `critical`, une étape irréversible, une confirmation humaine requise, ou des lacunes trop vagues pour être vérifiées.
+
+Échelle de répétition (fait de répétition) : UNE répétition de structure est un AVERTISSEMENT, pas un motif de refus. À partir de DEUX échecs à l'exécution à structure égale, sois strict : exige un changement qui traite la cause observée, ou une justification explicite du planner. Même alors, si le changement est plausible au regard de la cause, valide.
 
 Bons signes (indices, pas obligations) : perception fraîche après référence périmée, nouvel outil, nouvelle branche, argument modifié qui répond à la cause observée, étape de vérification au lieu de refaire un état prouvé.
 Un plan à structure égale peut être valide quand ses arguments ou son attente ont changé pour répondre à la cause observée.
