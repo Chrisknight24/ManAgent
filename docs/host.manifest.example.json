@@ -54,17 +54,22 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "question": { "type": "string", "description": "Que chercher (ex: où est le bouton OK ?)." }
+          "question": { "type": "string", "description": "Que chercher (ex: où est le bouton OK ?)." },
+          "target": { "type": "string", "description": "Zone/cible à inspecter (nom local fourni par ManAgent)." }
         },
         "required": ["question"]
       },
       "target_contract": {
         "version": 1,
+        "consumes": [
+          { "param": "target", "scope": "ui_element", "required": false }
+        ],
         "produces": [
           {
             "path": "data.targets",
             "mode": "candidates",
             "scope": "ui_element",
+            "reliability": "low",
             "fields": {
               "ref": "id",
               "description": "label",
@@ -80,6 +85,9 @@
         ],
         "disclosure": {
           "version": 1,
+          "reliability": "medium",
+          "evidence": ["metadata", "rect"],
+          "zoom_probe": "zoomer",
           "views": [
             {
               "name": "grid",
@@ -91,7 +99,8 @@
             {
               "kind": "cell",
               "param": "cell",
-              "description": "Cellule brute de la grille."
+              "description": "Cellule brute de la grille.",
+              "reliability": "high"
             }
           ],
           "probes": [
@@ -102,6 +111,15 @@
               "tool": "lire_ecran",
               "args": {},
               "hint_param": "question",
+              "produces": ["candidates", "grid"]
+            },
+            {
+              "id": "zoomer",
+              "kind": "zoom",
+              "description": "Inspecte une cible locale déjà vue et renvoie ses cibles internes.",
+              "tool": "lire_ecran",
+              "args": {},
+              "subject": { "kind": "local", "param": "target" },
               "produces": ["candidates", "grid"]
             }
           ]

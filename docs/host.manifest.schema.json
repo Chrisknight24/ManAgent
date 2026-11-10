@@ -88,6 +88,11 @@
                       "type": "array",
                       "items": { "type": "string" },
                       "description": "Consumable scopes; default [scope]. Not transitive."
+                    },
+                    "reliability": {
+                      "type": "string",
+                      "enum": ["high", "medium", "low"],
+                      "description": "Optional reliability override for targets produced here. Absent = disclosure.reliability (default medium). Selects how deep target verification goes: high = light, medium = standard, low = deep + automatic zoom."
                     }
                   },
                   "additionalProperties": true
@@ -106,8 +111,25 @@
                   },
                   "anchors": {
                     "type": ["object", "array"],
-                    "description": "Raw anchor kinds the host accepts. Object form: {kind: consumer_param}; array form: [{kind, param, description}]. `kind` is HOST vocabulary (cell, file, key, joint...).",
+                    "description": "Raw anchor kinds the host accepts. Object form: {kind: consumer_param}; array form: [{kind, param, description, reliability?}]. `kind` is HOST vocabulary (cell, file, key, joint...). `reliability` overrides the global profile for this kind.",
                     "additionalProperties": true
+                  },
+                  "reliability": {
+                    "type": "string",
+                    "enum": ["high", "medium", "low"],
+                    "description": "Optional global reliability profile for declared targets. Default medium (historical behavior). high = light verification, medium = standard, low = deep verification + automatic zoom when zoom_probe is declared."
+                  },
+                  "evidence": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": ["metadata", "image", "rect", "nested_targets", "invariants"]
+                    },
+                    "description": "Optional evidence types the host can attach to a candidate. Default [metadata]. These are NOT tool names: the brain only reads what is actually present. Images travel through the media channel, never base64 in the text prompt."
+                  },
+                  "zoom_probe": {
+                    "type": "string",
+                    "description": "Optional id of a probes[] entry that inspects a LOCAL candidate (subject.kind='local'). Used by the harness for an implicit zoom after a mismatch: the selector is re-interrogated on the same candidate with the verifier hint. The verifier never chooses; it only orients. Bound: 1 zoom + 1 re-selection."
                   },
                   "probes": {
                     "type": "array",
