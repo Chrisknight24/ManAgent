@@ -106,7 +106,7 @@
                   "version": { "type": "integer", "const": 1 },
                   "views": {
                     "type": ["object", "array"],
-                    "description": "Named views the selector may read. Object form: {name: dotted.path}; array form: [{name, path, description}].",
+                    "description": "Named views the selector may read. Object form: {name: dotted.path}; array form: [{name, path, description}]. All views must share the coordinate frame in which anchors are resolved (usually the active frame); a crop or non-active frame must use another view name or be omitted.",
                     "additionalProperties": true
                   },
                   "anchors": {
@@ -157,6 +157,10 @@
                         "produces": {
                           "type": "array",
                           "items": { "type": "string", "description": "What the probe refreshes: candidates, a named view, media..." }
+                        },
+                        "preserves_references": {
+                          "type": "boolean",
+                          "description": "Optional, default false. True when the probe never reassigns already-issued references, so the brain may keep previous-world candidates alongside the new ones. A capture that invalidates old ids must leave this false."
                         }
                       },
                       "additionalProperties": true

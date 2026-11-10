@@ -120,7 +120,8 @@
               "tool": "lire_ecran",
               "args": {},
               "subject": { "kind": "local", "param": "target" },
-              "produces": ["candidates", "grid"]
+              "produces": ["candidates", "grid"],
+              "preserves_references": true
             }
           ]
         }

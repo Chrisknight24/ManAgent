@@ -779,6 +779,14 @@ async def _run_probe(
         if failed:
             # Rien de fiable n'a ete produit : ne pas annoncer de cles.
             produced_keys = []
+    elif probe.preserves_references:
+        # La sonde garantit que les references deja emises restent valides :
+        # on garde les candidates du monde precedent a cote des nouvelles.
+        known = {candidate.key for candidate in world.candidates}
+        for candidate in snapshot["candidates"]:
+            if candidate.key not in known:
+                world.candidates.append(candidate)
+                known.add(candidate.key)
     return ProbeRecord(
         probe_id=probe.id,
         kind=probe.kind,

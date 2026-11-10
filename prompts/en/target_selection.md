@@ -57,10 +57,10 @@ A verification rejected or doubted your latest candidate:
 
 > {{ verifier_hint }}
 
-This is NOT an imposed choice: re-evaluate the SAME candidate with this hint
-(and any inner targets that were produced). If you find nothing better, you
-may confirm your previous candidate with an explanation, or answer
-`no_target=true`.
+This is NOT an imposed choice: re-evaluate the targeted candidate with this
+hint (and any inner targets that were produced). If it is still listed and you
+find nothing better, you may confirm it with an explanation; otherwise, you
+may answer `no_target=true`.
 {% endif %}
 
 ## Rules

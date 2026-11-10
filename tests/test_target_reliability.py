@@ -63,19 +63,22 @@ def _raw_contract(*, disclosure=None):
     return raw
 
 
-def _zoom_disclosure(*, reliability="low"):
+def _zoom_disclosure(*, reliability="low", preserves_references=False):
+    probe = {
+        "id": "zoomer",
+        "kind": "zoom",
+        "description": "Inspecte une candidate locale.",
+        "tool": "zoom",
+        "subject": {"kind": "local", "param": "target"},
+        "produces": ["candidates"],
+    }
+    if preserves_references:
+        probe["preserves_references"] = True
     return {
         "version": 1,
         "reliability": reliability,
         "evidence": ["metadata"],
-        "probes": [{
-            "id": "zoomer",
-            "kind": "zoom",
-            "description": "Inspecte une candidate locale.",
-            "tool": "zoom",
-            "subject": {"kind": "local", "param": "target"},
-            "produces": ["candidates"],
-        }],
+        "probes": [probe],
         "zoom_probe": "zoomer",
     }
 
@@ -155,7 +158,18 @@ def test_disclosure_parses_reliability_evidence_and_zoom_probe():
     assert disclosure.reliability == "low"
     assert disclosure.evidence == ("metadata",)
     assert disclosure.zoom_probe == "zoomer"
-    assert disclosure.probe("zoomer") is not None
+    probe = disclosure.probe("zoomer")
+    assert probe is not None
+    # Absent = faux (comportement historique : nouveau monde seul).
+    assert probe.preserves_references is False
+
+
+def test_disclosure_preserves_references_optionnel():
+    contract = _contract(
+        _raw_contract(disclosure=_zoom_disclosure(preserves_references=True))
+    )
+    assert contract.disclosure is not None
+    assert contract.disclosure.probe("zoomer").preserves_references is True
 
 
 def test_disclosure_absent_keeps_historical_behavior():
@@ -411,6 +425,53 @@ def test_zoom_epuise_replanifie_sans_boucle():
     assert old_key in {c["key"] for c in second_candidates}
     # Le verdict mismatch initial reste tracé.
     assert [v["verdict"] for v in result.verifications] == ["mismatch"]
+
+
+def test_zoom_preservant_les_references_garde_ancienne_candidate():
+    contract = _contract(_raw_contract(
+        disclosure=_zoom_disclosure(preserves_references=True)
+    ))
+    registry, world = _world(
+        contract=contract,
+        candidates=[{"id": "ref-file", "name": "bonjour.txt", "role": "file"}],
+    )
+    old_key = world.candidates[0].key
+    zoom_payload = {
+        "result": True,
+        "data": {"candidates": [
+            {"id": "ref-inner", "name": "bouton ok", "role": "button"},
+        ]},
+    }
+    manager = _FakeManager(
+        contracts={"scan": contract}, payloads={"zoom": zoom_payload}
+    )
+    llm = _ScriptedLlm([
+        {"target_key": old_key, "target_kind": "local", "reason": "candidat"},
+        {"verdict": "mismatch", "confidence": "high", "next": "zoom",
+         "reason": "le fichier contient un bouton interne"},
+        lambda prompt: {
+            "target_key": _inner_key_from_prompt(prompt),
+            "target_kind": "local",
+            "reason": "cible interne",
+        },
+        {"verdict": "match", "confidence": "high", "reason": "bonne cible"},
+    ])
+    result = asyncio.run(resolve_target(
+        llm=llm,
+        question="le bouton ok",
+        world=world,
+        contract=contract,
+        registry=registry,
+        tools_mgr=manager,
+        allow_anchor=False,
+        max_rounds=1,
+        verify=True,
+    ))
+    assert result.ok, result.error_message
+    # La sonde garantit les anciennes références : les deux mondes coexistent.
+    second_candidates = _candidates_from_prompt(llm.prompts[2])
+    assert old_key in {c["key"] for c in second_candidates}
+    assert "bouton ok" in {c["description"] for c in second_candidates}
 
 
 def test_zoom_en_echec_conserve_ancien_monde_et_confirme_ancienne():

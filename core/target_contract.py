@@ -132,6 +132,10 @@ class ProbeSpec:
     hint_param: Optional[str] = None
     subject: Optional[ProbeSubjectSpec] = None
     produces: Tuple[str, ...] = ()
+    # Vrai si la sonde ne reattribue jamais les references deja emises : le
+    # cerveau peut alors garder les candidates du monde precedent a cote des
+    # nouvelles. Absent/faux = nouveau monde seul (comportement historique).
+    preserves_references: bool = False
 
 
 @dataclass(frozen=True)
@@ -790,6 +794,15 @@ def _parse_probe(item: Any, *, index: int, error, warning, seen_ids: set) -> Opt
             return None
         produces.append(value.strip())
 
+    preserves_raw = item.get("preserves_references", False)
+    if preserves_raw is None:
+        preserves_raw = False
+    if not isinstance(preserves_raw, bool):
+        error(
+            f"disclosure.probes[{index}].preserves_references must be a boolean"
+        )
+        return None
+
     return ProbeSpec(
         id=probe_id,
         kind=kind,
@@ -799,6 +812,7 @@ def _parse_probe(item: Any, *, index: int, error, warning, seen_ids: set) -> Opt
         hint_param=hint_param,
         subject=subject,
         produces=tuple(produces),
+        preserves_references=preserves_raw,
     )
 
 

@@ -57,10 +57,10 @@ Une vérification a écarté ou douté de ta dernière candidate :
 
 > {{ verifier_hint }}
 
-Ce n'est PAS un choix imposé : réévalue la MÊME candidate avec cet indice (et
-les cibles internes éventuellement produites). Si tu ne trouves rien de
-meilleur, tu peux confirmer ta candidate précédente en l'expliquant, ou
-répondre `no_target=true`.
+Ce n'est PAS un choix imposé : réévalue la candidate visée avec cet indice (et
+les cibles internes éventuellement produites). Si elle est encore listée et que
+tu ne trouves rien de meilleur, tu peux la confirmer en l'expliquant ; sinon,
+tu peux répondre `no_target=true`.
 {% endif %}
 
 ## Règles

@@ -453,6 +453,14 @@ contrat reste en `version: 1` ; `disclosure` est optionnel et non cassant.
 }
 ```
 
+- **Invariant de repère** : toute vue (`views`) et toute valeur d'ancre doivent
+  décrire le même repère que celui dans lequel l'hôte résout les ancres — en
+  pratique la frame active au moment de l'appel. Une vue issue d'un crop ou
+  d'une frame non active doit être exposée sous un **autre nom** (ou omise),
+  jamais sous le nom d'une vue d'ancrage : le cerveau ne peut pas deviner
+  qu'une grille ne correspond pas au repère des `cell`. De même, les attributs
+  dérivés d'une frame (par exemple des cellules) doivent être exprimés dans ce
+  repère ou omis.
 - `reliability` (optionnel) : `high` | `medium` | `low`, défaut `medium`.
   Profil **déclaré** de fiabilité des cibles. Il choisit la profondeur de
   vérification : `high` = légère, `medium` = standard, `low` = approfondie et
@@ -477,6 +485,11 @@ contrat reste en `version: 1` ; `disclosure` est optionnel et non cassant.
   **l'ancienne candidate**, avec la proposition du vérificateur en contexte.
   Le vérificateur ne choisit jamais ; il oriente (`next`, `prefer_internal`).
   Borne stricte : **1 zoom + 1 re-sélection**.
+- `probes[].preserves_references` (optionnel, défaut `false`) : vrai si la
+  sonde ne réattribue jamais des références déjà émises. Le cerveau conserve
+  alors les candidates du monde précédent à côté des nouvelles. Faux ou absent
+  = seul le nouveau monde est visible (comportement historique). Une capture
+  qui invalide les anciens ids doit laisser ce champ à `false`.
 
 #### Verdict de vérification (interne)
 
