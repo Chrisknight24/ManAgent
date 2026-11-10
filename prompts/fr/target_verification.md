@@ -16,7 +16,8 @@ contenir, en plus de `description`/`scope`/`attributes` :
 
 - `image` : une ou plusieurs images (canal média, jamais du texte) ;
 - `rect` : une zone `[x, y, w, h]` ;
-- `nested` : des cibles internes visibles ;
+- `nested` : les autres candidates visibles du monde courant (pas
+  nécessairement internes) ;
 - `invariants` : des faits vérifiables déclarés par l'hôte.
 
 N'utilise que les preuves réellement présentes. Ne suppose aucune sémantique

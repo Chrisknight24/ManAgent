@@ -16,7 +16,8 @@ The available evidence depends on what the host declares. Besides
 
 - `image`: one or more images (media channel, never text);
 - `rect`: a region `[x, y, w, h]`;
-- `nested`: visible inner targets;
+- `nested`: the other visible candidates of the current world (not
+  necessarily inner);
 - `invariants`: verifiable facts declared by the host.
 
 Use only the evidence actually present. Assume no application-specific

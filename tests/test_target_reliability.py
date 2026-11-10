@@ -360,10 +360,16 @@ def test_mismatch_zoome_ancienne_candidate_puis_selection_interne():
     assert "Indice du vérificateur" in llm.prompts[2]
     assert "bouton interne" in llm.prompts[2]
     assert "local_inner" in llm.prompts[2]
-    # L'ANCIENNE candidate reste visible à côté des cibles internes.
+    # Politique de zoom (option B) : la sonde a réussi et produit une
+    # candidate, donc le nouveau monde fait foi. L'ancienne n'est PAS
+    # ré-ajoutée : sa référence peut avoir été renumérotée par l'hôte.
     second_candidates = _candidates_from_prompt(llm.prompts[2])
-    assert old_key in {c["key"] for c in second_candidates}
+    assert old_key not in {c["key"] for c in second_candidates}
     assert "bouton ok" in {c["description"] for c in second_candidates}
+    # Les deux verdicts sont conservés (mismatch initial inclus).
+    assert [v["verdict"] for v in result.verifications] == ["mismatch", "match"]
+    assert all(v.get("local_name") for v in result.verifications)
+    assert result.verification["verdict"] == "match"
     assert len(llm.tags) == 4
 
 
@@ -398,6 +404,58 @@ def test_zoom_epuise_replanifie_sans_boucle():
     assert not result.ok
     # Une seule sonde de zoom, jamais de boucle.
     assert [call[0] for call in manager.calls] == ["zoom"]
+    # Sonde vide -> ancien monde conservé : l'ancienne candidate reste
+    # visible dans la re-sélection (prompt 0 = sélection, 1 = vérification,
+    # 2 = re-sélection).
+    second_candidates = _candidates_from_prompt(llm.prompts[2])
+    assert old_key in {c["key"] for c in second_candidates}
+    # Le verdict mismatch initial reste tracé.
+    assert [v["verdict"] for v in result.verifications] == ["mismatch"]
+
+
+def test_zoom_en_echec_conserve_ancien_monde_et_confirme_ancienne():
+    contract = _contract(_raw_contract(disclosure=_zoom_disclosure()))
+    registry, world = _world(
+        contract=contract,
+        candidates=[{"id": "ref-file", "name": "bonjour.txt", "role": "file"}],
+    )
+    old_key = world.candidates[0].key
+    manager = _FakeManager(
+        contracts={"scan": contract},
+        payloads={"zoom": {
+            "result": False,
+            "error_reason": "TARGET_STALE_REF",
+            "data": {"candidates": []},
+        }},
+    )
+    llm = _ScriptedLlm([
+        {"target_key": old_key, "target_kind": "local", "reason": "candidat"},
+        {"verdict": "mismatch", "confidence": "high", "next": "zoom",
+         "reason": "doute sur la nature"},
+        # La sonde ayant échoué, l'ancienne référence reste valide : le
+        # sélecteur peut la reconfirmer.
+        {"target_key": old_key, "target_kind": "local", "reason": "confirmee"},
+        {"verdict": "match", "confidence": "high", "reason": "bonne cible"},
+    ])
+    result = asyncio.run(resolve_target(
+        llm=llm,
+        question="le fichier bonjour.txt",
+        world=world,
+        contract=contract,
+        registry=registry,
+        tools_mgr=manager,
+        allow_anchor=False,
+        max_rounds=1,
+        verify=True,
+    ))
+    assert result.ok, result.error_message
+    assert result.entry is not None
+    assert result.entry.description == "bonjour.txt"
+    # Une seule sonde, et l'ancien monde est resté visible après l'échec.
+    assert [call[0] for call in manager.calls] == ["zoom"]
+    second_candidates = _candidates_from_prompt(llm.prompts[2])
+    assert old_key in {c["key"] for c in second_candidates}
+    assert [v["verdict"] for v in result.verifications] == ["mismatch", "match"]
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +488,49 @@ def test_store_target_warnings_range_et_trace(monkeypatch):
     assert captured[0][1]["verdict"] == "uncertain"
     assert captured[0][1]["local_name"] == "local_1"
     assert captured[0][1]["solver_id"] == "solver-1"
+
+
+def test_store_target_warnings_emet_un_evenement_par_verdict(monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        IT.Logger, "event", lambda name, **fields: captured.append((name, fields))
+    )
+    runtime_state = types.SimpleNamespace(
+        execution_context={"solver_id": "s", "mission_id": "m"}
+    )
+    result = types.SimpleNamespace(
+        warnings=["Cible acceptée sous réserve : preuve faible"],
+        verification={"verdict": "match", "local_name": "local_b"},
+        verifications=[
+            {
+                "verdict": "mismatch",
+                "confidence": "high",
+                "next": "zoom",
+                "reliability": "low",
+                "local_name": "local_a",
+            },
+            {
+                "verdict": "match",
+                "confidence": "high",
+                "next": "accept",
+                "reliability": "low",
+                "local_name": "local_b",
+            },
+        ],
+        entry=types.SimpleNamespace(local_name="local_b"),
+    )
+    IT._store_target_warnings(runtime_state, result, source="test")
+    # Un événement par verdict, dans l'ordre de la boucle.
+    assert [event[1]["verdict"] for event in captured] == ["mismatch", "match"]
+    assert [event[1]["local_name"] for event in captured] == ["local_a", "local_b"]
+    assert captured[0][1]["attempt"] == 1
+    assert captured[0][1]["attempts"] == 2
+    assert captured[1][1]["attempt"] == 2
+    # Les warnings globaux ne sont rattachés qu'au dernier verdict.
+    assert "warnings" not in captured[0][1]
+    assert captured[1][1]["warnings"] == [
+        "Cible acceptée sous réserve : preuve faible"
+    ]
 
 
 def test_store_target_warnings_dedup_and_cap(monkeypatch):

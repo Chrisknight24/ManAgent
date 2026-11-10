@@ -1132,28 +1132,46 @@ def _store_target_warnings(runtime_state, result, *, source: str = "") -> None:
             store[solver_id] = current[-10:]
         except Exception:
             pass
-    trace = getattr(result, "verification", None)
-    if not isinstance(trace, dict):
+    # Un evenement par verdict : le mismatch initial ne disparait plus quand
+    # un zoom aboutit. `verification` reste le dernier verdict (compatibilite).
+    traces = getattr(result, "verifications", None)
+    if not isinstance(traces, list) or not traces:
+        single = getattr(result, "verification", None)
+        traces = [single] if isinstance(single, dict) else []
+    traces = [trace for trace in traces if isinstance(trace, dict)]
+    if not traces:
         return
+    _entry = getattr(result, "entry", None)
+    _entry_name = str(getattr(_entry, "local_name", "") or "")
     try:
-        fields: Dict[str, Any] = {
-            "verdict": str(trace.get("verdict") or "")[:24],
-            "confidence": str(trace.get("confidence") or "")[:24],
-            "next": str(trace.get("next") or "")[:24],
-            "reliability": str(trace.get("reliability") or "")[:24],
-            "reason": str(trace.get("reason") or "")[:300],
-            "source": str(source or "")[:120],
-            "warnings": warnings[:5],
-        }
-        _entry = getattr(result, "entry", None)
-        _local_name = str(getattr(_entry, "local_name", "") or "")
-        if _local_name:
-            fields["local_name"] = _local_name
-        if mission_id:
-            fields["mission_id"] = mission_id
-        if solver_id:
-            fields["solver_id"] = solver_id
-        Logger.event("target.verification", **fields)
+        for index, trace in enumerate(traces):
+            is_last = index == len(traces) - 1
+            fields: Dict[str, Any] = {
+                "verdict": str(trace.get("verdict") or "")[:24],
+                "confidence": str(trace.get("confidence") or "")[:24],
+                "next": str(trace.get("next") or "")[:24],
+                "reliability": str(trace.get("reliability") or "")[:24],
+                "reason": str(trace.get("reason") or "")[:300],
+                "source": str(source or "")[:120],
+                "attempt": index + 1,
+                "attempts": len(traces),
+            }
+            _local_name = str(trace.get("local_name") or "")
+            if not _local_name and len(traces) == 1:
+                # Ancien format sans `local_name` : on retombe sur la cible
+                # finale, uniquement s'il n'y a qu'un verdict.
+                _local_name = _entry_name
+            if _local_name:
+                fields["local_name"] = _local_name
+            # Les warnings sont globaux (acceptation sous reserve) : ils sont
+            # rattaches au dernier verdict, pas dupliques sur chaque etape.
+            if is_last:
+                fields["warnings"] = warnings[:5]
+            if mission_id:
+                fields["mission_id"] = mission_id
+            if solver_id:
+                fields["solver_id"] = solver_id
+            Logger.event("target.verification", **fields)
     except Exception:
         pass
 

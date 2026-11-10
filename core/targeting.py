@@ -217,7 +217,11 @@ class TargetingResult:
     # planner (retries) et a la convergence. Jamais une liste de candidats.
     warnings: List[str] = field(default_factory=list)
     # Trace de verification (verdict, fiabilite, suite). Optionnelle.
+    # `verification` reste le dernier verdict (compatibilite) ; `verifications`
+    # porte TOUS les verdicts de la boucle, mismatch initial inclus, pour que
+    # l'observabilite ne perde pas l'historique.
     verification: Optional[Dict[str, Any]] = None
+    verifications: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -357,6 +361,9 @@ class VerificationOutcome:
     prefer_internal: str = ""
     reliability: str = DEFAULT_RELIABILITY
     verified: bool = False
+    # Cle locale de la candidate verifiee : indispensable pour rattacher
+    # chaque verdict a sa cible quand la boucle en verifie plusieurs.
+    local_name: str = ""
 
     @property
     def matches(self) -> bool:
@@ -371,6 +378,7 @@ class VerificationOutcome:
             "prefer_internal": self.prefer_internal,
             "reliability": self.reliability,
             "verified": self.verified,
+            "local_name": self.local_name,
         }
 
 
@@ -733,6 +741,17 @@ async def _run_probe(
             or _("Sonde en echec.")
         )
 
+    # Le monde courant est sauvegarde avant la sonde : une inspection en
+    # echec ou muette ne doit ni effacer les candidates deja vues, ni
+    # re-ancrer les vues sur un payload partiel (crop, erreur).
+    snapshot = {
+        "candidates": list(world.candidates),
+        "views": dict(world.views),
+        "view_meta": dict(world.view_meta),
+        "media": list(world.media),
+        "payload": world.payload,
+        "raw": world.raw,
+    }
     payload, media_assets = extract_media_assets(tools_mgr, probe.tool, payload)
     if registry is not None and contract is not None and isinstance(payload, dict):
         payload, _count = project_target_payload(
@@ -747,6 +766,19 @@ async def _run_probe(
         disclosure=disclosure,
     )
     produced_keys = [candidate.key for candidate in world.candidates]
+    if failed or not produced_keys:
+        # Sonde en echec ou sans candidate : on conserve l'ancien monde.
+        # Le nouveau payload est ecarte, pas fusionne : une vue issue d'un
+        # crop ne doit pas remplacer la vue d'ecran complete.
+        world.candidates = snapshot["candidates"]
+        world.views = snapshot["views"]
+        world.view_meta = snapshot["view_meta"]
+        world.media = snapshot["media"]
+        world.payload = snapshot["payload"]
+        world.raw = snapshot["raw"]
+        if failed:
+            # Rien de fiable n'a ete produit : ne pas annoncer de cles.
+            produced_keys = []
     return ProbeRecord(
         probe_id=probe.id,
         kind=probe.kind,
@@ -1004,6 +1036,7 @@ async def _verify_target(
     Cout borne : UN appel, jamais de boucle.
     """
     scope = str(getattr(entry, "scope", "") or "")
+    local_name = str(getattr(entry, "local_name", "") or "")
     reliability = effective_reliability(disclosure, contract, scope)
     caps = set(_declared_evidence(disclosure))
     description = str(getattr(entry, "description", "") or "").strip()
@@ -1019,6 +1052,7 @@ async def _verify_target(
             next="accept",
             reliability=reliability,
             verified=False,
+            local_name=local_name,
         )
 
     evidence = build_target_evidence(entry, world, disclosure)
@@ -1046,6 +1080,7 @@ async def _verify_target(
             next="accept",
             reliability=reliability,
             verified=False,
+            local_name=local_name,
         )
     if isinstance(verdict, TargetVerification):
         parsed = verdict
@@ -1060,6 +1095,7 @@ async def _verify_target(
                 next="accept",
                 reliability=reliability,
                 verified=False,
+                local_name=local_name,
             )
     verdict_value = parsed.effective_verdict()
     confidence = str(getattr(parsed, "confidence", "") or "").strip().lower()
@@ -1077,6 +1113,7 @@ async def _verify_target(
             prefer_internal=str(getattr(parsed, "prefer_internal", "") or "").strip(),
             reliability=reliability,
             verified=True,
+            local_name=local_name,
         )
     if verdict_value == "uncertain":
         return VerificationOutcome(
@@ -1087,6 +1124,7 @@ async def _verify_target(
             prefer_internal=str(getattr(parsed, "prefer_internal", "") or "").strip(),
             reliability=reliability,
             verified=True,
+            local_name=local_name,
         )
     return VerificationOutcome(
         verdict="mismatch",
@@ -1096,6 +1134,7 @@ async def _verify_target(
         prefer_internal=str(getattr(parsed, "prefer_internal", "") or "").strip(),
         reliability=reliability,
         verified=True,
+        local_name=local_name,
     )
 
 
@@ -1199,6 +1238,9 @@ async def resolve_target(
     # Doutes non bloquants et trace de verification, portes jusqu'au resultat.
     warnings: List[str] = []
     verification_trace: Optional[Dict[str, Any]] = None
+    # Tous les verdicts de la boucle (mismatch initial inclus). `warnings`
+    # reste global ; l'observabilite les rattache au dernier verdict.
+    verifications: List[Dict[str, Any]] = []
     verifier_hint = ""
 
     # P2-10 : une correspondance exacte ET unique avec la question (ou un
@@ -1217,6 +1259,7 @@ async def resolve_target(
                 ).format(q=question[:120]),
                 world=world,
                 strategy="deterministic",
+                verifications=verifications,
             )
 
     for _round in range(budget + 1):
@@ -1239,6 +1282,7 @@ async def resolve_target(
                 world=world,
                 error_code="TARGET_NOT_FOUND",
                 error_message=_("Selection de cible impossible : reponse invalide."),
+                verifications=verifications,
             )
 
         request = _probe_request(decision, disclosure) if allow_probes else None
@@ -1264,6 +1308,7 @@ async def resolve_target(
                         verifier_hint=verifier_hint,
                     )
                     verification_trace = _outcome.as_dict()
+                    verifications.append(verification_trace)
                     _label = str(
                         getattr(_entry, "description", "") or _key
                     )[:120]
@@ -1326,25 +1371,13 @@ async def resolve_target(
                                             message=_error,
                                         )
                                     )
-                                # Le selecteur doit voir l'ANCIENNE candidate ET
-                                # les cibles internes proposees. Un zoom hote
-                                # peut ne renvoyer que les internes : on remet
-                                # l'ancienne, si elle est encore active.
-                                try:
-                                    _known = {
-                                        c.key for c in world.candidates
-                                    }
-                                    if (
-                                        registry is not None
-                                        and _key not in _known
-                                    ):
-                                        _old = registry.get(_key)
-                                        if _old is not None and _old.active:
-                                            world.candidates.append(
-                                                _observed_candidate(_old)
-                                            )
-                                except Exception:
-                                    pass
+                                # Politique de zoom (option B) : si la sonde a
+                                # reussi ET produit des candidates, le nouveau
+                                # monde fait foi et l'ancienne candidate n'est
+                                # PAS re-ajoutee. Si elle a echoue ou n'a rien
+                                # produit, `_run_probe` a restaure l'ancien
+                                # monde : les references restees valides
+                                # demeurent visibles.
                             _hint = _outcome.reason or _reason
                             _prefer = str(
                                 getattr(_outcome, "prefer_internal", "") or ""
@@ -1385,6 +1418,7 @@ async def resolve_target(
                             reason=_reason,
                             warnings=warnings,
                             verification=verification_trace,
+                            verifications=verifications,
                         )
             break
 
@@ -1399,6 +1433,7 @@ async def resolve_target(
                     "La sonde '{id}' a deja ete demandee pour ce sujet : "
                     "inspection repetee refusee."
                 ).format(id=probe.id),
+                verifications=verifications,
             )
         used.add(marker)
         budget -= 1
@@ -1434,6 +1469,7 @@ async def resolve_target(
             error_message=_("Selection de cible impossible."),
             warnings=warnings,
             verification=verification_trace,
+            verifications=verifications,
         )
 
     key = (decision.target_key or "").strip().strip("\"'")
@@ -1459,6 +1495,7 @@ async def resolve_target(
             error_message=message,
             warnings=warnings,
             verification=verification_trace,
+            verifications=verifications,
         )
 
     if len(key) > MAX_RAW_ANCHOR_CHARS:
@@ -1471,6 +1508,7 @@ async def resolve_target(
                 "Valeur de cible brute trop longue ({size} caracteres, "
                 "maximum {limit})."
             ).format(size=len(key), limit=MAX_RAW_ANCHOR_CHARS),
+            verifications=verifications,
         )
 
     if kind == TARGET_KIND_ANCHOR:
@@ -1489,6 +1527,7 @@ async def resolve_target(
                     "Une ancre brute a ete choisie mais l'hote n'en declare "
                     "aucune pour cette etape."
                 ),
+                verifications=verifications,
             )
         if anchor_kind not in declared:
             return TargetingResult(
@@ -1503,6 +1542,7 @@ async def resolve_target(
                     kind=anchor_kind or "?",
                     known=", ".join(declared),
                 ),
+                verifications=verifications,
             )
         return TargetingResult(
             kind=TARGET_KIND_ANCHOR,
@@ -1512,6 +1552,7 @@ async def resolve_target(
             world=world,
             warnings=warnings,
             verification=verification_trace,
+            verifications=verifications,
         )
 
     entry = world.find_entry(registry, key)
@@ -1522,6 +1563,7 @@ async def resolve_target(
             world=world,
             error_code="TARGET_NOT_FOUND",
             error_message=_("Cle locale inconnue : {key!r}").format(key=key[:120]),
+            verifications=verifications,
         )
     return TargetingResult(
         kind=TARGET_KIND_LOCAL,
@@ -1530,4 +1572,5 @@ async def resolve_target(
         world=world,
         warnings=warnings,
         verification=verification_trace,
+        verifications=verifications,
     )

@@ -13,6 +13,7 @@ l'hote (arguments resolus) et sur ce qui reste visible du LLM (nom local).
 """
 
 import asyncio
+import copy
 import os
 import sys
 
@@ -222,6 +223,38 @@ def real_manifest():
     }
 
 
+def real_manifest_2026_11_10():
+    """Manifeste réel CondiFlow du 10/11/2026 (différences vérifiées).
+
+    Le socle (consommateurs, producteurs, sondes, vues, ancres) est identique
+    au 06/11. Cette version déclare en plus :
+      - `disclosure.reliability = "low"` ;
+      - `disclosure.evidence = ["metadata", "rect", "nested_targets"]`
+        (`image` volontairement absent) ;
+      - `disclosure.zoom_probe = "focus_candidate"` ;
+      - `anchors[cell].reliability = "high"` ;
+      - `produces[target].reliability = "high"` ;
+      - `vision.returns = [image_base64]`.
+    """
+    manifest = copy.deepcopy(real_manifest())
+    vision = manifest["tools"][0]
+    disclosure = vision["target_contract"]["disclosure"]
+    disclosure["reliability"] = "low"
+    disclosure["evidence"] = ["metadata", "rect", "nested_targets"]
+    disclosure["zoom_probe"] = "focus_candidate"
+    for anchor in disclosure["anchors"]:
+        if anchor["kind"] == "cell":
+            anchor["reliability"] = "high"
+    vision["returns"] = [{
+        "field": "image_base64",
+        "asset": "image/jpeg",
+        "description": "Photo (image/annotated/zoom).",
+    }]
+    target = manifest["tools"][1]
+    target["target_contract"]["produces"][0]["reliability"] = "high"
+    return manifest
+
+
 class ScriptedLlm:
     def __init__(self, decisions):
         self.decisions = list(decisions)
@@ -258,7 +291,7 @@ def _grid_and_presets(elements=False):
     return {"result": True, "data": data}
 
 
-def _make_sim():
+def _make_sim(manifest=None):
     from host_sim import HostSim
 
     def vision(args):
@@ -284,12 +317,12 @@ def _make_sim():
         "keyboard": {"result": True, "data": {"typed": True}},
     })
     sim.runtime_state._solver_registry_for_tools = {}
-    asyncio.run(sim.register_manifest(real_manifest()))
+    asyncio.run(sim.register_manifest(manifest or real_manifest()))
     return sim
 
 
-def _run(plan_args, llm):
-    sim = _make_sim()
+def _run(plan_args, llm, manifest=None):
+    sim = _make_sim(manifest)
     sim.runtime_state._tools_llm = llm
     out = asyncio.run(IT.perceive_action(plan_args, sim.runtime_state))
     return sim, out, llm
@@ -437,6 +470,66 @@ def test_sonde_inspect_cell_puis_ancre():
     ]
     assert inspections[0]["arguments"]["cell"] == "B3"
     assert _call(sim, "target")["arguments"]["cell"] == "B3"
+    assert _call(sim, "mouse")["arguments"]["target"] == "ui:3"
+
+
+def test_manifeste_10_11_declare_fiabilite_preuves_et_zoom():
+    manifest = real_manifest_2026_11_10()
+    vision = manifest["tools"][0]
+    parsed = parse_target_contract(
+        vision["target_contract"],
+        tool_name="vision",
+        parameters_schema=vision["parameters"],
+    )
+    assert parsed.ok, parsed.errors
+    assert not parsed.warnings
+    disclosure = parsed.contract.disclosure
+    assert disclosure.reliability == "low"
+    assert disclosure.evidence == ("metadata", "rect", "nested_targets")
+    assert disclosure.zoom_probe == "focus_candidate"
+    assert disclosure.anchor("cell").reliability == "high"
+
+    target = manifest["tools"][1]
+    parsed_target = parse_target_contract(
+        target["target_contract"],
+        tool_name="target",
+        parameters_schema=target["parameters"],
+    )
+    assert parsed_target.ok, parsed_target.errors
+    assert parsed_target.contract.producers[0].reliability == "high"
+
+
+def test_manifeste_10_11_focus_candidate_puis_decision():
+    llm = ScriptedLlm([
+        lambda prompt: {
+            "target_key": "",
+            "target_kind": "local",
+            "reason": "creuser la candidate",
+            "discovery_request": {
+                "goal": "identifier le bouton OK",
+                "data_type": "targeting",
+                "targets": [_local_key(prompt, "Bouton OK")],
+                "technical_goals": ["focus_candidate"],
+            },
+        },
+        lambda prompt: {
+            "target_key": _local_key(prompt, "Bouton OK"),
+            "target_kind": "local",
+            "reason": "candidate confirmee",
+        },
+    ])
+    sim, out, _ = _run(_PLAN, llm, manifest=real_manifest_2026_11_10())
+    assert out["result"] is True, out
+
+    inspections = [
+        call for call in sim.host_calls
+        if call["tool_name"] == "vision"
+        and call["arguments"].get("mode") == "inspect"
+    ]
+    assert len(inspections) == 1
+    assert inspections[0]["arguments"]["preset"] == "t1"
+    assert inspections[0]["arguments"]["with_image"] is True
+    assert _call(sim, "target")["arguments"]["preset"] == "t1"
     assert _call(sim, "mouse")["arguments"]["target"] == "ui:3"
 
 

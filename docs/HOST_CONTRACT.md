@@ -457,13 +457,20 @@ contrat reste en `version: 1` ; `disclosure` est optionnel et non cassant.
   Profil **déclaré** de fiabilité des cibles. Il choisit la profondeur de
   vérification : `high` = légère, `medium` = standard, `low` = approfondie et
   zoom automatique. Surcharges possibles : `produces[].reliability` et
-  `anchors[].reliability` (le plus spécifique gagne). Absent = comportement
-  actuel, aucune régression.
+  `anchors[].reliability` (le plus spécifique gagne). Ces surcharges ne
+  s'appliquent qu'aux **candidates projetées** (celles lues via `produces`) :
+  une ancre brute choisie directement n'est pas vérifiée par le moteur actuel,
+  donc sa surcharge `anchors[].reliability` est sans effet pour l'instant.
+  Absent = comportement actuel, aucune régression.
 - `evidence` (optionnel) : liste de types de preuve que l'hôte sait joindre à
   une candidate. Valeurs : `metadata` (défaut), `image`, `rect`,
   `nested_targets`, `invariants`. Ce ne sont **pas des noms d'outils** : le
   cerveau ne lit que les preuves réellement présentes. Les images passent par
-  le canal média, jamais en base64 dans le prompt.
+  le canal média, jamais en base64 dans le prompt. `nested_targets` désigne
+  les **autres candidates visibles du monde courant**, pas une structure
+  imbriquée : selon l'hôte, elles peuvent être internes au conteneur choisi ou
+  simplement présentes sur l'écran. L'hôte n'a donc rien de particulier à
+  fournir pour ce type.
 - `zoom_probe` (optionnel) : `id` d'une sonde de `probes[]` qui inspecte une
   **candidate locale** (`subject.kind = "local"`). Le harnais l'utilise pour un
   zoom implicite après un verdict `mismatch` : il réinterroge le sélecteur sur

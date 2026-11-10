@@ -92,7 +92,7 @@
                     "reliability": {
                       "type": "string",
                       "enum": ["high", "medium", "low"],
-                      "description": "Optional reliability override for targets produced here. Absent = disclosure.reliability (default medium). Selects how deep target verification goes: high = light, medium = standard, low = deep + automatic zoom."
+                      "description": "Optional reliability override for targets produced here. Applies only to projected candidates read via this producer. Absent = disclosure.reliability (default medium). Selects how deep target verification goes: high = light, medium = standard, low = deep + automatic zoom."
                     }
                   },
                   "additionalProperties": true
@@ -111,7 +111,7 @@
                   },
                   "anchors": {
                     "type": ["object", "array"],
-                    "description": "Raw anchor kinds the host accepts. Object form: {kind: consumer_param}; array form: [{kind, param, description, reliability?}]. `kind` is HOST vocabulary (cell, file, key, joint...). `reliability` overrides the global profile for this kind.",
+                    "description": "Raw anchor kinds the host accepts. Object form: {kind: consumer_param}; array form: [{kind, param, description, reliability?}]. `kind` is HOST vocabulary (cell, file, key, joint...). `reliability` only affects projected candidates whose scope matches this kind; a raw anchor chosen directly is not verified by the current engine.",
                     "additionalProperties": true
                   },
                   "reliability": {
@@ -125,7 +125,7 @@
                       "type": "string",
                       "enum": ["metadata", "image", "rect", "nested_targets", "invariants"]
                     },
-                    "description": "Optional evidence types the host can attach to a candidate. Default [metadata]. These are NOT tool names: the brain only reads what is actually present. Images travel through the media channel, never base64 in the text prompt."
+                    "description": "Optional evidence types the host can attach to a candidate. Default [metadata]. These are NOT tool names: the brain only reads what is actually present. Images travel through the media channel, never base64 in the text prompt. `nested_targets` means the other visible candidates of the current world, not a nested structure: they may be inner to the chosen container or simply present on screen. The host needs no extra data for it."
                   },
                   "zoom_probe": {
                     "type": "string",
