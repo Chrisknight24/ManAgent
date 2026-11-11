@@ -943,7 +943,7 @@ _CONTROL_CHARS = ("\n", "\r", "\t")
 def find_embedded_control_chars(plan: Any, tools_mgr: Any = None) -> List[str]:
     """Refuse un saut de ligne/onglet encodé dans un argument `text`.
 
-    Un clavier reçoit UNE frappe par appel : `text="AutoCUse\\n"` tape le
+    Un clavier reçoit UNE frappe par appel : `text="Bonjour\\n"` tape le
     caractère de contrôle au lieu de valider. L'outil réussit (`typed: true`),
     puis l'étape suivante échoue sans que la cause soit visible (mission
     YouTube, tentative 3 : `characters_sent: 9`).

@@ -73,9 +73,9 @@ class Checkpoint:
 class ExecutionEnvironment:
     """
     Spécification agnostique de l'environnement d'exécution requis par un Skill.
-    ManAgent est 100% neutre et indépendant de l'hôte (qu'il s'agisse d'un PC client
-    avec AutoCUse, d'un serveur Linux distant, d'une machine virtuelle, d'un conteneur
-    headless ou d'un terminal mobile).
+    ManAgent est 100% neutre et indépendant de l'hôte (qu'il s'agisse d'un PC client,
+    d'un serveur Linux distant, d'une machine virtuelle, d'un conteneur headless ou
+    d'un terminal mobile).
     
     L'hôte envoie son empreinte d'environnement (`host_env` sous forme de dictionnaire clé/valeur).
     ManAgent procède à un filtrage rigide, froid et déterministe entre les exigences

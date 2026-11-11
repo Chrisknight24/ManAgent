@@ -1255,13 +1255,13 @@ async def resolve_target(
     # attribut declare) est resolue sans appel de selection. Conserve le
     # determinisme, economise un appel LLM, et n'introduit aucune guess :
     # des qu'il y a ambiguite ou similarite, le selecteur garde la main.
-    preset = exact_candidate(world, question) if deterministic else None
-    if preset is not None and registry is not None:
-        preset_entry = world.find_entry(registry, preset.key)
-        if preset_entry is not None:
+    exact = exact_candidate(world, question) if deterministic else None
+    if exact is not None and registry is not None:
+        exact_entry = world.find_entry(registry, exact.key)
+        if exact_entry is not None:
             return TargetingResult(
                 kind=TARGET_KIND_LOCAL,
-                entry=preset_entry,
+                entry=exact_entry,
                 reason=_(
                     "Correspondance exacte unique avec « {q} »."
                 ).format(q=question[:120]),

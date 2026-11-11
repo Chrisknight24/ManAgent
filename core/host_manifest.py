@@ -2,7 +2,7 @@
 core/host_manifest.py
 ====================
 Contrats de données et validation pour le Host Manifest (déclaration dynamique de l'hôte).
-ManAgent reste 100% générique et agnostique vis-à-vis de l'application hôte (ex: AutoCUse RPA ou autre).
+ManAgent reste 100% générique et agnostique vis-à-vis de l'application hôte (RPA, IDE, robot, tableur, computer-use...).
 L'hôte peut annoncer dynamiquement :
 - Son OS et environnement d'exécution
 - Ses outils matériels/externes

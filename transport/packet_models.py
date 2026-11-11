@@ -2,7 +2,7 @@
 transport/packet_models.py
 ==========================
 Modèles de paquets de transport (Request, Response, Error) et paquets d'événements normalisés.
-Garantit que les échanges entre l'Hôte (ex: AutoCUse RPA ou autre) et ManAgent sont structurés,
+Garantit que les échanges entre l'Hôte (RPA, IDE, robot, tableur, computer-use...) et ManAgent sont structurés,
 agnostiques et typés.
 
 Utilise pydantic si disponible, avec fallback gracieux sur dataclasses en environnement sans dépendance externe.

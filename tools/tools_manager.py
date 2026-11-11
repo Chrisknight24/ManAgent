@@ -506,7 +506,8 @@ class ToolsManager(Entity):
 
     def register_host_manifest(self, manifest_data: Any) -> HostManifest:
         """
-        Enregistre ou met à jour le manifeste dynamique de l'hôte (AutoCUse RPA ou autre).
+        Enregistre ou met à jour le manifeste dynamique de l'hôte (RPA, IDE, robot,
+        tableur, computer-use...).
         Permet à l'application hôte d'annoncer ses capacités et ses outils de manière
         totalement agnostique et dynamique.
         """

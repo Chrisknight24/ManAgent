@@ -254,8 +254,8 @@ def _wire_value(value: Any, wire_type: Optional[str]) -> Any:
     Certains hotes declarent le parametre consommateur en `type: "string"`
     tout en renvoyant une reference objet (`{kind, id}`) : envoyer l'objet
     contredit leur propre schema (gate `TARGET_REQUIRED`, mission 008bcdba).
-    La forme `"<kind>:<id>"` est acceptee par `s_parseTargetRef`
-    (rpahosttools.cpp:290-298). Tout le reste est transmis inchange.
+    La forme `"<kind>:<id>"` est un encodage texte neutre, accepte par un
+    parametre declare `string` ; tout le reste est transmis inchange.
     """
     if wire_type != "string" or isinstance(value, str):
         return value
@@ -703,7 +703,7 @@ def _parse_probe(item: Any, *, index: int, error, warning, seen_ids: set) -> Opt
 
     unknown = set(item) - {
         "id", "kind", "description", "tool", "args", "hint_param",
-        "subject", "produces",
+        "subject", "produces", "preserves_references",
     }
     for key in sorted(unknown):
         warning(f"disclosure.probes[{index}] has unknown key: {key}")

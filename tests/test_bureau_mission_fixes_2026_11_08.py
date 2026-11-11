@@ -550,6 +550,33 @@ def test_alignment_failure_prefere_le_champ_observed(monkeypatch):
     assert "image_base64" not in observed
 
 
+def test_alignment_failure_compacte_les_charges_volumineuses(monkeypatch):
+    """La compaction est structurelle (taille), jamais par nom de champ."""
+    events = _capture_events(monkeypatch)
+    payload = "A" * 10000
+    IT._emit_alignment_failure(
+        None,
+        tool="perceive_understand",
+        question="q",
+        source="vision",
+        out={
+            "result": False,
+            "data": {
+                "payload_sans_nom_connu": payload,
+                "note_courte": "emplacement vide",
+                "imbrique": {"indice": "vide"},
+            },
+        },
+    )
+    observed = events[0]["observed"]
+    # Compaction generique : aucune charge volumineuse, mais le fait utile reste.
+    assert payload not in observed
+    assert "note_courte=emplacement vide" in observed
+    assert "indice=vide" in observed
+    assert "texte omis" in observed
+    assert len(observed) <= 500
+
+
 # ---------------------------------------------------------------------------
 # 8. Caractere de controle : avertissement, plus un refus dur
 # ---------------------------------------------------------------------------

@@ -172,6 +172,25 @@ def test_disclosure_preserves_references_optionnel():
     assert contract.disclosure.probe("zoomer").preserves_references is True
 
 
+def test_disclosure_preserves_references_sans_warning():
+    result = parse_target_contract(
+        _raw_contract(disclosure=_zoom_disclosure(preserves_references=True)),
+        tool_name="scan",
+    )
+    assert result.errors == []
+    assert not [w for w in result.warnings if "unknown key" in w], result.warnings
+    assert result.contract.disclosure.probe("zoomer").preserves_references is True
+
+
+def test_disclosure_preserves_references_doit_etre_booleen():
+    disclosure = _zoom_disclosure()
+    disclosure["probes"][0]["preserves_references"] = "oui"
+    result = parse_target_contract(
+        _raw_contract(disclosure=disclosure), tool_name="scan"
+    )
+    assert any("preserves_references" in error for error in result.errors)
+
+
 def test_disclosure_absent_keeps_historical_behavior():
     contract = _contract(_raw_contract())
     assert contract.disclosure is None

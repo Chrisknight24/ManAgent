@@ -964,6 +964,55 @@ def _canonical_target(entry: TargetEntry) -> Dict[str, str]:
     }
 
 
+_MAX_OBSERVED_VALUE = 160
+_MAX_OBSERVED_DEPTH = 3
+_MAX_OBSERVED_TOTAL = 500
+
+
+def _compact_observed(value: Any, *, depth: int = 0) -> str:
+    """Resume generique d'une charge observee, sans connaitre aucun champ hote.
+
+    La regle est structurelle (type + taille) : le texte court est conserve,
+    tout ce qui est volumineux (image encodee, tampon binaire, grille geante,
+    structure profonde) est remplace par un marqueur de taille. Elle vaut donc
+    pour tout hote (IDE, robot, tableur, computer-use) sans coder en dur un
+    nom de champ comme `image_base64` ou `grid`.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, (bytes, bytearray)):
+        return f"[binaire omis : {len(value)} octets]"
+    if isinstance(value, str):
+        text = value.strip()
+        if len(text) > _MAX_OBSERVED_VALUE:
+            return f"[texte omis : {len(text)} car.]"
+        return text
+    if depth >= _MAX_OBSERVED_DEPTH:
+        return "[structure omise]"
+    if isinstance(value, dict):
+        parts = []
+        for key, item in value.items():
+            compact = _compact_observed(item, depth=depth + 1)
+            if compact:
+                parts.append(f"{key}={compact}")
+        return "{" + ", ".join(parts) + "}"
+    if isinstance(value, (list, tuple, set)):
+        parts = [
+            compact
+            for compact in (_compact_observed(item, depth=depth + 1) for item in value)
+            if compact
+        ]
+        return "[" + ", ".join(parts) + "]"
+    text = str(value).strip()
+    if len(text) > _MAX_OBSERVED_VALUE:
+        return f"[texte omis : {len(text)} car.]"
+    return text
+
+
 def _emit_alignment_failure(runtime_state, *, tool: str, question: str, source: str, out: Dict[str, Any]) -> None:
     """Trace un `false` de perception comme echec d'ALIGNEMENT, pas une panne.
 
@@ -983,32 +1032,21 @@ def _emit_alignment_failure(runtime_state, *, tool: str, question: str, source: 
         except Exception:
             pass
         # `observed` porte ce que l'analyse a RÉELLEMENT vu (texte). Le
-        # `data` brut peut contenir la grille et l'image base64 : le préférer
-        # noyait le fait utile dans les 500 premiers caractères (mission
-        # bureau, événements alignment_failure illisibles).
+        # `data` brut peut contenir des charges volumineuses (image encodee,
+        # tampon binaire, grille geante) : la compaction generique les omet
+        # sans supposer le nom d'un champ (mission bureau, evenements
+        # alignment_failure illisibles).
         observed = out.get("observed")
         if observed in (None, "", [], {}):
             observed = out.get("message") or out.get("error_reason")
         if observed in (None, "", [], {}):
             observed = out.get("data")
-        observed_text = str(observed or "")
-        if "image_base64" in observed_text or "'grid'" in observed_text:
-            try:
-                payload = out.get("data")
-                if isinstance(payload, dict):
-                    trimmed = {
-                        key: value
-                        for key, value in payload.items()
-                        if key not in ("image_base64", "grid")
-                    }
-                    observed_text = str(trimmed)
-            except Exception:
-                pass
+        observed_text = _compact_observed(observed)
         fields = {
             "tool": tool,
             "question": str(question or "")[:300],
             "source": str(source or "")[:120],
-            "observed": observed_text[:500],
+            "observed": observed_text[:_MAX_OBSERVED_TOTAL],
             "reason": str(out.get("error_reason") or out.get("message") or "")[:300],
         }
         if mission_id:
