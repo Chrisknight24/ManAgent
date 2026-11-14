@@ -567,3 +567,118 @@ def test_producteur_direct_match_autorise_le_binding(tmp_path):
     binding = solver.variable_registry["option_tri"]
     assert binding["type"] == "target"
     assert "raw-ref-f1" not in json.dumps(binding)
+
+
+# ---------------------------------------------------------------------------
+# 5. La cible PRODUITE expose ses faits declares au verificateur
+# ---------------------------------------------------------------------------
+
+
+def _enriched_single_contract():
+    """Producteur dont `data.target` porte des faits declares (invariants)."""
+    return _contract({
+        "version": 1,
+        "produces": [{
+            "path": "data.target",
+            "mode": "single",
+            "scope": "ui_element",
+            "fields": {
+                "ref": "ref",
+                "description": "label",
+                "correlation_id": "corr",
+                "generation": "gen",
+                "attributes": {
+                    "kind": "kind",
+                    "rect": "rect",
+                    "point": "point",
+                    "kind_reason": "kind_reason",
+                    "invariants": "invariants",
+                    "selection": "selection",
+                },
+            },
+        }],
+        "disclosure": {
+            "version": 1,
+            "reliability": "high",
+            "evidence": ["metadata", "rect", "nested_targets", "invariants"],
+        },
+    }, tool_name="target")
+
+
+def _enriched_payload():
+    return {"result": True, "data": {"target": {
+        "ref": {"kind": "ui", "id": "9"},
+        "label": "chats.json - Raccourci",
+        "corr": "c1",
+        "gen": 1,
+        "kind": "shortcut",
+        "rect": [500, 30, 64, 20],
+        "point": [532, 39],
+        "kind_reason": "uia_control_type",
+        "invariants": {
+            "provenance": "foreground_fallback",
+            "window": "desktop",
+            "rect_semantics": "uia_bounds",
+            "action_point": "center",
+            "enumerable": True,
+        },
+        "selection": {
+            "chosen": "chats.json (ListItem)",
+            "reason": "contains_center_deepest",
+            "role_changed": True,
+            "candidates": [{"name": "chats.json", "role": "ListItem", "score": 4, "accepted": True}],
+        },
+    }}}
+
+
+def test_cible_produite_expose_ses_faits_declares_au_verificateur():
+    from core.target_ingress import collect_projected_targets
+
+    contract = _enriched_single_contract()
+    registry = TargetRegistry()
+    payload = _enriched_payload()
+    projected, _count = project_target_payload(registry, contract, payload)
+    entries = collect_projected_targets(registry, contract, projected)
+    assert len(entries) == 1
+    entry = entries[0]
+    # La projection lit bien `fields.attributes` sur la cible produite.
+    assert entry.attributes.get("invariants", {}).get("provenance") == "foreground_fallback"
+    assert entry.attributes.get("selection", {}).get("role_changed") is True
+
+    llm = _ScriptedLlm(
+        selections=[],
+        verifications=[{
+            "verdict": "match",
+            "confidence": "high",
+            "reason": "cible demandee",
+        }],
+    )
+    runtime = types.SimpleNamespace(
+        tools_manager=_Manager(contracts={"target": contract}),
+        target_registry=registry,
+        _solver_registry_for_tools={},
+        _tools_llm=llm,
+        language="fr",
+        target_verification_enabled=True,
+        target_gate_enabled=True,
+    )
+    outcome, error = asyncio.run(IT._gate_produced_target(
+        runtime,
+        entry=entry,
+        question="ouvre le fichier chats.json",
+        contract=contract,
+        payload=projected,
+        media_assets=None,
+        disclosure=contract.disclosure,
+        source="target",
+    ))
+    assert error is None
+    assert outcome.verdict == "match"
+    # Les faits declares atteignent reellement le verificateur, sans qu'aucune
+    # cle d'hote ne soit codee en dur cote cerveau.
+    prompt = llm.prompts[-1]
+    assert "foreground_fallback" in prompt
+    assert "uia_bounds" in prompt
+    assert "role_changed" in prompt
+    assert "shortcut" in prompt
+    assert "532" in prompt

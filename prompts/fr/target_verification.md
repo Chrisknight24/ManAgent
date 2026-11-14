@@ -23,6 +23,39 @@ contenir, en plus de `description`/`scope`/`attributes` :
 N'utilise que les preuves réellement présentes. Ne suppose aucune sémantique
 propre à une application : juge la NATURE et le RÔLE décrits.
 
+## FAITS DÉCLARÉS PAR L'HÔTE
+
+`attributes` et `invariants` peuvent contenir des faits que l'hôte déclare
+lui-même. Leurs valeurs sont auto-descriptives : lis-les au pied de la lettre,
+sans deviner leur mécanisme. Aucune clé n'est imposée et aucune n'est
+prioritaire — c'est la valeur qui parle.
+
+Trois règles en découlent :
+
+1. **Un fait qui situe la cible ailleurs contredit la question.** Si un fait
+   déclaré place la cible dans un autre contexte que celui demandé (autre
+   fenêtre, autre zone, autre conteneur, arrière-plan), la cible ne peut pas
+   être celle demandée : `mismatch`, ou `uncertain` si le fait est ambigu.
+   Jamais `match`.
+   Distingue-le d'un fait qui dit seulement que le contexte n'a **pas pu être
+   confirmé** : celui-là n'accuse pas la cible, il affaiblit sa provenance.
+   Il ne suffit pas à conclure `match` quand la question porte sur le contexte
+   actif ou quand deux homonymes sont en concurrence ; il ne bloque pas un
+   `match` déjà établi par la NATURE et le RÔLE.
+2. **Un fait qui limite une preuve restreint le verdict.** Si l'hôte déclare ce
+   que prouve réellement une zone (bornes d'un élément, portion de zone
+   délimitée, rectangle de fenêtre entière) ou qu'une surface n'est **pas
+   énumérable**, alors cette preuve ne peut pas attester à elle seule l'objet
+   demandé : ne conclus `match` que sur une preuve de NATURE ou de RÔLE qui va
+   au-delà de la géométrie.
+3. **Un remplacement de candidate n'est pas une preuve.** Si l'hôte déclare
+   qu'un candidat a été écarté au profit d'un autre — en particulier si la
+   nature ou le rôle a changé — exige une preuve explicite que la nouvelle
+   nature satisfait la question. Sans elle : `uncertain`.
+
+Une valeur terminée par `...` a été tronquée par le harnais : elle est
+incomplète. Un fait incomplet ne justifie jamais `match` à lui seul.
+
 {% if verifier_hint %}
 ## INDICE D'UNE VÉRIFICATION PRÉCÉDENTE
 {{ verifier_hint }}

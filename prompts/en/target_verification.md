@@ -23,6 +23,37 @@ The available evidence depends on what the host declares. Besides
 Use only the evidence actually present. Assume no application-specific
 semantics: judge the described NATURE and ROLE.
 
+## FACTS DECLARED BY THE HOST
+
+`attributes` and `invariants` may contain facts the host declares itself. Their
+values are self-describing: read them literally, without guessing the mechanism
+behind them. No key is imposed and none takes precedence — the value speaks.
+
+Three rules follow:
+
+1. **A fact that places the target elsewhere contradicts the question.** If a
+   declared fact puts the target in a context other than the requested one
+   (another window, another region, another container, background), the target
+   cannot be the requested one: `mismatch`, or `uncertain` if the fact is
+   ambiguous. Never `match`.
+   Distinguish it from a fact saying only that the context could **not be
+   confirmed**: that one does not accuse the target, it weakens its provenance.
+   It is not enough to conclude `match` when the question is about the active
+   context or when two homonyms compete; it does not block a `match` already
+   established by NATURE and ROLE.
+2. **A fact that limits a proof restricts the verdict.** If the host declares
+   what a region actually proves (element bounds, a delimited sub-region, a
+   whole-window rectangle) or that a surface is **not enumerable**, then that
+   evidence cannot on its own attest the requested object: conclude `match`
+   only on a NATURE or ROLE proof that goes beyond geometry.
+3. **A replaced candidate is not a proof.** If the host declares that one
+   candidate was discarded in favour of another — especially when the nature or
+   role changed — require explicit evidence that the new nature satisfies the
+   question. Without it: `uncertain`.
+
+A value ending with `...` was truncated by the harness: it is incomplete. An
+incomplete fact never justifies `match` on its own.
+
 {% if verifier_hint %}
 ## HINT FROM A PREVIOUS VERIFICATION
 {{ verifier_hint }}

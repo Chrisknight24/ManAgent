@@ -25,7 +25,9 @@ Versioning: [Semantic Versioning](https://semver.org/).
   is consumed and the selector re-decides once with the observed world.
 - `target_selection` / `target_verification` prompts (base/fr/en) state
   explicitly that an anchor is not a proof and that a doubt never authorizes
-  an action.
+  an action, and that host-declared facts in `attributes`/`invariants`
+  (context, proof scope, enumerability, replaced candidate, truncated value)
+  constrain the verdict instead of decorating it.
 - README rewritten as an English entry point, with a French mirror
   (`README.fr.md`) and accurate install/run/docs sections.
 - `HOST_CONTRACT` FR/EN are now aligned on the same section numbers; the
