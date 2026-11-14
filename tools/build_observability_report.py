@@ -883,6 +883,7 @@ SOLVER_LIFECYCLE_EVENTS = (
     "alignment_failure",
     "target_args_source",
     "target.verification",
+    "target.gate",
     "target.resolve_failed",
     "convergence.check",
 )
@@ -1025,6 +1026,7 @@ TARGET_EVENTS = (
     "target.selected",
     "target.bound",
     "target.verification",
+    "target.gate",
     "target.resolve_failed",
     "target.invalidated",
     "target.purged",
@@ -2994,6 +2996,7 @@ function renderCentralTargets(ep) {
     'target.selected': '🎯 sélectionnée',
     'target.bound': '🔗 liée',
     'target.verification': '✅ vérifiée',
+    'target.gate': '🛡️ gate de preuve',
     'target.resolve_failed': '⛔ résolution échouée',
     'target.invalidated': '🗑️ invalidée',
     'target.purged': '🧹 purgée',
@@ -3089,6 +3092,7 @@ const SOLVER_EVENT_META = {
   alignment_failure: { label: '🎯 Échec d\'alignement', color: 'var(--failure)' },
   target_args_source: { label: '🧩 Sources des arguments de cible', color: 'var(--text-muted)' },
   'target.verification': { label: '✅ Vérification de cible', color: 'var(--primary)' },
+  'target.gate': { label: '🛡️ Gate de preuve', color: 'var(--primary)' },
   'target.resolve_failed': { label: '⛔ Résolution de cible échouée', color: 'var(--failure)' },
   'convergence.check': { label: '🎯 Vérification de convergence', color: 'var(--primary)' },
 };
@@ -3137,6 +3141,13 @@ function lifecycleSummary(ev) {
         ev.verdict ? 'verdict ' + ev.verdict : '',
         ev.reliability ? 'fiabilité ' + ev.reliability : '',
         ev.next ? 'suite ' + ev.next : '',
+        ev.reason || '',
+      ].filter(Boolean).join(' · ');
+    case 'target.gate':
+      return [
+        ev.status || '',
+        ev.verdict ? 'verdict ' + ev.verdict : '',
+        ev.local_name || '',
         ev.reason || '',
       ].filter(Boolean).join(' · ');
     case 'target.resolve_failed':

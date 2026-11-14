@@ -222,6 +222,9 @@ class TargetingResult:
     # l'observabilite ne perde pas l'historique.
     verification: Optional[Dict[str, Any]] = None
     verifications: List[Dict[str, Any]] = field(default_factory=list)
+    # Statut du gate de preuve (`proven`, `unproven`, `contradicted`).
+    # Vide = le gate n'a pas tourne (verification desactivee).
+    gate_status: str = ""
 
     @property
     def ok(self) -> bool:
@@ -625,6 +628,29 @@ def _probe_request(
     targets = list(getattr(request, "targets", None) or [])
     subject = str(targets[0]).strip() if targets else ""
     return probe, subject
+
+
+def _anchor_locator_probe(
+    disclosure: Optional[DisclosureSpec], anchor_kind: str
+) -> Optional[ProbeSpec]:
+    """Sonde declaree qui inspecte un type d'ancre (jamais inventee).
+
+    Quand une ancre brute est consommee par un PRODUCTEUR, elle est un
+    localisateur, pas une preuve : elle designe une zone dont le producteur
+    tirera un objet. Si l'hote declare une inspection pour ce type d'ancre,
+    on l'execute avant de la consommer. Aucun nom d'ancre n'est code en dur :
+    c'est le `subject.kind` de la sonde qui fait foi.
+    """
+    if disclosure is None or not anchor_kind:
+        return None
+    for probe in disclosure.probes:
+        subject = probe.subject
+        if subject is None or subject.kind != anchor_kind:
+            continue
+        if not probe.produces:
+            continue
+        return probe
+    return None
 
 
 def _probe_subject_value(
@@ -1146,6 +1172,78 @@ async def _verify_target(
     )
 
 
+def proof_status(outcome: Optional[VerificationOutcome]) -> str:
+    """Statut de preuve lisible par l'observabilite (jamais une selection).
+
+    - `proven` : le verificateur a confirme la correspondance ;
+    - `contradicted` : il l'a explicitement infirmee ;
+    - `unproven` : aucune preuve positive (doute, panne, preuve absente).
+
+    Le gate ne connait aucune nature d'objet : il ne fait que traduire un
+    verdict en autorisation ou en refus.
+    """
+    if outcome is None:
+        return ""
+    if outcome.verdict == "match":
+        return "proven"
+    if outcome.verdict == "mismatch":
+        return "contradicted"
+    return "unproven"
+
+
+async def verify_final_target(
+    *,
+    llm: Any,
+    question: str,
+    entry: Any,
+    language: str = "fr",
+    tag: str = "target_verification",
+    disclosure: Optional[DisclosureSpec] = None,
+    contract: Optional[TargetContract] = None,
+    world: Optional[ObservedWorld] = None,
+    media_assets: Optional[List[Any]] = None,
+    verifier_hint: str = "",
+) -> VerificationOutcome:
+    """Verifie une cible DEJA PRODUITE (gate post-producteur).
+
+    Un producteur peut rendre `single` : une seule cible, sans concurrence.
+    Une identite stable n'est pas une preuve : ce gate confronte la nature de
+    la cible a la question avec les preuves declarees par la source. Il ne
+    choisit jamais ; `match` autorise la suite, tout le reste la refuse.
+
+    `disclosure` doit etre celui du contrat SOURCE (celui qui declare les
+    preuves : image, rect, cibles internes), pas celui du producteur : le
+    producteur decrit l'identite, la source decrit ce qui est observable.
+    """
+    local_name = str(getattr(entry, "local_name", "") or "")
+    if llm is None:
+        return VerificationOutcome(
+            verdict="uncertain",
+            confidence="low",
+            reason=_("aucun verificateur disponible"),
+            next="reject",
+            verified=False,
+            local_name=local_name,
+        )
+    if world is None:
+        world = ObservedWorld()
+    if media_assets is not None:
+        # Les pixels restent dans le canal media ; le gate ne voit que les
+        # references d'assets declarees par l'hote.
+        world.media = [_media_ref(asset) for asset in media_assets]
+    return await _verify_target(
+        llm=llm,
+        question=question,
+        entry=entry,
+        language=language,
+        tag=tag,
+        disclosure=disclosure,
+        contract=contract,
+        world=world,
+        verifier_hint=verifier_hint,
+    )
+
+
 def extract_media_assets(
     tools_mgr: Any,
     tool_name: str,
@@ -1222,16 +1320,30 @@ async def resolve_target(
     tag: str = "target_selection",
     deterministic: bool = False,
     verify: bool = False,
+    strict: bool = False,
+    anchor_is_locator: bool = False,
+    evidence_disclosure: Optional[DisclosureSpec] = None,
 ) -> TargetingResult:
     """Choisit une cible visible, avec inspections bornees.
 
     Ne leve pas : toute impossibilite est un `TargetingResult` avec un code
     ferme et un message honnete. Aucune cible n'est devinee.
+
+    `strict` transforme un doute en refus : une cible destinee a etre liee ou
+    actionnee doit etre PROUVEE (`match`). `anchor_is_locator` indique que
+    l'ancre choisie sera consommee par un producteur : elle sera inspectee
+    quand l'hote declare une sonde pour ce type d'ancre. `evidence_disclosure`
+    permet de verifier une cible produite avec les preuves du contrat SOURCE.
     """
     if world is None:
         world = ObservedWorld()
+    if strict:
+        # On ne peut pas exiger une preuve sans lancer le verificateur.
+        verify = True
     if disclosure is None and contract is not None:
         disclosure = contract.disclosure
+    if evidence_disclosure is None:
+        evidence_disclosure = disclosure
     if llm is None:
         return TargetingResult(
             kind="none",
@@ -1259,15 +1371,47 @@ async def resolve_target(
     if exact is not None and registry is not None:
         exact_entry = world.find_entry(registry, exact.key)
         if exact_entry is not None:
-            return TargetingResult(
-                kind=TARGET_KIND_LOCAL,
+            if not verify:
+                return TargetingResult(
+                    kind=TARGET_KIND_LOCAL,
+                    entry=exact_entry,
+                    reason=_(
+                        "Correspondance exacte unique avec « {q} »."
+                    ).format(q=question[:120]),
+                    world=world,
+                    strategy="deterministic",
+                    verifications=verifications,
+                )
+            # Une correspondance lexicale reste une HYPOTHESE : le gate doit
+            # la confirmer avant qu'elle devienne une cible actionnable.
+            _outcome = await _verify_target(
+                llm=llm,
+                question=question,
                 entry=exact_entry,
-                reason=_(
-                    "Correspondance exacte unique avec « {q} »."
-                ).format(q=question[:120]),
+                language=language,
+                tag=tag,
+                disclosure=evidence_disclosure,
+                contract=contract,
                 world=world,
-                strategy="deterministic",
-                verifications=verifications,
+                verifier_hint="",
+            )
+            verification_trace = _outcome.as_dict()
+            verifications.append(verification_trace)
+            if _outcome.verdict == "match":
+                return TargetingResult(
+                    kind=TARGET_KIND_LOCAL,
+                    entry=exact_entry,
+                    reason=_(
+                        "Correspondance exacte unique avec « {q} »."
+                    ).format(q=question[:120]),
+                    world=world,
+                    strategy="deterministic",
+                    verification=verification_trace,
+                    verifications=verifications,
+                    gate_status=proof_status(_outcome),
+                )
+            verifier_hint = _outcome.reason or _(
+                "la correspondance exacte n'a pas ete prouvee"
             )
 
     for _round in range(budget + 1):
@@ -1295,9 +1439,59 @@ async def resolve_target(
 
         request = _probe_request(decision, disclosure) if allow_probes else None
         if request is None:
+            _key = (decision.target_key or "").strip().strip("\"'")
+            _kind = (decision.target_kind or TARGET_KIND_LOCAL).strip().lower()
+            if (
+                _kind == TARGET_KIND_ANCHOR
+                and _key
+                and strict
+                and anchor_is_locator
+                and budget > 0
+            ):
+                # Une ancre consommee par un producteur est un LOCALISATEUR :
+                # si l'hote declare une inspection pour ce type d'ancre, on
+                # l'inspecte AVANT de la consommer. Le selecteur re-decide
+                # ensuite avec le contenu reel, jamais avec une hypothese.
+                _anchor_kind = (decision.anchor_kind or "").strip()
+                _locator_probe = _anchor_locator_probe(disclosure, _anchor_kind)
+                _already = bool(_locator_probe) and any(
+                    record.probe_id == _locator_probe.id
+                    and record.subject == _key
+                    and record.ok
+                    for record in world.probes
+                )
+                if _locator_probe is not None and not _already:
+                    budget -= 1
+                    _loc_record, _loc_error = await _run_probe(
+                        probe=_locator_probe,
+                        subject=_key,
+                        world=world,
+                        registry=registry,
+                        contract=contract,
+                        disclosure=disclosure,
+                        tools_mgr=tools_mgr,
+                        question=question,
+                    )
+                    if _loc_record is not None:
+                        world.probes.append(_loc_record)
+                    if _loc_error:
+                        world.probes.append(
+                            ProbeRecord(
+                                probe_id=_locator_probe.id,
+                                kind=_locator_probe.kind,
+                                subject=_key,
+                                ok=False,
+                                message=_loc_error,
+                            )
+                        )
+                    verifier_hint = _(
+                        "L'ancre '{value}' ({kind}) a ete inspectee : ne la "
+                        "consomme que si son contenu satisfait vraiment la "
+                        "question. Sinon choisis une cible interne prouvee ou "
+                        "discovery_request."
+                    ).format(value=_key[:120], kind=_anchor_kind or "?")
+                    continue
             if verify:
-                _key = (decision.target_key or "").strip().strip("\"'")
-                _kind = (decision.target_kind or TARGET_KIND_LOCAL).strip().lower()
                 _entry = (
                     world.find_entry(registry, _key)
                     if _kind == TARGET_KIND_LOCAL and _key and registry is not None
@@ -1310,7 +1504,7 @@ async def resolve_target(
                         entry=_entry,
                         language=language,
                         tag=tag,
-                        disclosure=disclosure,
+                        disclosure=evidence_disclosure,
                         contract=contract,
                         world=world,
                         verifier_hint=verifier_hint,
@@ -1321,8 +1515,50 @@ async def resolve_target(
                         getattr(_entry, "description", "") or _key
                     )[:120]
                     if _outcome.verdict == "uncertain":
-                        # Fail-open controle : on accepte, mais le doute doit
-                        # atteindre le planner et la convergence.
+                        if strict:
+                            # Une cible liee/actionnee exige une preuve
+                            # positive. Le doute n'autorise jamais l'action.
+                            if budget > 0:
+                                budget -= 1
+                                world.probes.append(
+                                    ProbeRecord(
+                                        probe_id="target_verification",
+                                        kind="verification",
+                                        subject=_key,
+                                        ok=False,
+                                        message=_(
+                                            "Cible '{label}' non prouvee : {why}"
+                                        ).format(
+                                            label=_label,
+                                            why=_outcome.reason
+                                            or _("preuves insuffisantes"),
+                                        ),
+                                    )
+                                )
+                                verifier_hint = _outcome.reason or _(
+                                    "preuves insuffisantes"
+                                )
+                                continue
+                            return TargetingResult(
+                                kind="none",
+                                world=world,
+                                error_code="TARGET_UNPROVEN",
+                                error_message=_(
+                                    "Cible '{label}' non prouvee : {why}. "
+                                    "Aucune action sans preuve positive."
+                                ).format(
+                                    label=_label,
+                                    why=_outcome.reason
+                                    or _("preuves insuffisantes"),
+                                ),
+                                reason=_outcome.reason,
+                                warnings=warnings,
+                                verification=verification_trace,
+                                verifications=verifications,
+                                gate_status=proof_status(_outcome),
+                            )
+                        # Fail-open controle (mode historique) : on accepte,
+                        # mais le doute doit atteindre le planner.
                         warnings.append(
                             _(
                                 "Cible '{label}' acceptee sous reserve : {why}"
@@ -1427,6 +1663,7 @@ async def resolve_target(
                             warnings=warnings,
                             verification=verification_trace,
                             verifications=verifications,
+                            gate_status=proof_status(_outcome),
                         )
             break
 
@@ -1573,6 +1810,55 @@ async def resolve_target(
             error_message=_("Cle locale inconnue : {key!r}").format(key=key[:120]),
             verifications=verifications,
         )
+    # Filet de securite : aucune cible locale actionnee ne sort sans preuve
+    # positive, meme si un chemin a contourne la verification dans la boucle.
+    _proven = any(
+        str(trace.get("verdict") or "") == "match"
+        and str(trace.get("local_name") or "") == str(entry.local_name)
+        for trace in verifications
+    )
+    if strict and not _proven:
+        _outcome = await _verify_target(
+            llm=llm,
+            question=question,
+            entry=entry,
+            language=language,
+            tag=tag,
+            disclosure=evidence_disclosure,
+            contract=contract,
+            world=world,
+            verifier_hint=verifier_hint,
+        )
+        verification_trace = _outcome.as_dict()
+        verifications.append(verification_trace)
+        if _outcome.verdict != "match":
+            _label = str(getattr(entry, "description", "") or key)[:120]
+            return TargetingResult(
+                kind="none",
+                world=world,
+                error_code="TARGET_UNPROVEN",
+                error_message=_(
+                    "Cible '{label}' non prouvee : {why}. Aucune action sans "
+                    "preuve positive."
+                ).format(
+                    label=_label,
+                    why=_outcome.reason or _("preuves insuffisantes"),
+                ),
+                reason=_outcome.reason,
+                warnings=warnings,
+                verification=verification_trace,
+                verifications=verifications,
+                gate_status=proof_status(_outcome),
+            )
+    if verifications:
+        _last_verdict = str(verifications[-1].get("verdict") or "")
+        _gate = (
+            "proven"
+            if _last_verdict == "match"
+            else ("contradicted" if _last_verdict == "mismatch" else "unproven")
+        )
+    else:
+        _gate = ""
     return TargetingResult(
         kind=TARGET_KIND_LOCAL,
         entry=entry,
@@ -1581,4 +1867,5 @@ async def resolve_target(
         warnings=warnings,
         verification=verification_trace,
         verifications=verifications,
+        gate_status=_gate,
     )

@@ -100,7 +100,17 @@ tu peux répondre `no_target=true`.
    - ne choisis jamais un objet parce que son libellé répète la question :
      vérifie que son rôle et sa nature correspondent à ce qui est demandé ;
      ne substitue pas un objet d'entrée à l'objet de sortie attendu.
-8. Si aucune cible ne convient et qu'aucune inspection utile n'est possible :
+8. Une ANCRE est un LOCALISATEUR, pas une preuve :
+   - si l'ancre sera consommée par un producteur (elle « désigne » un objet
+     à produire), son contenu doit être prouvé : demande l'inspection
+     déclarée de ce type d'ancre quand elle existe, puis choisis la cible
+     interne prouvée ; ne confirme l'ancre que si son contenu satisfait
+     vraiment la question ;
+   - si la question porte sur un objet précis et que l'ancre ne fait que
+     pointer une zone, ne la consomme jamais sur une simple hypothèse ;
+   - une ancre n'est recevable telle quelle que si elle EST la cible
+     demandée (adressage direct), pas si elle est censée la contenir.
+9. Si aucune cible ne convient et qu'aucune inspection utile n'est possible :
    `no_target=true` et explique `reason`.
 
 {% if allow_anchor %}

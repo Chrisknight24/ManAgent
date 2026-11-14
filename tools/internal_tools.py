@@ -22,7 +22,9 @@ from core.targeting import (
     ObservedWorld,
     TargetingResult,
     extract_media_assets,
+    proof_status,
     resolve_target,
+    verify_final_target,
 )
 try:
     from core.tools_models import AnalysisResult
@@ -873,6 +875,9 @@ async def _resolve_target_with_llm(
     tag: str,
     media_assets: Optional[List[Any]] = None,
     requested_kind: str = "",
+    strict: bool = False,
+    anchor_is_locator: bool = False,
+    evidence_disclosure=None,
 ):
     """Boucle de ciblage visible (candidates + sondes déclarées).
 
@@ -881,6 +886,12 @@ async def _resolve_target_with_llm(
     résolution déterministe d'une correspondance exacte unique : quand le plan
     demande explicitement un type de cible, une correspondance lexicale
     certaine ne justifie pas un appel LLM. Vide = sélecteur LLM, comme avant.
+
+    `strict` exige une preuve positive (`match`) avant qu'une cible liée ou
+    actionnée ne sorte. `anchor_is_locator` déclare que l'ancre choisie sera
+    consommée par un producteur (elle est donc inspectée avant usage).
+    `evidence_disclosure` permet de vérifier la cible produite avec les
+    preuves du contrat SOURCE, pas avec celles du producteur.
     """
     registry = _target_registry(runtime_state)
     if registry is None or contract is None:
@@ -917,6 +928,9 @@ async def _resolve_target_with_llm(
         # Garde anti-substitution : activée par le runtime. Un hôte de test
         # sans ce drapeau garde le comportement historique.
         verify=bool(getattr(runtime_state, "target_verification_enabled", False)),
+        strict=bool(strict),
+        anchor_is_locator=bool(anchor_is_locator),
+        evidence_disclosure=evidence_disclosure,
     )
     if not result.ok:
         rich = str(getattr(result, "reason", "") or "").strip()
@@ -1128,6 +1142,108 @@ async def _enrich_failed_target_error(
     return err
 
 
+def _emit_target_gate(
+    runtime_state,
+    *,
+    status: str,
+    source: str,
+    local_name: str = "",
+    verdict: str = "",
+    reason: str = "",
+) -> None:
+    """Trace le gate de preuve post-producteur (`target.gate`).
+
+    `status` vaut `proven`, `unproven` ou `contradicted`. L'evenement est
+    emis meme quand le gate refuse : l'observabilite doit voir le refus, pas
+    seulement les succes.
+    """
+    try:
+        ctx = getattr(runtime_state, "execution_context", None) or {}
+        solver_id = ctx.get("solver_id") if isinstance(ctx, dict) else None
+        mission_id = ctx.get("mission_id") if isinstance(ctx, dict) else None
+        fields: Dict[str, Any] = {
+            "status": str(status or "")[:24],
+            "verdict": str(verdict or "")[:24],
+            "source": str(source or "")[:120],
+            "local_name": str(local_name or "")[:120],
+            "reason": str(reason or "")[:300],
+        }
+        if mission_id:
+            fields["mission_id"] = mission_id
+        if solver_id:
+            fields["solver_id"] = solver_id
+        Logger.event("target.gate", **fields)
+    except Exception:
+        pass
+
+
+async def _gate_produced_target(
+    runtime_state,
+    *,
+    entry,
+    question: str,
+    contract,
+    payload,
+    media_assets,
+    disclosure,
+    source: str,
+    verifier_hint: str = "",
+):
+    """Gate post-producteur d'une cible `single` : preuve positive ou refus.
+
+    Un producteur peut ne rendre qu'une cible : l'unicite n'est pas une
+    preuve. On confronte sa nature a la question avec les preuves declarees
+    par la source. Retourne `(VerificationOutcome|None, error|None)`.
+
+    Ne s'active que si le runtime expose `target_gate_enabled` : les hotes de
+    test sans ce drapeau gardent le comportement historique.
+    """
+    if entry is None or not bool(
+        getattr(runtime_state, "target_gate_enabled", False)
+    ):
+        return None, None
+    if not bool(getattr(runtime_state, "target_verification_enabled", True)):
+        return None, None
+    llm = await _get_tools_llm(runtime_state)
+    registry = _target_registry(runtime_state)
+    world = ObservedWorld.from_payload(
+        registry,
+        contract,
+        payload,
+        media_assets=media_assets,
+        disclosure=disclosure,
+    )
+    outcome = await verify_final_target(
+        llm=llm,
+        question=question,
+        entry=entry,
+        language=getattr(runtime_state, "language", "fr") or "fr",
+        tag="perceive_understand",
+        disclosure=disclosure,
+        contract=contract,
+        world=world,
+        media_assets=media_assets,
+        verifier_hint=verifier_hint,
+    )
+    _emit_target_gate(
+        runtime_state,
+        status=proof_status(outcome),
+        source=source,
+        local_name=getattr(entry, "local_name", ""),
+        verdict=outcome.verdict,
+        reason=outcome.reason,
+    )
+    if outcome.verdict == "match":
+        return outcome, None
+    label = str(getattr(entry, "description", "") or getattr(entry, "local_name", ""))[:120]
+    why = outcome.reason or _("preuves insuffisantes")
+    msg = _(
+        "Cible '{label}' non prouvee pour « {q} » : {why}. "
+        "Aucune action sans preuve positive."
+    ).format(label=label, q=question[:120], why=why)
+    return outcome, _target_error("TARGET_UNPROVEN", msg, observed=why, reason=why)
+
+
 def _store_target_warnings(runtime_state, result, *, source: str = "") -> None:
     """Range les doutes de ciblage et trace la verification.
 
@@ -1177,6 +1293,18 @@ def _store_target_warnings(runtime_state, result, *, source: str = "") -> None:
         single = getattr(result, "verification", None)
         traces = [single] if isinstance(single, dict) else []
     traces = [trace for trace in traces if isinstance(trace, dict)]
+    gate = str(getattr(result, "gate_status", "") or "")
+    if gate:
+        _gate_entry = getattr(result, "entry", None)
+        _last_gate = traces[-1] if traces else {}
+        _emit_target_gate(
+            runtime_state,
+            status=gate,
+            source=source,
+            local_name=str(getattr(_gate_entry, "local_name", "") or ""),
+            verdict=str(_last_gate.get("verdict") or ""),
+            reason=str(_last_gate.get("reason") or ""),
+        )
     if not traces:
         return
     _entry = getattr(result, "entry", None)
@@ -1437,6 +1565,7 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
     raw_data = None
     parsed = None
     _contract = None
+    media_assets = None
     _registry = _target_registry(runtime_state)
     _producer_payload = None
     _producer_contract = None
@@ -1451,6 +1580,15 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
     # Composite phase 2b : la source lit des candidates fraîches, le
     # producteur en consomme une dans la MÊME étape (aucune référence périmée).
     _composite = bool(source_tool and target_producer)
+    # Gate de preuve : une cible qui sera liée à une variable de plan ou
+    # consommée par un producteur/action doit être PROUVÉE. Opt-in runtime
+    # (`target_gate_enabled`) pour que les bancs sans LLM scripté gardent le
+    # comportement historique.
+    _strict = bool(
+        bool(getattr(runtime_state, "target_gate_enabled", False))
+        and bool(getattr(runtime_state, "target_verification_enabled", True))
+        and (_text(args.get("_output_target_name")) or target_producer)
+    )
 
     if source_data:
         raw_data = await resolve_variable(source_data, runtime_state)
@@ -1600,7 +1738,11 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
             _anchor_kinds = _anchor_kinds_for(
                 _contract, _producer_contract
             )
-            if _source_selection.kind == "single" and not _has_disclosure:
+            if (
+                _source_selection.kind == "single"
+                and not _has_disclosure
+                and not _strict
+            ):
                 _candidate = _source_selection.entries[0]
                 _note_target_selected(
                     runtime_state, _candidate, strategy="single",
@@ -1617,6 +1759,8 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
                     anchor_kinds=_anchor_kinds,
                     tag="perceive_understand",
                     media_assets=media_assets,
+                    strict=_strict,
+                    anchor_is_locator=bool(target_producer),
                 )
                 if _cand_err:
                     _cand_err = await _enrich_failed_target_error(
@@ -1837,8 +1981,49 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
             else []
         )
         _selection_disclosure = getattr(_selection_contract, "disclosure", None)
-        if _selection.kind == "single":
+        # La preuve vient du contrat SOURCE (celui qui declare image/rect/
+        # cibles internes). Le producteur ne decrit que l'identite.
+        _evidence_disclosure = (
+            getattr(_contract, "disclosure", None)
+            if _contract is not None
+            else None
+        ) or _selection_disclosure
+        if _selection.kind == "single" and not _strict:
             _selected_target = _selection.entries[0]
+            _note_target_selected(
+                runtime_state, _selected_target, strategy="single", source="perceive_understand"
+            )
+        elif _selection.kind == "single":
+            # Producteur `single` : l'unicite n'est pas une preuve. Le gate
+            # confronte la nature produite a la question avant tout binding.
+            _selected_target = _selection.entries[0]
+            _gate_result, _gate_err = await _gate_produced_target(
+                runtime_state,
+                entry=_selected_target,
+                question=_semantic_query,
+                contract=_selection_contract,
+                payload=_selection_payload,
+                media_assets=media_assets,
+                disclosure=_evidence_disclosure,
+                source=target_producer or source_tool or source_data or "perceive_understand",
+            )
+            if _gate_err:
+                _emit_alignment_failure(
+                    runtime_state,
+                    tool="perceive_understand",
+                    question=question,
+                    source=target_producer or source_tool or source_data,
+                    out={
+                        "data": str(_selection_payload)[:500],
+                        "message": str(_gate_err.get("message") or ""),
+                        "observed": (
+                            _gate_err.get("observed")
+                            or _gate_err.get("reason")
+                            or ""
+                        ),
+                    },
+                )
+                return _gate_err
             _note_target_selected(
                 runtime_state, _selected_target, strategy="single", source="perceive_understand"
             )
@@ -1858,6 +2043,9 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
                 requested_kind=declared_target_kind(
                     _producer_contract, _producer_args
                 ),
+                strict=_strict,
+                anchor_is_locator=False,
+                evidence_disclosure=_evidence_disclosure,
             )
             if _sel_err:
                 _sel_err = await _enrich_failed_target_error(

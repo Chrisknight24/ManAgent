@@ -99,7 +99,17 @@ may answer `no_target=true`.
    - never pick an object merely because its label repeats the question:
      check that its role and nature match what is asked; do not substitute an
      input object for the expected output object.
-8. If no target fits and no useful inspection is possible: `no_target=true`
+8. An ANCHOR is a LOCATOR, not a proof:
+   - if the anchor will be consumed by a producer (it “designates” an object
+     to be produced), its content must be proven: request the declared
+     inspection for that anchor kind when one exists, then choose the proven
+     inner target; confirm the anchor only if its content really satisfies
+     the question;
+   - if the question is about a precise object and the anchor merely points
+     to a zone, never consume it on a mere hypothesis;
+   - an anchor is acceptable as-is only when it IS the requested target
+     (direct addressing), not when it is supposed to contain it.
+9. If no target fits and no useful inspection is possible: `no_target=true`
    and explain `reason`.
 
 {% if allow_anchor %}

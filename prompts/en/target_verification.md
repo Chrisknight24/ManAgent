@@ -36,10 +36,13 @@ semantics: judge the described NATURE and ROLE.
   requested but the target is a file/icon; a "button" was requested but the
   target is a container; an input object was offered for an expected output
   object.
-- `verdict=uncertain`: the evidence cannot settle it. A genuine doubt is NOT
-  a rejection: it will be accepted with a shared warning.
+- `verdict=uncertain`: the evidence cannot settle it. A genuine doubt NEVER
+  authorizes an action: the target will be refused as soon as it must be
+  bound or acted upon. Answer `uncertain` only when you honestly cannot decide.
 
-A merely close label, or being "the closest", proves nothing.
+A merely close label, or being "the closest", proves nothing. A label that
+repeats the question is not enough if the NATURE or ROLE belongs to another
+object (a file shortcut is not a menu option; a zone is not its content).
 
 ## NEXT (`next`)
 

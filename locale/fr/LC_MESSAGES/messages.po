@@ -1932,6 +1932,9 @@ msgstr ""
 msgid "après"
 msgstr ""
 
+msgid "aucun verificateur disponible"
+msgstr ""
+
 msgid "aucune"
 msgstr ""
 
@@ -1957,6 +1960,9 @@ msgid "inconnu : déclarez via output_variable_name d'un step antérieur"
 msgstr ""
 
 msgid "la cible ne correspond pas a la question"
+msgstr ""
+
+msgid "la correspondance exacte n'a pas ete prouvee"
 msgstr ""
 
 msgid "low, medium ou high : confiance dans ce verdict."

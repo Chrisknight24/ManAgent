@@ -43,6 +43,10 @@ class RuntimeState:
         # que les bancs de test sans LLM scripte gardent le comportement
         # historique (aucun appel supplementaire).
         self.target_verification_enabled = True
+        # Gate de preuve post-producteur : une cible qui sera liee a une
+        # variable de plan ou consommee par une action doit obtenir un verdict
+        # `match`. `uncertain` ne suffit jamais pour agir.
+        self.target_gate_enabled = True
 
         self.auto_learn_enabled = True
 

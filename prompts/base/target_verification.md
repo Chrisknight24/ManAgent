@@ -37,10 +37,14 @@ propre à une application : juge la NATURE et le RÔLE décrits.
   mais la cible est un conteneur ; une cible d'entrée proposée pour un objet
   de sortie.
 - `verdict=uncertain` : les preuves ne permettent pas de conclure. Un doute
-  réel n'est PAS un refus : il sera accepté avec un avertissement partagé.
+  réel n'autorise JAMAIS une action : la cible sera refusée dès qu'elle doit
+  être liée ou actionnée. Ne réponds `uncertain` que si tu ne peux pas
+  trancher honnêtement.
 
 Une simple proximité de libellé, ou le fait d'être « le plus proche », ne
-prouve rien.
+prouve rien. Un libellé qui répète la question ne suffit pas si la NATURE ou
+le RÔLE est celui d'un autre objet (un raccourci de fichier n'est pas une
+option de menu ; une zone n'est pas son contenu).
 
 ## SUITE (`next`)
 

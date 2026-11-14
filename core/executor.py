@@ -1449,6 +1449,44 @@ class Executor:
                         ).format(
                             step.tool_name, _alias, len(_projected_entries)
                         )
+                    # Gate de preuve : un producteur direct ne rend pas une
+                    # cible prouvee par sa seule identite. Quand le runtime
+                    # l'active, l'alias n'est lie qu'apres un verdict `match`.
+                    if bool(
+                        getattr(
+                            self.solver.runtime_state,
+                            "target_gate_enabled",
+                            False,
+                        )
+                    ):
+                        from tools import internal_tools as _IT
+
+                        _gate_question = ""
+                        if isinstance(tool_args, dict):
+                            _gate_question = str(
+                                tool_args.get("target_description")
+                                or tool_args.get("question")
+                                or ""
+                            )
+                        _gate_question = _gate_question or str(
+                            getattr(step, "description", "") or ""
+                        )
+                        _gate_entry, _gate_err = await _IT._gate_produced_target(
+                            self.solver.runtime_state,
+                            entry=_projected_entries[0],
+                            question=_gate_question,
+                            contract=_target_contract,
+                            payload=parsed_result,
+                            media_assets=None,
+                            disclosure=getattr(_target_contract, "disclosure", None),
+                            source=str(step.tool_name or ""),
+                        )
+                        if _gate_err:
+                            return False, "", str(
+                                _gate_err.get("message")
+                                or _gate_err.get("error_reason")
+                                or ""
+                            )
                     _bind_err = bind_target_alias(
                         _target_registry,
                         self.solver.variable_registry,
