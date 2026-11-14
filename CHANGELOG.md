@@ -14,6 +14,10 @@ Versioning: [Semantic Versioning](https://semver.org/).
 - Proof gate for produced targets (`target.gate` event: `proven`, `unproven`,
   `contradicted`), including a post-producer gate for `single` mode on both
   the perception meta-tool and the direct plan producer path.
+- `tools/analyze_replay.py`: compact replay analysis of the anchoring chain
+  (selection → gate → binding → action) with explicit alerts (`GATE ABSENT`,
+  `LIEN SANS PREUVE`, `REFUS PROPRE`, truncation, loop), text or JSON output,
+  and a `--strict` exit code.
 
 ### Changed
 - Target verification is now strict by default: `uncertain` and `mismatch`
