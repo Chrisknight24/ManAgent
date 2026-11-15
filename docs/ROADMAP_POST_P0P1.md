@@ -162,9 +162,9 @@ banc de non-régression sur le prompt du vérificateur.
 ## Ordre recommandé
 
 1. **§1 watchdog** — le plus rentable en observabilité pour un risque contenu.
-2. **§7 nommage à l'arrivée** — débloque la valeur des correctifs livrés (le
+2. **§6 nommage à l'arrivée** — débloque la valeur des correctifs livrés (le
    planificateur cesse de repayer un sélecteur).
-3. **§8 `enumeration`** — une déclaration hôte, un banc, aucun risque.
+3. **§7 `enumeration`** — une déclaration hôte, un banc, aucun risque.
 4. **§3 thinking_level** — quand un besoin de qualité par classe apparaît.
 5. **§2 streaming** — provider par provider, sans urgence.
 6. **§4 hedging** — seulement si l'hôte exprime un besoin explicite.
