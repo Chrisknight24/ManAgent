@@ -54,6 +54,11 @@ class RuntimeState:
         self.hitl_policy: str = "balanced"  # "strict", "balanced", "autonomous"
         self.approved_human_actions_by_mission: Dict[str, List[Dict[str, Any]]] = {}
 
+        # Budget de lecture du monde (caracteres). None = defaut du cerveau
+        # (2000). C'est une DEMANDE : le plafond declare par l'hote peut la
+        # reduire, jamais l'elargir.
+        self.world_snapshot_max_chars: Optional[int] = None
+
         self.execution_markers = {
             "execution_attempt": 0,
             "has_abstract_task": False,

@@ -12,6 +12,7 @@ from typing import Dict, List, Set, Tuple, Any, Optional
 from core.i18n import _
 import hashlib
 import json
+import os
 import re
 
 
@@ -33,6 +34,68 @@ WORLD_SNAPSHOT_MAX_ITEMS = 10
 # 2026-11-14 a tronque a 294/312 caracteres en pleine phrase). Ce n'est pas un
 # refus : c'est un signal d'observabilite pour l'hote.
 WORLD_SNAPSHOT_MIN_USEFUL = 1200
+
+# Budget de lecture du monde : UN reglage pour tous les points de lecture.
+# L'operateur peut le changer (payload d'execution ou environnement) sans
+# toucher au code. 2000 par defaut : c'est ce que les lectures demandaient deja
+# et ce que les hotes declarent aujourd'hui, et cela reste au-dessus du seuil
+# utile. Reglage absent, illisible ou nul -> defaut ; jamais d'exception.
+DEFAULT_WORLD_SNAPSHOT_CHARS = 2000
+MAX_WORLD_SNAPSHOT_CHARS = 4000
+WORLD_SNAPSHOT_ENV_VAR = "MANAGENT_WORLD_SNAPSHOT_CHARS"
+
+# Derniere lecture (convergence finale) : elle juge une mission entiere, donc
+# elle demande le maximum. Le plafond hote s'applique quand meme.
+FINAL_WORLD_SNAPSHOT_CHARS = MAX_WORLD_SNAPSHOT_CHARS
+
+
+def _coerce_chars(value: Any) -> Optional[int]:
+    """Budget lisible (entier > 0), sinon None. Ne leve jamais."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def resolve_world_snapshot_budget(
+    runtime_state: Any = None, requested: Optional[int] = None
+) -> int:
+    """Budget DEMANDE pour une lecture du monde, avant plafond hote.
+
+    Hierarchie : `requested` (appelant explicite) > `runtime_state`
+    (reglage transmis par le payload) > environnement > defaut. Borne dans
+    `[1, MAX_WORLD_SNAPSHOT_CHARS]`. Fonction pure.
+    """
+    desired = _coerce_chars(requested)
+    if desired is None and runtime_state is not None:
+        desired = _coerce_chars(
+            getattr(runtime_state, "world_snapshot_max_chars", None)
+        )
+    if desired is None:
+        desired = _coerce_chars(os.environ.get(WORLD_SNAPSHOT_ENV_VAR, ""))
+    if desired is None:
+        desired = DEFAULT_WORLD_SNAPSHOT_CHARS
+    return max(1, min(MAX_WORLD_SNAPSHOT_CHARS, desired))
+
+
+def effective_world_snapshot_limit(
+    requested: int, host_limit: Optional[int] = None
+) -> int:
+    """Budget effectif : la demande, PLAFONNEE par ce que l'hote declare.
+
+    L'hote ne peut que reduire. Avant, sa valeur remplacait la notre dans les
+    deux sens : demander 600 pour un hote a 2000 donnait 2000, et demander
+    3000 donnait 2000 — notre reglage etait donc ignore. Fonction pure.
+    """
+    limit = _coerce_chars(requested) or DEFAULT_WORLD_SNAPSHOT_CHARS
+    host = _coerce_chars(host_limit)
+    if host is not None:
+        limit = min(limit, host)
+    return max(1, min(MAX_WORLD_SNAPSHOT_CHARS, limit))
+
 
 # P2.1 : ordre de lecture du monde. Un modèle qui ne lit qu'un préfixe doit
 # voir d'abord le résumé, puis le focus, puis les fenêtres et les cibles.
@@ -298,11 +361,13 @@ def render_world_snapshot(data: Any, limit: int = 800, projection: str = "raw") 
 
 
 def _emit_world_snapshot_event(runtime_state, source_tool: str, text: str,
-                               truncated: bool) -> None:
+                               truncated: bool, budget: Optional[int] = None) -> None:
     """Trace chaque snapshot lu (mission, outil, taille, hash, troncature).
 
     Sans cet event, l'export d'observabilité ne contient AUCUN world state :
     impossible de distinguer un hôte muet d'un modèle qui n'a pas regardé.
+    `budget` rend le réglage lisible a posteriori (un run court n'est pas
+    forcément un hôte pauvre : c'est peut-être un budget bas).
     """
     try:
         from utils.logger import Logger
@@ -323,22 +388,30 @@ def _emit_world_snapshot_event(runtime_state, source_tool: str, text: str,
             source_tool=source_tool,
             chars=len(text),
             truncated=bool(truncated),
+            budget=budget,
             hash=hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12],
         )
     except Exception:
         pass
 
 
-async def fetch_world_state_snapshot(runtime_state, max_chars: int = 800, projection: str = "raw") -> str:
+async def fetch_world_state_snapshot(
+    runtime_state, max_chars: Optional[int] = None, projection: str = "raw"
+) -> str:
     """Photo d'état du monde : manifeste déclaré > convention > rien.
 
     Retourne du texte brut capé, ou "" avec un log `snapshot.skip`
     motivé (no_world_state_tool, ...). Jamais d'exception, jamais de
     devinette sur un outil au hasard. Fail-open total.
 
+    `max_chars=None` (défaut) : budget configuré de la session
+    (`resolve_world_snapshot_budget`), 2000 par défaut. Un appelant qui passe
+    une valeur exprime une demande explicite, que le plafond hôte peut réduire
+    mais jamais élargir.
+
     `projection="planner"` fournit la vue sans géométrie ni bruit
-    d'implémentation. Le plafond effectif reste celui que l'hôte declare :
-    s'il est trop bas, l'événement `world_snapshot.budget_low` le rend visible.
+    d'implémentation. Si le plafond hôte nous coupe sous le seuil utile,
+    l'événement `world_snapshot.budget_low` le rend visible.
     """
     from utils.logger import Logger
     try:
@@ -353,16 +426,10 @@ async def fetch_world_state_snapshot(runtime_state, max_chars: int = 800, projec
         source_args = cfg.get("source_args") or {}
         if not isinstance(source_args, dict):
             source_args = {}
-        try:
-            limit = int(cfg.get("max_chars") or max_chars)
-        except Exception:
-            limit = max_chars
-        limit = max(1, min(4000, limit))
-        try:
-            requested = int(max_chars or 0)
-        except Exception:
-            requested = 0
-        if limit < WORLD_SNAPSHOT_MIN_USEFUL and requested > limit:
+        requested = resolve_world_snapshot_budget(runtime_state, max_chars)
+        declared = _coerce_chars(cfg.get("max_chars"))
+        limit = effective_world_snapshot_limit(requested, declared)
+        if declared is not None and limit < WORLD_SNAPSHOT_MIN_USEFUL and requested > limit:
             try:
                 Logger.event(
                     "world_snapshot.budget_low",
@@ -417,7 +484,7 @@ async def fetch_world_state_snapshot(runtime_state, max_chars: int = 800, projec
         # P2.1 : rendu priorisé, champs entiers, coupe au dernier séparateur.
         text = render_world_snapshot(data, limit, projection=projection)
         _emit_world_snapshot_event(
-            runtime_state, source_tool, text, len(str(data)) > limit
+            runtime_state, source_tool, text, len(str(data)) > limit, budget=limit
         )
         return text
     except Exception as e:

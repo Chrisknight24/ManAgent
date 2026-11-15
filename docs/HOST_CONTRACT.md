@@ -169,6 +169,15 @@ Pour que le cerveau sache « où il est » sans deviner :
 - Sinon rien : le cerveau continue sans photo (nécessite un redémarrage du raisonnement sans contexte).
 - Points de lecture : avant faisabilité, avant chaque plan, avant chaque convergence (jamais jugé comme preuve, que du contexte).
 - Convention `get_world_state` documentée ici : retour texte brut ou `{summary_text, full}` (résumé dans le prompt, détail via PD).
+- `max_chars` est un **plafond**, pas une consigne de richesse : le cerveau
+  demande son propre budget (2000 par défaut, réglable par
+  `world_snapshot.max_chars` dans le payload d'exécution ou par
+  `MANAGENT_WORLD_SNAPSHOT_CHARS`) et prend le **minimum** des deux. Un plafond
+  hôte plus large n'élargit donc jamais la lecture. Si le plafond hôte coupe
+  sous 1200 caractères, le cerveau émet `world_snapshot.budget_low` : c'est un
+  signal, pas une plainte. L'événement `world_snapshot` porte `budget`, `chars`
+  et `truncated`, pour attribuer un contexte pauvre à un réglage plutôt qu'à
+  l'hôte.
 
 ### 3g.1 `get_world_state` déclare `produces: targets` (P2.2)
 

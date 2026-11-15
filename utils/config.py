@@ -9,7 +9,7 @@ Marche aussi dans les listes (rotation multi-clés).
 Variable absente → chaîne vide + avertissement (jamais de crash).
 """
 import os
-from typing import Any, Tuple
+from typing import Any, Optional, Tuple
 
 ENV_PREFIX = "env:"
 
@@ -58,3 +58,36 @@ def resolve_hitl_policy(payload: dict) -> str:
             raw = runtime_cfg.get("hitl_policy")
     val = str(raw or "").strip().lower()
     return val if val in VALID_HITL_POLICIES else "balanced"
+
+
+VALID_ENVIRONMENTS = ("simulated", "production")
+
+# Reglage du budget de lecture du monde. Meme forme que le manifeste hote
+# (`world_snapshot.max_chars`), mais cote cerveau : c'est la DEMANDE, que le
+# plafond hote peut reduire. Un operateur peut donc regler sans redeployer.
+WORLD_SNAPSHOT_KEY = "world_snapshot"
+
+
+def resolve_world_snapshot_chars(payload: dict) -> Optional[int]:
+    """Lit world_snapshot.max_chars (racine prioritaire, sinon runtime_configuration).
+
+    Retourne un entier > 0, ou None si rien n'est declare ou si la valeur est
+    illisible (le defaut du cerveau s'applique alors). Fonction pure.
+    """
+    if not isinstance(payload, dict):
+        return None
+    holder = payload.get(WORLD_SNAPSHOT_KEY)
+    if not isinstance(holder, dict):
+        runtime_cfg = payload.get("runtime_configuration") or {}
+        if isinstance(runtime_cfg, dict):
+            holder = runtime_cfg.get(WORLD_SNAPSHOT_KEY)
+    if not isinstance(holder, dict):
+        return None
+    value = holder.get("max_chars")
+    if isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None

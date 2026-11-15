@@ -1960,7 +1960,7 @@ class Executor:
         try:
             from core.alignment import fetch_world_state_snapshot
             _conv_snapshot = await fetch_world_state_snapshot(
-                self.solver.runtime_state, max_chars=600)
+                self.solver.runtime_state)
         except Exception:
             _conv_snapshot = ""
         # Avertissements non bloquants : perception + doutes de ciblage.

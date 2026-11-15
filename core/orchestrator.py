@@ -2259,7 +2259,7 @@ class Orchestrator(Supervisor, Entity):
         try:
             from core.alignment import fetch_world_state_snapshot
             _judge_world = await fetch_world_state_snapshot(
-                self.runtime_state, max_chars=2000, projection="planner")
+                self.runtime_state, projection="planner")
         except Exception:
             _judge_world = ""
         outcome = await validator.validate(
@@ -3137,8 +3137,9 @@ class Orchestrator(Supervisor, Entity):
         self.runtime_state.system_prompt = payload.get("system_prompt", "")
         self.runtime_state.language = payload.get("language", "en")
         self.runtime_state.environment = payload.get("environment", "simulated")
-        from utils.config import resolve_hitl_policy
+        from utils.config import resolve_hitl_policy, resolve_world_snapshot_chars
         self.runtime_state.hitl_policy = resolve_hitl_policy(payload)
+        self.runtime_state.world_snapshot_max_chars = resolve_world_snapshot_chars(payload)
         Logger.info(f"[Orchestrator] Environnement = {self.runtime_state.environment}, HITL policy = {self.runtime_state.hitl_policy}")
         self.runtime_state.presentator_detail_level = payload.get("presentator_detail_level",
                                                                   "brief")

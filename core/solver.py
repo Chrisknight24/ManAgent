@@ -1446,7 +1446,7 @@ class Solver(Supervisor, Entity):
             lines.append(f"   Checkpoints vérifiables : {cps}")
         return "\n".join(lines)
 
-    async def _snapshot_world_default(self, max_chars: int = 1200) -> str:
+    async def _snapshot_world_default(self, max_chars: Optional[int] = None) -> str:
         """Photo par défaut (Prices : manifeste > convention > rien, log motivé).
 
         Délègue à `core.alignment.fetch_world_state_snapshot`.
@@ -2064,9 +2064,12 @@ class Solver(Supervisor, Entity):
             except Exception:
                 alignment_note = ""
             try:
-                from core.alignment import fetch_world_state_snapshot
+                from core.alignment import (
+                    FINAL_WORLD_SNAPSHOT_CHARS,
+                    fetch_world_state_snapshot,
+                )
                 _final_snapshot = await fetch_world_state_snapshot(
-                    self.runtime_state, max_chars=4000)
+                    self.runtime_state, max_chars=FINAL_WORLD_SNAPSHOT_CHARS)
             except Exception:
                 _final_snapshot = ""
             if strict and not _final_snapshot.strip():
