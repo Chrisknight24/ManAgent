@@ -48,6 +48,11 @@ Trois règles en découlent :
    énumérable**, alors cette preuve ne peut pas attester à elle seule l'objet
    demandé : ne conclus `match` que sur une preuve de NATURE ou de RÔLE qui va
    au-delà de la géométrie.
+   Une passe d'inspection peut aussi se déclarer **bornée** (compte plancher,
+   couverture partielle, échantillon) : c'est une preuve incomplète, pas une
+   preuve. À distinguer d'une passe qui n'a **rien trouvé** : celle-là ne
+   décrit pas la cible, elle constate une absence de mesure — elle affaiblit
+   la provenance sans limiter la preuve.
 3. **Un remplacement de candidate n'est pas une preuve.** Si l'hôte déclare
    qu'un candidat a été écarté au profit d'un autre — en particulier si la
    nature ou le rôle a changé — exige une preuve explicite que la nouvelle

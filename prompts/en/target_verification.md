@@ -46,6 +46,11 @@ Three rules follow:
    whole-window rectangle) or that a surface is **not enumerable**, then that
    evidence cannot on its own attest the requested object: conclude `match`
    only on a NATURE or ROLE proof that goes beyond geometry.
+   An inspection pass may also declare itself **bounded** (floor count, partial
+   coverage, sample): that is an incomplete proof, not a proof. Distinguish it
+   from a pass that found **nothing**: that one does not describe the target,
+   it records an absence of measurement — it weakens provenance without
+   limiting the proof.
 3. **A replaced candidate is not a proof.** If the host declares that one
    candidate was discarded in favour of another — especially when the nature or
    role changed — require explicit evidence that the new nature satisfies the
