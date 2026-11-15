@@ -14,6 +14,7 @@ Format accepte pour ``llm_policy`` (tout est optionnel) :
 
     {
       "on_stall": "abort",
+      "stall_interval_s": 30,
       "profiles": {
         "selector": 120,
         "analysis": {"total_s": 300, "on_stall": "abort"},
@@ -52,6 +53,40 @@ DEFAULT_TOTALS: Dict[str, float] = {
 ACTIVE_STALL_POLICIES = ("abort",)
 DEFAULT_STALL_POLICY = "abort"
 
+# Battement de vie : pendant un appel muet, on ecrit une ligne « toujours en
+# vol » a intervalle regulier. Ce n'est PAS un timeout et ca ne raccourcit
+# jamais le budget : le plafond de la classe reste la seule autorite. 0 (ou
+# false / "off") desactive explicitement le battement.
+DEFAULT_STALL_INTERVAL_SECONDS = 30.0
+MIN_STALL_INTERVAL_SECONDS = 1.0
+MAX_STALL_INTERVAL_SECONDS = 300.0
+
+_DISABLED_INTERVALS = ("0", "off", "none", "false", "disabled")
+
+
+def _coerce_stall_interval(value: Any, fallback: float) -> float:
+    """Intervalle de battement : 0 = desactive ; valeur illisible = defaut."""
+    if isinstance(value, bool):
+        return 0.0 if value is False else float(fallback)
+    if isinstance(value, str):
+        raw = value.strip().lower()
+        if raw in _DISABLED_INTERVALS:
+            return 0.0
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return float(fallback)
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return float(fallback)
+    if seconds != seconds:  # NaN
+        return float(fallback)
+    if seconds <= 0:
+        return 0.0
+    return max(MIN_STALL_INTERVAL_SECONDS, min(MAX_STALL_INTERVAL_SECONDS, seconds))
+
+
 
 def _clamp_seconds(value: Any, fallback: float) -> float:
     """Borne un delai en secondes dans [MIN, MAX] ; valeur illisible = defaut."""
@@ -82,6 +117,7 @@ class LlmPolicy:
 
     profiles: Mapping[str, CallProfile] = field(default_factory=dict)
     on_stall: str = DEFAULT_STALL_POLICY
+    stall_interval_s: float = DEFAULT_STALL_INTERVAL_SECONDS
     source: str = "default"
 
     def profile_for(self, kind: Optional[str]) -> CallProfile:
@@ -162,6 +198,9 @@ def policy_from_mapping(raw: Any, source: str = "manifest") -> LlmPolicy:
         return base
 
     global_stall = _coerce_stall_policy(raw.get("on_stall"), base.on_stall)
+    stall_interval = _coerce_stall_interval(
+        raw.get("stall_interval_s", base.stall_interval_s), base.stall_interval_s
+    )
     raw_profiles = raw.get("profiles")
     profiles: Dict[str, CallProfile] = dict(base.profiles)
 
@@ -177,12 +216,17 @@ def policy_from_mapping(raw: Any, source: str = "manifest") -> LlmPolicy:
                 continue
             profiles[key] = profile
 
-    known_top = {"on_stall", "profiles"}
+    known_top = {"on_stall", "profiles", "stall_interval_s"}
     unknown_top = [key for key in raw if key not in known_top]
     if unknown_top:
         Logger.debug(f"[LlmPolicy] Cles racine inconnues ignorees {unknown_top}.")
 
-    return LlmPolicy(profiles=profiles, on_stall=global_stall, source=source)
+    return LlmPolicy(
+        profiles=profiles,
+        on_stall=global_stall,
+        stall_interval_s=stall_interval,
+        source=source,
+    )
 
 
 def _manifest_llm_policy(manifest: Any) -> Any:
@@ -213,3 +257,11 @@ def resolve_policy(runtime_state: Any = None) -> LlmPolicy:
 def profile_for(runtime_state: Any = None, kind: Optional[str] = None) -> CallProfile:
     """Raccourci : profil effectif d'une classe d'appel."""
     return resolve_policy(runtime_state).profile_for(kind)
+
+
+def stall_interval_for(runtime_state: Any = None) -> float:
+    """Intervalle du battement de vie, en secondes (0 = desactive)."""
+    try:
+        return float(resolve_policy(runtime_state).stall_interval_s)
+    except Exception:
+        return DEFAULT_STALL_INTERVAL_SECONDS

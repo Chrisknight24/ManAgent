@@ -519,6 +519,43 @@ TargetRegistry adds no output cap and does not lower
 no automatic substitution, reported back to the Solver. The opaque reference
 stays in the runtime; only the local name travels to the LLM.
 
+## 3j. LLM call policy (optional, `metadata.llm_policy`)
+
+The brain applies deadlines per **usage class**: a target selection does not
+deserve the same time as a plan. Without a declaration, its defaults apply
+(selector 120 s, analysis 300 s, default 600 s). Everything is overridable,
+nothing is mandatory.
+
+```json
+{"metadata": {"llm_policy": {
+   "on_stall": "abort",
+   "stall_interval_s": 30,
+   "profiles": {
+     "selector": 120,
+     "analysis": {"total_s": 300},
+     "default": 600
+   }}}}
+```
+
+- `profiles`: one entry per known usage class (`selector`, `analysis`,
+  `default`). A number means seconds; an object accepts `total_s`. Unknown
+  classes fall back to `default`. Bounds: 30 s to 1800 s.
+- `stall_interval_s`: **heartbeat**. While a call is in flight, the brain emits
+  `llm_call.stall` at that interval (`kind`, `tick`, `elapsed_s`, `budget_s`,
+  plus mission/solver when known). It interrupts nothing and **never** shortens
+  the budget: the profile is the only authority. Default 30 s, bounds 1 s to
+  300 s; `0`, `false` or `"off"` disable it explicitly.
+- `on_stall`: only `abort` is active. Other modes (retry, rotation, provider
+  failover) belong to a later workstream: they are ignored loudly instead of
+  being silently accepted.
+- Reserved, **inert** today: `thinking_level` and `reasoning_effort` (per
+  profile). They are parsed and validated, transmitted to no provider yet.
+  Declaring them breaks nothing and changes nothing.
+- An invalid manifest never blocks execution: an unreadable key is ignored and
+  the default applies.
+- Related events: `llm_call` (duration, outcome), `llm_call.stall` (heartbeat),
+  `world_snapshot.budget_low` (world context cut below the useful threshold).
+
 ## 4. Supported actions
 
 `runtime.configure`, `host.manifest.register`, `chat.send`,

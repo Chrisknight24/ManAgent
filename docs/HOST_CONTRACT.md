@@ -633,6 +633,43 @@ TargetRegistry n'ajoute aucun plafond de sortie et ne baisse pas
 retry local, pas de substitution automatique, remontée au Solver. La référence
 opaque reste côté runtime ; seul le nom local circule vers le LLM.
 
+## 3j. Politique d'appel LLM (optionnel, `metadata.llm_policy`)
+
+Le cerveau applique des délais par **classe d'usage** : une sélection de cible
+n'a pas le même droit au temps qu'un plan. Sans déclaration, ses défauts
+s'appliquent (sélecteur 120 s, analyse 300 s, défaut 600 s) ; tout est
+surchargeable, rien n'est obligatoire.
+
+```json
+{"metadata": {"llm_policy": {
+   "on_stall": "abort",
+   "stall_interval_s": 30,
+   "profiles": {
+     "selector": 120,
+     "analysis": {"total_s": 300},
+     "default": 600
+   }}}}
+```
+
+- `profiles` : une entrée par classe d'usage connue (`selector`, `analysis`,
+  `default`). Une valeur numérique = secondes ; un objet accepte `total_s`.
+  Toute classe inconnue retombe sur `default`. Bornes : 30 s à 1800 s.
+- `stall_interval_s` : **battement de vie**. Tant qu'un appel est en vol, le
+  cerveau émet `llm_call.stall` à cet intervalle (`kind`, `tick`, `elapsed_s`,
+  `budget_s`, mission/solver quand ils sont connus). Il n'interrompt rien et ne
+  raccourcit **jamais** le budget : le profil reste la seule autorité. Défaut
+  30 s, bornes 1 s à 300 s ; `0`, `false` ou `"off"` désactivent explicitement.
+- `on_stall` : seul `abort` est actif. Les autres modes (reprise, rotation,
+  bascule de fournisseur) appartiennent à un chantier ultérieur : ils sont
+  ignorés bruyamment plutôt qu'acceptés en silence.
+- Réservés, **inertes** aujourd'hui : `thinking_level` et `reasoning_effort`
+  (par profil). Ils sont lus et validés, transmis à aucun fournisseur pour
+  l'instant. Les déclarer ne casse rien et ne change rien.
+- Un manifeste invalide n'empêche jamais l'exécution : une clé illisible est
+  ignorée, le défaut s'applique.
+- Événements liés : `llm_call` (durée, issue), `llm_call.stall` (battement),
+  `world_snapshot.budget_low` (contexte du monde coupé sous le seuil utile).
+
 ## 4. Actions supportées (voir `core/constants.py:8`)
 
 | Action | Usage |

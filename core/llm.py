@@ -28,6 +28,7 @@ from core.i18n import _
 from pydantic import ValidationError
 from core.constants import LLM_STRUCTURED_MAX_ATTEMPTS, LLM_DISCOVERY_MAX_ITERATIONS
 from core.llm_policy import profile_for as _call_profile_for
+from core.llm_policy import stall_interval_for as _stall_interval_for
 if TYPE_CHECKING:
     from core.entity import Entity
     from core.discovery.data_provider import DataProvider
@@ -189,28 +190,52 @@ class Llm:
             return True
         return getattr(state, "generation_epoch", call_epoch) != call_epoch
 
-    async def _await_cancellable(self, operation, call_epoch: int):
+    async def _await_cancellable(self, operation, call_epoch: int = None, *,
+                                 kind: Optional[str] = None,
+                                 budget_s: Optional[float] = None,
+                                 tag: str = ""):
         """Attend un appel provider en annulant réellement la requête en vol.
 
         Les checks historiques ne s'exécutaient qu'APRÈS la réponse : un stop
         pendant un appel LLM laissait la requête tourner jusqu'au bout. Ici le
         flag cancel/epoch est surveillé toutes les 100 ms et la tâche HTTP est
         annulée dès qu'il change.
+
+        Battement de vie : tant que l'appel est en vol, un événement
+        `llm_call.stall` est émis à intervalle régulier (`llm_policy`,
+        30 s par défaut, 0 = désactivé). Il ne raccourcit rien et n'interrompt
+        rien : le budget de la classe reste la seule autorité. `call_epoch=None`
+        signifie « ne pas surveiller l'annulation » (appelants historiques qui
+        n'avaient pas cette surveillance).
         """
         task = asyncio.ensure_future(operation)
+        interval = _stall_interval_for(self.runtime_state)
+        started = time.monotonic()
+        next_tick = interval
+        tick = 0
         try:
             while not task.done():
-                if self._cancellation_requested(call_epoch):
+                if call_epoch is not None and self._cancellation_requested(call_epoch):
                     task.cancel()
                     try:
                         await task
                     except BaseException:
                         pass
                     Logger.warning(
-                        "[LLM] Appel interrompu en vol (cancel/epoch) — requête provider annulée."
+                        "[LLM] Appel interrompu en vol (cancel/epoch) → requête provider annulée."
                     )
                     raise asyncio.CancelledError("L'appel LLM a été annulé.")
                 await asyncio.wait({task}, timeout=0.1)
+                if task.done() or interval <= 0:
+                    continue
+                elapsed = time.monotonic() - started
+                while next_tick <= elapsed:
+                    tick += 1
+                    self._emit_stall_event(
+                        tick=tick, elapsed_s=elapsed, budget_s=budget_s,
+                        kind=kind, tag=tag,
+                    )
+                    next_tick += interval
             return task.result()
         finally:
             if not task.done():
@@ -219,6 +244,44 @@ class Llm:
                     await task
                 except BaseException:
                     pass
+
+    def _emit_stall_event(self, *, tick: int, elapsed_s: float,
+                          budget_s: Optional[float], kind: Optional[str],
+                          tag: str = "") -> None:
+        """Signale qu'un appel est toujours en vol. Jamais bloquant, jamais fatal."""
+        fields: Dict[str, Any] = {
+            "kind": str(kind or "default"),
+            "tick": int(tick),
+            "elapsed_s": round(float(elapsed_s), 1),
+        }
+        if budget_s is not None:
+            try:
+                fields["budget_s"] = round(float(budget_s), 1)
+            except (TypeError, ValueError):
+                pass
+        if tag:
+            fields["tag"] = str(tag)[:80]
+        state = self.runtime_state
+        if state is not None:
+            ctx = getattr(state, "execution_context", None) or {}
+            for key in ("mission_id", "solver_id", "step_id", "attempt_number", "session_id"):
+                try:
+                    value = ctx.get(key) if hasattr(ctx, "get") else getattr(ctx, key, None)
+                except Exception:
+                    value = None
+                if value is not None:
+                    fields[key] = value
+        try:
+            Logger.event("llm_call.stall", **fields)
+        except Exception:
+            pass
+
+    def _call_budget_for(self, call_kind: Optional[str]) -> Optional[float]:
+        """Budget de la classe d'appel, pour l'annoncer dans le battement."""
+        try:
+            return float(_call_profile_for(self.runtime_state, call_kind).total_s)
+        except Exception:
+            return None
 
     def has_capability(self, capability: str) -> bool:
         """
@@ -488,6 +551,9 @@ class Llm:
                         response = await self._await_cancellable(
                             provider.generate_response(user_message=full_prompt),
                             call_epoch,
+                            kind="text",
+                            budget_s=getattr(provider, "call_timeout_seconds", None),
+                            tag=tag or "",
                         )
                         break
                     except Exception as e:
@@ -1027,12 +1093,18 @@ class Llm:
 
         start_time = time.monotonic()
         try:
-            result = await provider.generate_structured_output(
-                prompt=prompt,
-                response_schema=schema,
-                context=ephemeral_context,
-                media_assets=media_assets,
-                max_output_tokens=max_output_tokens
+            result = await self._await_cancellable(
+                provider.generate_structured_output(
+                    prompt=prompt,
+                    response_schema=schema,
+                    context=ephemeral_context,
+                    media_assets=media_assets,
+                    max_output_tokens=max_output_tokens
+                ),
+                None,
+                kind=call_kind,
+                budget_s=self._call_budget_for(call_kind),
+                tag=tag or schema.__name__,
             )
             duration_ms = int((time.monotonic() - start_time) * 1000)
             try:
@@ -1113,6 +1185,9 @@ class Llm:
                         max_output_tokens=max_output_tokens
                     ),
                     call_epoch,
+                    kind=call_kind,
+                    budget_s=self._call_budget_for(call_kind),
+                    tag=tag or schema.__name__,
                 )
                 if self.runtime_state and (self.runtime_state.cancel_requested or getattr(self.runtime_state, "generation_epoch", 0) != call_epoch):
                     Logger.warning(f"[LLM] Résultat generate_structured ignoré car la session/génération a été annulée (epoch {call_epoch} vs actuel {getattr(self.runtime_state, 'generation_epoch', 0)}).")

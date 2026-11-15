@@ -1,9 +1,9 @@
 # Roadmap résiduelle — après P0/P1 (run `dcc9ec4b`)
 
-Ce document est la mémoire du chantier. Il ne décrit **que ce qui reste**, avec
-pour chaque point : la cause mesurée, le correctif attendu, et le critère qui
-dira « c'est fait ». Rien ici n'est nécessaire à la suite immédiate : le P0 et
-le P1 sont livrés, testés et couverts par des bancs de non-régression.
+Ce document est la mémoire du chantier. Il décrit ce qui **reste**, et garde en
+tête de section, quand il est livré, le point qui vient d'être fermé (avec son
+banc). Rien ici n'est nécessaire à la suite immédiate : le P0 et le P1 sont
+livrés, testés et couverts par des bancs de non-régression.
 
 Référence des correctifs livrés : `docs/CHANTIER_TARGET.md`,
 `tests/test_mission_dcc9ec4b_regression.py` et
@@ -11,25 +11,27 @@ Référence des correctifs livrés : `docs/CHANTIER_TARGET.md`,
 
 ---
 
-## 1. Watchdog d'appel (C1-bis)
+## 1. Watchdog d'appel (C1-bis) — **livré le 15/11**
 
-**Cause mesurée.** Un appel peut rester muet jusqu'au plafond de sa classe
-(600 s planner/juge, 300 s analyse, 120 s sélecteur). C'est honnête, mais un
-fournisseur qui ne répond jamais bloque la mission jusqu'à 10 minutes sans
-signe de vie intermédiaire.
+**Cause mesurée.** Un appel pouvait rester muet jusqu'au plafond de sa classe
+(600 s planner/juge, 300 s analyse, 120 s sélecteur) : l'utilisateur ne voyait
+rien, et rien ne distinguait « le fournisseur travaille » de « il ne répondra
+jamais ».
 
-**Correctif attendu.** Dans `core/llm.py`, un battement périodique (ex. toutes
-les 30 s) qui :
-- émet `llm_call.stall` avec `kind`, `elapsed_s`, `budget_s` ;
-- ne raccourcit **jamais** le budget (le plafond reste la seule autorité) ;
-- laisse l'hôte décider s'il veut annuler (le canal d'annulation existe déjà).
+**Livré.** `core/llm.py` émet `llm_call.stall` (`kind`, `tick`, `elapsed_s`,
+`budget_s`, mission/solver/étape quand ils sont connus) tant qu'un appel est en
+vol. L'intervalle vit dans `core/llm_policy.py` (`stall_interval_s`, 30 s par
+défaut, réglable par l'hôte via `metadata.llm_policy`, 0 = désactivé). Le
+battement **n'interrompt rien et ne raccourcit aucun budget** : le profil de la
+classe reste la seule autorité. Il couvre aussi le chemin legacy, qui n'avait
+aucune surveillance en vol.
 
-**Fait quand** : un appel bloqué produit au moins un événement par tranche de
-30 s, et un test montre qu'aucun budget n'est réduit par le watchdog.
+**Banc.** `tests/test_llm_stall_watchdog.py` : cadence, absence de battement
+quand c'est désactivé ou rapide, budget inchangé, exception préservée,
+annulation toujours effective.
 
-**Pourquoi différé** : le P0 corrige la cause (budgets réalistes). Le watchdog
-n'ajoute que du confort d'observabilité, et il touche au transport — donc au
-risque le plus élevé pour le plus faible gain immédiat.
+**Ce qui reste de ce chantier** : rien. Le streaming (§2) rendra `first_byte_ms`
+disponible et le battement plus fin, mais il n'est pas nécessaire à celui-ci.
 
 ---
 
@@ -187,10 +189,10 @@ preuve). Le wording décrit la sémantique du fait, sans citer une clé d'hôte 
 
 ## Ordre recommandé
 
-1. **§1 watchdog** — le plus rentable en observabilité pour un risque contenu.
-2. **§5 / §7 vérifications de rejeu** — aucun code : on lit les événements et on
+1. **§3 thinking_level** — petit, isolé, rend réel un réglage déjà déclaré.
+2. **§2 streaming** — le plus risqué : fournisseur par fournisseur, jamais d'un
+   coup, avec des bancs qui simulent chaque flux.
+3. **§5 / §7 vérifications de rejeu** — aucun code : on lit les événements et on
    tranche ce qui reste (`budget`, `enumeration`, `invariants` visibles).
-3. **§3 thinking_level** — quand un besoin de qualité par classe apparaît.
-4. **§2 streaming** — provider par provider, sans urgence.
-5. **§4 hedging** — seulement si l'hôte exprime un besoin explicite.
-6. **§6 nommage** — en attente d'un producteur côté hôte ; rien à faire ici.
+4. **§4 hedging** — seulement si l'hôte exprime un besoin explicite.
+5. **§6 nommage** — en attente d'un producteur côté hôte ; rien à faire ici.

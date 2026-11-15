@@ -189,7 +189,49 @@
       }
     },
     "environment": { "type": "object" },
-    "metadata": { "type": "object" },
+    "metadata": {
+      "type": "object",
+      "description": "Optional host metadata. The brain only reads what it documents; unknown keys are ignored.",
+      "properties": {
+        "world_snapshot": {
+          "type": "object",
+          "description": "Optional world-state source. max_chars is a CEILING: the brain asks for its own budget (2000 by default, configurable) and keeps the minimum of both. See docs/HOST_CONTRACT.md section 3g.",
+          "properties": {
+            "source_tool": { "type": "string" },
+            "source_args": { "type": "object" },
+            "max_chars": { "type": "integer", "minimum": 1, "maximum": 4000 }
+          }
+        },
+        "llm_policy": {
+          "type": "object",
+          "description": "Optional per-usage-class call policy. Ref: docs/HOST_CONTRACT.md section 3j.",
+          "properties": {
+            "on_stall": { "type": "string", "enum": ["abort"] },
+            "stall_interval_s": {
+              "type": ["number", "string", "boolean"],
+              "description": "Heartbeat interval while a call is in flight. Default 30, bounds 1-300; 0/false/'off' disables. Never shortens the call budget."
+            },
+            "profiles": {
+              "type": "object",
+              "additionalProperties": {
+                "oneOf": [
+                  { "type": "number", "minimum": 30, "maximum": 1800 },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "total_s": { "type": "number", "minimum": 30, "maximum": 1800 },
+                      "on_stall": { "type": "string", "enum": ["abort"] },
+                      "thinking_level": { "type": "string", "description": "Reserved, inert today." },
+                      "reasoning_effort": { "type": "string", "description": "Reserved, inert today." }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
     "embeddings": {
       "type": "object",
       "properties": {
