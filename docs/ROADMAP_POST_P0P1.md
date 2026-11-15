@@ -96,20 +96,56 @@ garantit déjà qu'une panne ne soit plus imputée au plan.
 
 ## 5. Parité du manifeste hôte (C5)
 
-**Cause mesurée.** Le plafond effectif du monde venait du manifeste
-(`world_snapshot.max_chars` ≈ 300) alors que le cerveau demandait 2000. Le
-cerveau a maintenant un signal (`world_snapshot.budget_low`) et une vue
-`planner` qui ne gaspille plus le budget en coordonnées, mais l'hôte doit
-relever son plafond.
+**Correction factuelle (15/11).** Le cerveau avait écrit que le plafond venait
+du manifeste hôte. C'est faux : l'hôte ne déclarait rien, et notre code
+retombait sur le budget **demandé par l'appelant** (600 à l'époque). Les 294
+caractères observés venaient de notre règle « champ entier ou omis » : la liste
+des fenêtres ne tenait pas, elle était supprimée, et le marqueur ne disait pas
+quoi. Corrigé (budget 2000, champs omis nommés). L'hôte déclare désormais
+`world_snapshot.max_chars = 2000` : le signal `world_snapshot.budget_low`
+redevient ce qu'il doit être — un vrai signal, plus un artefact.
 
-**Correctif attendu.** Message hôte (déjà rédigé, voir
-`brain_to_host.md` côté pont) + vérification de parité :
-- `world_snapshot.max_chars` ≥ 2000 ;
-- `llm_policy` accepté dans `metadata` ou `environment` ;
-- les noms de cibles arrivent dans `target_registry` **avant** le premier plan.
+**Reste à vérifier au prochain rejeu :**
+- `world_snapshot.chars` > 1200 et aucun `world_snapshot.budget_low` ;
+- `llm_policy` accepté dans `metadata` ou `environment` (l'hôte ne déclare rien
+  aujourd'hui : nos défauts s'appliquent, c'est le comportement voulu) ;
+- aucun nom de cible publié par le monde n'arrive sans être résolvable.
 
-**Fait quand** : un run réel produit `world_snapshot.chars` > 1200 et aucun
-`world_snapshot.budget_low`.
+---
+
+## 7. Nommage à l'arrivée (arbitrage du 15/11)
+
+**Décision : option (a), bornée.** Le cerveau projette le snapshot en
+`register=True`, mais seulement pour les producteurs que `get_world_state`
+déclare **explicitement** (`ref` + `scope`) :
+
+- jamais `well_known` (ce sont des lieux, pas des cibles) ;
+- plafonné à `WORLD_SNAPSHOT_MAX_ITEMS` entrées par photo ;
+- idempotent par construction : `TargetRegistry.upsert` est indexé par
+  corrélation puis par référence, donc la même référence garde le même nom (pas
+  de cibles fantômes, pas de générations qui dérivent) ;
+- un nom publié par le monde reste **non prouvé** : le gate de preuve s'applique
+  à l'identique.
+
+**Prérequis hôte** : que `get_world_state` déclare `focused` et `windows[]`
+comme producteurs. Sans déclaration, `project_target_payload` ne fait rien
+(comportement actuel, aucun risque).
+
+**Fait quand** : un plan qui référence un handle du monde s'exécute sans
+repasser par le sélecteur, et un test montre qu'aucune entrée `well_known` n'est
+inscrite.
+
+---
+
+## 8. `enumeration` vu du gate (arbitrage du 15/11)
+
+**Décision : mapper dans `fields.attributes`, borné.** Notre règle « une surface
+non énumérable ne prouve rien à elle seule » a besoin de le savoir ; sinon le
+vérificateur conclut `uncertain` sur une surface légitimement non énumérable.
+
+Forme attendue : `{window, nodes (compte), enumerable, reason}` — jamais la
+liste. Aucun code cerveau à écrire : c'est de la déclaration côté hôte, puis un
+banc de non-régression sur le prompt du vérificateur.
 
 ---
 
@@ -125,9 +161,11 @@ relever son plafond.
 
 ## Ordre recommandé
 
-1. **§5 parité hôte** — aucun code, débloque la valeur des correctifs déjà
-   livrés (le monde utile et les noms de cibles).
-2. **§1 watchdog** — le plus rentable en observabilité pour un risque contenu.
-3. **§3 thinking_level** — quand un besoin de qualité par classe apparaît.
-4. **§2 streaming** — provider par provider, sans urgence.
-5. **§4 hedging** — seulement si l'hôte exprime un besoin explicite.
+1. **§1 watchdog** — le plus rentable en observabilité pour un risque contenu.
+2. **§7 nommage à l'arrivée** — débloque la valeur des correctifs livrés (le
+   planificateur cesse de repayer un sélecteur).
+3. **§8 `enumeration`** — une déclaration hôte, un banc, aucun risque.
+4. **§3 thinking_level** — quand un besoin de qualité par classe apparaît.
+5. **§2 streaming** — provider par provider, sans urgence.
+6. **§4 hedging** — seulement si l'hôte exprime un besoin explicite.
+7. **§5 parité** — vérification au prochain rejeu, plus une action à écrire.
