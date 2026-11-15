@@ -768,6 +768,25 @@ def _target_registry(runtime_state):
     return getattr(runtime_state, "target_registry", None)
 
 
+_SELECTION_CONTEXT_LIMIT = 1200
+
+
+def _selection_question(question: str, target_description: str = "") -> str:
+    """Question du selecteur : intention ET contexte, jamais l'un sans l'autre.
+
+    `target_description or question` appauvrissait le prompt : des que l'ecran
+    grossit (liste de cibles), l'intention disparaissait. Ici les deux sont
+    transmis, bornes, sans duplication quand ils sont identiques.
+    """
+    intent = str(question or "").strip()
+    context = str(target_description or "").strip()
+    if not context or context in intent:
+        return intent
+    if not intent:
+        return context[:_SELECTION_CONTEXT_LIMIT]
+    return f"{intent}\n\n[Contexte de selection] {context[:_SELECTION_CONTEXT_LIMIT]}"
+
+
 def _tool_kind(tools_mgr, tool_name: str) -> str:
     """`kind` déclaré par l'hôte pour un outil (`action` par défaut)."""
     try:
@@ -930,7 +949,7 @@ async def _resolve_target_with_llm(
     )
     result = await resolve_target(
         llm=llm,
-        question=target_description or question,
+        question=_selection_question(question, target_description),
         world=world,
         contract=contract,
         registry=registry,
@@ -956,7 +975,7 @@ async def _resolve_target_with_llm(
         _emit_target_resolve_failed(
             runtime_state,
             code=code,
-            question=target_description or question,
+            question=_selection_question(question, target_description),
             source=tag,
             observed=rich,
             reason=rich,
@@ -2000,7 +2019,7 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
         _selection = selection_from_payload(
             _registry, _selection_contract, _selection_payload
         )
-        _semantic_query = target_description or question
+        _semantic_query = _selection_question(question, target_description)
         # Une ancre finale n'a de sens que si un producteur peut la consommer :
         # sans producteur, on n'offre que des cibles locales (aucune impasse).
         _selection_anchor_kinds = (
