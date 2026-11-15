@@ -101,9 +101,21 @@ du manifeste hôte. C'est faux : l'hôte ne déclarait rien, et notre code
 retombait sur le budget **demandé par l'appelant** (600 à l'époque). Les 294
 caractères observés venaient de notre règle « champ entier ou omis » : la liste
 des fenêtres ne tenait pas, elle était supprimée, et le marqueur ne disait pas
-quoi. Corrigé (budget 2000, champs omis nommés). L'hôte déclare désormais
+quoi. Corrigé (champs omis nommés). L'hôte déclare désormais
 `world_snapshot.max_chars = 2000` : le signal `world_snapshot.budget_low`
 redevient ce qu'il doit être — un vrai signal, plus un artefact.
+
+**Budget configurable (livré le 15/11).** Il n'était pas seulement écrit en
+dur : la valeur de l'hôte **remplaçait** la nôtre dans les deux sens
+(`limit = int(cfg.get("max_chars") or max_chars)`). Demander 600 à un hôte qui
+déclare 2000 donnait donc 2000 — le réglage était décoratif. Désormais
+`min(demande, plafond hôte)` : l'hôte ne peut que **réduire**. Le budget se
+règle par payload (`world_snapshot.max_chars`, racine ou
+`runtime_configuration`) ou par environnement (`MANAGENT_WORLD_SNAPSHOT_CHARS`),
+défaut **2000**, borne absolue 4000. Un seul réglage pour tous les points de
+lecture ; la convergence finale demande explicitement le maximum.
+L'événement `world_snapshot` porte maintenant `budget` : un run court n'est plus
+automatiquement un hôte pauvre, c'est peut-être un réglage bas.
 
 **Reste à vérifier au prochain rejeu :**
 - `world_snapshot.chars` > 1200 et aucun `world_snapshot.budget_low` ;
@@ -113,39 +125,53 @@ redevient ce qu'il doit être — un vrai signal, plus un artefact.
 
 ---
 
-## 6. Nommage à l'arrivée (arbitrage du 15/11)
+## 6. Nommage à l'arrivée (arbitrage du 15/11, corrigé le même jour)
 
-**Décision : option (a), bornée.** Le cerveau projette le snapshot en
-`register=True`, mais seulement pour les producteurs que `get_world_state`
-déclare **explicitement** (`ref` + `scope`) :
+**Décision : rien à faire côté cerveau.** L'option (a) que nous avions retenue
+— inscrire les producteurs du snapshot — est **retirée**. Deux raisons :
 
-- jamais `well_known` (ce sont des lieux, pas des cibles) ;
-- plafonné à `WORLD_SNAPSHOT_MAX_ITEMS` entrées par photo ;
-- idempotent par construction : `TargetRegistry.upsert` est indexé par
-  corrélation puis par référence, donc la même référence garde le même nom (pas
-  de cibles fantômes, pas de générations qui dérivent) ;
-- un nom publié par le monde reste **non prouvé** : le gate de preuve s'applique
-  à l'identique.
+1. elle contredit notre propre décision (`docs/HOST_CONTRACT.md` §3g.1) : la
+   photo du monde reste **descriptive** (`register=False`), aucune adoption
+   implicite, parce qu'une photo peut être périmée entre la lecture et l'action ;
+2. elle aurait produit des noms acceptés par le validateur (`registry.all()`
+   alimente `_known_target_local_names`) puis **refusés par les acteurs** de
+   l'hôte, qui ne savent résoudre que les références de leur magasin. On aurait
+   échangé un tour de sélecteur contre un échec d'action.
 
-**Prérequis hôte** : que `get_world_state` déclare `focused` et `windows[]`
-comme producteurs. Sans déclaration, `project_target_payload` ne fait rien
-(comportement actuel, aucun risque).
+La voie propre est celle de l'hôte : un producteur explicite qui **matérialise**
+une vraie cible en un appel (fenêtre, focus). C'est notre modèle habituel
+(`produces`/`consumes` + `output_target_name`) : le nom est actionnable, et le
+coût est payé une fois au lieu d'à chaque photo.
 
-**Fait quand** : un plan qui référence un handle du monde s'exécute sans
-repasser par le sélecteur, et un test montre qu'aucune entrée `well_known` n'est
-inscrite.
+**Ce qu'il faut** : que l'hôte expose ce producteur. Aucun code cerveau à écrire
+d'ici là, et sans lui rien ne change.
 
 ---
 
-## 7. `enumeration` vu du gate (arbitrage du 15/11)
+## 7. Preuve bornée / `enumeration` (arbitrage du 15/11)
 
-**Décision : mapper dans `fields.attributes`, borné.** Notre règle « une surface
-non énumérable ne prouve rien à elle seule » a besoin de le savoir ; sinon le
-vérificateur conclut `uncertain` sur une surface légitimement non énumérable.
+**Livré côté hôte** : `enumeration = {window, nodes (compte), truncated?,
+reason}` dans `fields.attributes`, et `invariants.enumerable` **conservé** avec
+son sens propre (« cette cible s'appuie sur l'arbre »), qui n'est pas le nôtre
+(« la surface est-elle entièrement couverte »). Les deux questions sont
+distinctes et les deux faits sont utiles : **aucune clé à déplacer**.
 
-Forme attendue : `{window, nodes (compte), enumerable, reason}` — jamais la
-liste. Aucun code cerveau à écrire : c'est de la déclaration côté hôte, puis un
-banc de non-régression sur le prompt du vérificateur.
+**Livré côté cerveau** : la règle 2 du prompt du vérificateur couvre désormais
+une passe **bornée** (compte plancher, couverture partielle, échantillon), et
+distingue une passe qui n'a **rien trouvé** (absence de mesure → affaiblit la
+provenance sans limiter la preuve) d'une couverture partielle (→ limite la
+preuve). Le wording décrit la sémantique du fait, sans citer une clé d'hôte :
+`tests/test_target_verification_bounded_proof.py`.
+
+**Reste à vérifier au rejeu :**
+- `enumeration` et `invariants` apparaissent bien dans `target_json` : ils
+  dépendent de la déclaration `fields.attributes` de l'hôte. Sans elle, le fait
+  existe chez lui et reste invisible chez nous ;
+- `truncated: true` avec un compte très inférieur au plafond annoncé (200) :
+  soit le compte est un plancher, soit `truncated` veut dire autre chose. À
+  trancher avec l'hôte, car c'est ce fait qui déclenche la règle ;
+- `uia_no_cover` (pas de couverture) et `uia_no_node` (rien trouvé) ne doivent
+  pas produire le même verdict.
 
 ---
 
@@ -162,10 +188,9 @@ banc de non-régression sur le prompt du vérificateur.
 ## Ordre recommandé
 
 1. **§1 watchdog** — le plus rentable en observabilité pour un risque contenu.
-2. **§6 nommage à l'arrivée** — débloque la valeur des correctifs livrés (le
-   planificateur cesse de repayer un sélecteur).
-3. **§7 `enumeration`** — une déclaration hôte, un banc, aucun risque.
-4. **§3 thinking_level** — quand un besoin de qualité par classe apparaît.
-5. **§2 streaming** — provider par provider, sans urgence.
-6. **§4 hedging** — seulement si l'hôte exprime un besoin explicite.
-7. **§5 parité** — vérification au prochain rejeu, plus une action à écrire.
+2. **§5 / §7 vérifications de rejeu** — aucun code : on lit les événements et on
+   tranche ce qui reste (`budget`, `enumeration`, `invariants` visibles).
+3. **§3 thinking_level** — quand un besoin de qualité par classe apparaît.
+4. **§2 streaming** — provider par provider, sans urgence.
+5. **§4 hedging** — seulement si l'hôte exprime un besoin explicite.
+6. **§6 nommage** — en attente d'un producteur côté hôte ; rien à faire ici.
