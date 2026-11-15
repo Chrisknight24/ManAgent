@@ -19,10 +19,13 @@ from core.target_ingress import (
 from core.target_contract import declared_target_kind
 from core.targets import TargetEntry, TargetSelection
 from core.targeting import (
+    PROVIDER_QUOTA_EXHAUSTED,
+    PROVIDER_UNAVAILABLE,
     ObservedWorld,
     TargetingResult,
     extract_media_assets,
     proof_status,
+    provider_failure_code,
     resolve_target,
     verify_final_target,
 )
@@ -1441,8 +1444,20 @@ async def _choose_target_with_llm(
     try:
         selected = await llm.generate_structured(
             prompt=prompt, schema=_TargetSelectionResult, tag=tag,
+            call_kind="selector",
         )
     except Exception as e:
+        # Une panne de fournisseur n'est pas une absence de cible : ne jamais
+        # la transformer en TARGET_NOT_FOUND (faux diagnostic + tentative perdue).
+        _infra_code = provider_failure_code(e)
+        if _infra_code:
+            return None, _target_error(
+                _infra_code,
+                _(
+                    "Le selecteur n'a pas pu repondre ({code}) : ce n'est pas "
+                    "une absence de cible."
+                ).format(code=_infra_code),
+            )
         return None, _target_error(
             "TARGET_NOT_FOUND", _("Selection de cible impossible : {err}").format(err=e)
         )

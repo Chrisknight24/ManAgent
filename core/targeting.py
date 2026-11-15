@@ -51,6 +51,13 @@ from core.target_ingress import (
     project_target_payload,
 )
 from core.targets import TargetEntry, TargetRegistry
+from providers.base_provider import (
+    ProviderAuthError,
+    ProviderModelNotFoundError,
+    ProviderNetworkError,
+    ProviderQuotaExhaustedError,
+    ProviderServiceUnavailableError,
+)
 
 
 MAX_TARGETING_ROUNDS = 2
@@ -58,6 +65,48 @@ MAX_PROMPT_CANDIDATES = 120
 MAX_PROMPT_VIEW_CHARS = 12000
 MAX_PROMPT_ATTRIBUTE_CHARS = 600
 MAX_RAW_ANCHOR_CHARS = 2000
+
+# Codes d'echec d'INFRASTRUCTURE (jamais des codes de cible). Une panne de
+# fournisseur ne prouve pas qu'une cible n'existe pas : les confondre fait
+# ouvrir les mauvais disjoncteurs et coute des tentatives.
+PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+PROVIDER_QUOTA_EXHAUSTED = "PROVIDER_QUOTA_EXHAUSTED"
+
+
+class SelectorUnavailable(RuntimeError):
+    """Le selecteur n'a pas pu repondre (cause d'infrastructure, pas de cible).
+
+    Porte un `code` ferme (`PROVIDER_UNAVAILABLE` / `PROVIDER_QUOTA_EXHAUSTED`)
+    pour que l'appelant distingue une indisponibilite d'une vraie absence.
+    """
+
+    def __init__(self, code: str, message: str = ""):
+        self.code = str(code or PROVIDER_UNAVAILABLE)
+        self.message = str(message or self.code)
+        super().__init__(f"{self.code}: {self.message}")
+
+
+def provider_failure_code(exc: BaseException) -> str:
+    """Code honnete d'un echec de fournisseur ("" si ce n'est pas une infra).
+
+    Centralise la frontiere « panne d'infrastructure » / « reponse illisible ».
+    Un seul endroit a maintenir, quel que soit le provider ou l'hote.
+    """
+    if isinstance(exc, ProviderQuotaExhaustedError):
+        return PROVIDER_QUOTA_EXHAUSTED
+    if isinstance(
+        exc,
+        (
+            ProviderServiceUnavailableError,
+            ProviderNetworkError,
+            ProviderAuthError,
+            ProviderModelNotFoundError,
+            TimeoutError,
+            OSError,
+        ),
+    ):
+        return PROVIDER_UNAVAILABLE
+    return ""
 
 TARGET_KIND_LOCAL = "local"
 TARGET_KIND_ANCHOR = "anchor"
@@ -949,8 +998,14 @@ async def _ask_selector(
             tag=tag,
             with_discovery=False,
             media_assets=world.media_assets() or None,
+            call_kind="selector",
         )
-    except Exception:
+    except Exception as exc:
+        # Indisponibilite / delai : on ne sait PAS si une cible existe.
+        # Toute autre erreur (schema, reponse illisible) est un echec reel.
+        code = provider_failure_code(exc)
+        if code:
+            raise SelectorUnavailable(code, str(exc)) from exc
         return None
     if isinstance(decision, TargetDecision):
         return decision
@@ -1416,18 +1471,33 @@ async def resolve_target(
 
     for _round in range(budget + 1):
         allow_probes = budget > 0
-        decision = await _ask_selector(
-            llm=llm,
-            question=question,
-            world=world,
-            disclosure=disclosure,
-            allow_anchor=allow_anchor,
-            anchor_kinds=anchor_kinds,
-            allow_probes=allow_probes,
-            language=language,
-            tag=tag,
-            verifier_hint=verifier_hint,
-        )
+        try:
+            decision = await _ask_selector(
+                llm=llm,
+                question=question,
+                world=world,
+                disclosure=disclosure,
+                allow_anchor=allow_anchor,
+                anchor_kinds=anchor_kinds,
+                allow_probes=allow_probes,
+                language=language,
+                tag=tag,
+                verifier_hint=verifier_hint,
+            )
+        except SelectorUnavailable as exc:
+            # Panne d'infrastructure : on ne sait pas si une cible existe.
+            # Ne JAMAIS convertir cela en TARGET_NOT_FOUND (faux diagnostic,
+            # mauvais disjoncteur, tentative perdue).
+            return TargetingResult(
+                kind="none",
+                world=world,
+                error_code=exc.code,
+                error_message=_(
+                    "Le selecteur n'a pas pu repondre ({code}) : ce n'est pas "
+                    "une absence de cible."
+                ).format(code=exc.code),
+                verifications=verifications,
+            )
         if decision is None:
             return TargetingResult(
                 kind="none",
