@@ -24,8 +24,18 @@ class FailureClass(str, Enum):
     EXECUTION_FAILURE = "execution_failure"                 # Échec lors de l'exécution d'une étape (outil ou convergence)
     CONVERGENCE_FAILURE = "convergence_failure"             # Échec de convergence sémantique (détectée par LLM)
     ALIGNMENT_FAILURE = "alignment_failure"                 # Perception/alignement : le monde n'est pas en panne, la cible ne correspond pas
+    INFRA_FAILURE = "infra_failure"                         # Infrastructure (fournisseur IA injoignable) : rien à replanifier
     USER_CANCELLED = "user_cancelled"                       # Annulation par l'utilisateur
     MAX_RETRIES_REACHED = "max_retries_reached"             # Épuisement des tentatives sans succès
+
+
+# Codes d'erreur qui disent « panne d'infrastructure », jamais « ce plan est
+# mauvais ». Un appel replanifié à l'identique ne les répare pas : ils doivent
+# avoir leur propre compteur et ne pas consommer le budget de convergence.
+INFRA_FAILURE_CODES = frozenset({
+    "PROVIDER_UNAVAILABLE",
+    "PROVIDER_QUOTA_EXHAUSTED",
+})
 
 # ---------------------------------------------
 # Nœud d'exécution (représente une étape ou une sous-tâche)

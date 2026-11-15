@@ -744,6 +744,19 @@ _ARGS_INVALID_MARKERS = (
     "enum",
 )
 
+# Panne d'infrastructure : ni le plan ni l'outil ne sont en cause. Distinct de
+# HOST_REFUSAL (le plan est refusé) et de TOOL_ERROR (l'outil a échoué).
+_INFRA_CODES = frozenset({
+    "PROVIDER_UNAVAILABLE",
+    "PROVIDER_QUOTA_EXHAUSTED",
+})
+_INFRA_MARKERS = (
+    "provider_unavailable",
+    "provider_quota_exhausted",
+    "fournisseur injoignable",
+    "provider unavailable",
+)
+
 _HASH_EXCLUDED_CODES = frozenset({
     "JSON", "LLM", "API", "URL", "GUI", "RUM", "MCP", "HTTP", "HTTPS",
     "TRUE", "FALSE", "NONE", "NULL",
@@ -773,6 +786,13 @@ def classify_failure_origin(
         return "PLAN_REJECTED"
     if cls == "user_cancelled":
         return "USER_CANCELLED"
+    if cls == "infra_failure":
+        return "INFRA"
+    if code and code in _INFRA_CODES:
+        return "INFRA"
+    for marker in _INFRA_MARKERS:
+        if marker in text:
+            return "INFRA"
 
     if code and code in _HOST_REFUSAL_CODES:
         return "HOST_REFUSAL"
@@ -928,6 +948,31 @@ def is_nonretryable_contract_failure(reason: Any) -> bool:
     """
     text = str(reason or "").lower()
     return "[pre-dispatch]" in text and "unresolved target reference" in text
+
+
+def is_infra_streak(history, threshold: int = 3) -> bool:
+    """L'infrastructure est-elle la cause répétée (pur, sans LLM) ?
+
+    history = liste de (signature, actions_matérielles), signatures déjà
+    normalisées en minuscules. Vrai si les `threshold` derniers échecs ont une
+    origine INFRA (fournisseur injoignable / quota). Replanifier à l'identique
+    ne répare pas une infrastructure : on s'arrête proprement avec un message
+    honnête, au lieu d'accuser le plan.
+    """
+    if not isinstance(history, list) or len(history) < threshold:
+        return False
+    try:
+        tail = history[-threshold:]
+    except Exception:
+        return False
+    infra_origins = {"infra"} | {code.lower() for code in _INFRA_CODES}
+    for sig, _ in tail:
+        if failure_signature_class(sig) == "infra_failure":
+            continue
+        if failure_signature_origin(sig) in infra_origins:
+            continue
+        return False
+    return True
 
 
 # Refus d'argument rendus par l'hôte APRÈS dispatch : le contrat d'appel est

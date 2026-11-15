@@ -17,7 +17,8 @@ from core.prompt_sanitizer import redact_binary_payloads
 from core.execution_models import (
     ExecutionNode,
     PlanAttempt,
-    FailureClass
+    FailureClass,
+    INFRA_FAILURE_CODES,
 )
 from core.discovery.data_asset import ToolOutputDataAsset
 import time
@@ -26,6 +27,33 @@ import time
 class _ConditionError(Exception):
     """Condition `execute_if` inexploitable (syntaxe/typage) : l'étape échoue,
     elle n'est jamais sautée silencieusement."""
+
+
+def _failure_error_code(node: Any) -> str:
+    """Code d'erreur porté par le bundle d'échec d'un nœud (dict ou objet).
+
+    Deux formes coexistent dans le code : `{"error": {"code": ...}}` (erreurs
+    d'outil fermées) et un objet portant `error_code`. On lit les deux, jamais
+    on ne devine.
+    """
+    try:
+        bundle = getattr(node, "failure_bundle", None)
+    except Exception:
+        return ""
+    if bundle is None:
+        return ""
+    try:
+        if isinstance(bundle, dict):
+            error = bundle.get("error")
+            if isinstance(error, dict):
+                return str(error.get("code") or "").strip()
+            return str(bundle.get("error_code") or "").strip()
+        error = getattr(bundle, "error", None)
+        if isinstance(error, dict):
+            return str(error.get("code") or "").strip()
+        return str(getattr(bundle, "error_code", "") or "").strip()
+    except Exception:
+        return ""
 
 
 # Sentinelle BUG-2 : opérande NON scalaire (dict/liste) issu de l'interpolation
@@ -304,15 +332,28 @@ class Executor:
                         node.status = ExecutionStatus.FAILED
                         node.actual_result = supplemental_data
                         node.error_reason = step.result_context
+                        _err_code = _failure_error_code(node)
+                        _is_infra = _err_code in INFRA_FAILURE_CODES
+                        _failure_cls = (
+                            FailureClass.INFRA_FAILURE
+                            if _is_infra
+                            else (
+                                FailureClass.ALIGNMENT_FAILURE
+                                if str(getattr(step, "tool_name", "") or "") in _ALIGNMENT_STEP_TOOLS
+                                else FailureClass.EXECUTION_FAILURE
+                            )
+                        )
                         node.failure_origin = classify_failure_origin(
-                            FailureClass.ALIGNMENT_FAILURE
-                            if str(getattr(step, "tool_name", "") or "") in _ALIGNMENT_STEP_TOOLS
-                            else FailureClass.EXECUTION_FAILURE,
+                            _failure_cls,
                             step.result_context,
                             tool_name=str(getattr(step, "tool_name", "") or ""),
+                            error_code=_err_code,
                         )
                         node.ended_at = time.time()
-                        self._drop_failed_target_alias(step)
+                        # Une panne d'infrastructure ne condamne pas la cible :
+                        # l'alias reste valide pour la tentative suivante.
+                        if not _is_infra:
+                            self._drop_failed_target_alias(step)
 
                         await self.solver.propagate_event(Events.STEP_STATUS_CHANGED, {
                             "step_id": step.id,
@@ -334,11 +375,7 @@ class Executor:
                             status=ExecutionStatus.FAILED,
                             final_context=final_context,
                             error_reason=_("Échec à l'étape {} : {}").format(step.id, step.result_context),
-                            failure_class=(
-                                FailureClass.ALIGNMENT_FAILURE
-                                if str(getattr(step, "tool_name", "") or "") in _ALIGNMENT_STEP_TOOLS
-                                else FailureClass.EXECUTION_FAILURE
-                            ),
+                            failure_class=_failure_cls,
                             target_entity="Executor",
                             failure_bundle=getattr(node, "failure_bundle", None),
                             breakout_report=getattr(node, "breakout_report", None),

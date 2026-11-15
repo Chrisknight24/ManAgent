@@ -29,7 +29,7 @@ from core.constants import (
     MAX_INSIGHTS_PER_TARGET,
 )
 from .supervisor import Supervisor
-from .plan_models import FeasibilityDecision, Plan, SolverResult, ExecutionStatus, MissionSignature, CompactedAdvice, normalize_failure_signature, failure_signature_class, is_sterile_streak, is_quota_streak, is_nonretryable_contract_failure, is_host_target_contract_refusal, host_refusal_budget_exhausted
+from .plan_models import FeasibilityDecision, Plan, SolverResult, ExecutionStatus, MissionSignature, CompactedAdvice, normalize_failure_signature, failure_signature_class, is_sterile_streak, is_quota_streak, is_infra_streak, is_nonretryable_contract_failure, is_host_target_contract_refusal, host_refusal_budget_exhausted
 from .planner import Planner
 from .executor import Executor
 from core.llm import Llm
@@ -765,6 +765,24 @@ class Solver(Supervisor, Entity):
                             consecutive_quota_failures=2,
                         )
                         self.context += _("\n[Abandon] {}.").format(_quota_why)
+                        break
+
+                    # Disjoncteur infrastructure : un fournisseur injoignable
+                    # ne se répare pas en replanifiant. Arrêt propre, message
+                    # honnête : on n'accuse pas le plan.
+                    if fail_history and is_infra_streak(fail_history):
+                        _infra_why = _(
+                            "Arrêt : fournisseur IA injoignable 3 fois de "
+                            "suite. Ce n'est pas le plan qui est en cause — "
+                            "réessayez quand le service répond."
+                        )
+                        Logger.warning(f"[Solver:{self.id}] 🛑 {_infra_why}")
+                        Logger.event(
+                            "provider_circuit_open",
+                            solver_id=self.id,
+                            consecutive_infra_failures=3,
+                        )
+                        self.context += _("\n[Abandon] {}.").format(_infra_why)
                         break
 
                     # Santé outils : on juge les outils, pas seulement les plans.
@@ -1763,6 +1781,8 @@ class Solver(Supervisor, Entity):
                 FailureClass.PLAN_REJECTED_VALIDATION.value,
                 FailureClass.PLAN_REJECTED_SUPERVISOR.value,
                 FailureClass.USER_CANCELLED.value,
+                # Une panne d'infrastructure ne dit rien de la qualité du plan.
+                FailureClass.INFRA_FAILURE.value,
             }
             if str(name).endswith("started"):
                 counts_toward_budget: Optional[bool] = None
@@ -1799,7 +1819,14 @@ class Solver(Supervisor, Entity):
                 code = str(getattr(result_or_material, "error_code", "") or "")
                 bundle = getattr(result_or_material, "failure_bundle", None)
                 if not code and bundle is not None:
-                    code = str(getattr(bundle, "error_code", "") or "")
+                    if isinstance(bundle, dict):
+                        error = bundle.get("error")
+                        if isinstance(error, dict):
+                            code = str(error.get("code") or "")
+                        if not code:
+                            code = str(bundle.get("error_code") or "")
+                    else:
+                        code = str(getattr(bundle, "error_code", "") or "")
             fail_history.append((
                 normalize_failure_signature(
                     failure_class, reason, tool=tool, code=code
