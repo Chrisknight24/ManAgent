@@ -113,7 +113,7 @@ redevient ce qu'il doit être — un vrai signal, plus un artefact.
 
 ---
 
-## 7. Nommage à l'arrivée (arbitrage du 15/11)
+## 6. Nommage à l'arrivée (arbitrage du 15/11)
 
 **Décision : option (a), bornée.** Le cerveau projette le snapshot en
 `register=True`, mais seulement pour les producteurs que `get_world_state`
@@ -137,7 +137,7 @@ inscrite.
 
 ---
 
-## 8. `enumeration` vu du gate (arbitrage du 15/11)
+## 7. `enumeration` vu du gate (arbitrage du 15/11)
 
 **Décision : mapper dans `fields.attributes`, borné.** Notre règle « une surface
 non énumérable ne prouve rien à elle seule » a besoin de le savoir ; sinon le
@@ -149,7 +149,7 @@ banc de non-régression sur le prompt du vérificateur.
 
 ---
 
-## 6. Divers — dettes identifiées, non bloquantes
+## 8. Divers — dettes identifiées, non bloquantes
 
 | Dette | Où | Pourquoi ce n'est pas fait |
 |---|---|---|
