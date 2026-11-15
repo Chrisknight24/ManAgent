@@ -981,7 +981,8 @@ class Llm:
                     error: Optional[Exception] = None, duration_ms: Optional[int] = None,
                     mission_id: Optional[str] = None, schema_name: Optional[str] = None,
                     context: Optional[List[Dict]] = None, kind: str = "structured",
-                    usage: Optional[Dict[str, Any]] = None):
+                    usage: Optional[Dict[str, Any]] = None,
+                    call_kind: Optional[str] = None):
         event_fields = {
             "tag": tag or "llm_call",
             "kind": kind,
@@ -989,6 +990,8 @@ class Llm:
             "model_id": self.model_id,
             "prompt": prompt,
         }
+        for hint_name, hint_value in self._reasoning_hints_for(call_kind).items():
+            event_fields[hint_name] = hint_value
         if schema_name:
             event_fields["schema"] = schema_name
         if response is not None:
@@ -1048,9 +1051,13 @@ class Llm:
     def _apply_call_policy(self, provider: Any, call_kind: Optional[str]) -> None:
         """Applique le profil de delai de la classe d'appel au provider.
 
-        Agnostique : on ne pose que deux attributs, lus par le provider s'il le
+        Agnostique : on ne pose que des attributs, lus par le provider s'il le
         souhaite (``getattr`` cote provider). Aucun provider n'est requis de les
         implementer, et un provider qui les ignore garde son comportement.
+
+        Les indices de raisonnement (`thinking_level`, `reasoning_effort`) sont
+        transmis dans un vocabulaire neutre. Un provider sans traduction native
+        les ignore : on le dit, on ne fabrique pas de valeur a sa place.
         """
         try:
             profile = _call_profile_for(self.runtime_state, call_kind)
@@ -1063,10 +1070,35 @@ class Llm:
         except Exception as exc:
             Logger.debug(f"[LLM] Profil '{profile.kind}' non applicable ({exc}).")
             return
+        try:
+            provider.call_thinking_level = profile.thinking_level
+            provider.call_reasoning_effort = profile.reasoning_effort
+            if (profile.thinking_level or profile.reasoning_effort) and not getattr(
+                provider, "SUPPORTS_REASONING_HINTS", False
+            ):
+                Logger.debug(
+                    f"[LLM] Provider '{getattr(provider, 'provider_id', '?')}' sans "
+                    f"traduction native : indices de raisonnement transmis mais inertes."
+                )
+        except Exception as exc:
+            Logger.debug(f"[LLM] Indices de raisonnement non transmis ({exc}).")
         Logger.debug(
             f"[LLM] Profil d'appel '{profile.kind}' : total={profile.total_s:.0f}s "
             f"on_stall={profile.on_stall}"
         )
+
+    def _reasoning_hints_for(self, call_kind: Optional[str]) -> Dict[str, str]:
+        """Indices de raisonnement effectifs de la classe, pour l'observabilite."""
+        try:
+            profile = _call_profile_for(self.runtime_state, call_kind)
+        except Exception:
+            return {}
+        hints = {}
+        if profile.thinking_level:
+            hints["thinking_level"] = profile.thinking_level
+        if profile.reasoning_effort:
+            hints["reasoning_effort"] = profile.reasoning_effort
+        return hints
 
     async def _generate_structured_legacy(
         self,
@@ -1125,7 +1157,8 @@ class Llm:
                 schema_name=schema.__name__,
                 context=ephemeral_context,
                 kind="structured",
-                usage=raw_usage
+                usage=raw_usage,
+                call_kind=call_kind,
             )
             return result
         except Exception as e:
@@ -1138,7 +1171,8 @@ class Llm:
                 mission_id=mission_id,
                 schema_name=schema.__name__,
                 context=ephemeral_context,
-                kind="structured"
+                kind="structured",
+                call_kind=call_kind,
             )
             raise
 
@@ -1211,7 +1245,8 @@ class Llm:
                     schema_name=schema.__name__,
                     context=ephemeral_context,
                     kind="structured",
-                    usage=raw_usage
+                    usage=raw_usage,
+                    call_kind=call_kind,
                 )
                 return result
 

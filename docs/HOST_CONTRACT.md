@@ -646,7 +646,7 @@ surchargeable, rien n'est obligatoire.
    "stall_interval_s": 30,
    "profiles": {
      "selector": 120,
-     "analysis": {"total_s": 300},
+     "analysis": {"total_s": 300, "thinking_level": "high"},
      "default": 600
    }}}}
 ```
@@ -662,9 +662,14 @@ surchargeable, rien n'est obligatoire.
 - `on_stall` : seul `abort` est actif. Les autres modes (reprise, rotation,
   bascule de fournisseur) appartiennent à un chantier ultérieur : ils sont
   ignorés bruyamment plutôt qu'acceptés en silence.
-- Réservés, **inertes** aujourd'hui : `thinking_level` et `reasoning_effort`
-  (par profil). Ils sont lus et validés, transmis à aucun fournisseur pour
-  l'instant. Les déclarer ne casse rien et ne change rien.
+- `thinking_level` et `reasoning_effort` (par profil) : indices de raisonnement
+  dans un vocabulaire **neutre** — `minimal`, `low`, `medium`, `high`. Le
+  cerveau les transmet au fournisseur, qui les traduit dans son vocabulaire
+  natif s'il sait le faire. Un fournisseur sans traduction native les ignore
+  **explicitement** : aucune valeur n'est inventée à la place d'une absence.
+  Une valeur hors vocabulaire est ignorée (log), jamais devinée. Quand ils sont
+  déclarés, ils apparaissent dans l'événement `llm_call` (`thinking_level`,
+  `reasoning_effort`), pour qu'on sache ce qui a été demandé.
 - Un manifeste invalide n'empêche jamais l'exécution : une clé illisible est
   ignorée, le défaut s'applique.
 - Événements liés : `llm_call` (durée, issue), `llm_call.stall` (battement),

@@ -17,20 +17,22 @@ Format accepte pour ``llm_policy`` (tout est optionnel) :
       "stall_interval_s": 30,
       "profiles": {
         "selector": 120,
-        "analysis": {"total_s": 300, "on_stall": "abort"},
+        "analysis": {"total_s": 300, "on_stall": "abort", "thinking_level": "high"},
         "default": 600
       }
     }
 
-Champs reserves (declares, NON lus en P0) : ``thinking_level`` et
-``reasoning_effort``. Ils appartiennent au chantier « effort de raisonnement »
-et seront branches sans casser ce contrat.
+Champs de raisonnement : ``thinking_level`` et ``reasoning_effort`` sont lus,
+validés dans un vocabulaire NEUTRE (minimal/low/medium/high) et transmis au
+fournisseur comme des indices. Un fournisseur qui n'a pas de traduction native
+les ignore explicitement ; le cerveau ne fabrique jamais une valeur a la place
+d'une absence. Une valeur hors vocabulaire est ignoree (log), pas devinee.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 from utils.logger import Logger
 
@@ -106,7 +108,8 @@ class CallProfile:
     kind: str
     total_s: float
     on_stall: str = DEFAULT_STALL_POLICY
-    # Reserves : chantier « effort de raisonnement » (non lus en P0).
+    # Indices NEUTRES de raisonnement (voir THINKING_LEVELS / REASONING_EFFORTS).
+    # "" = l'hote n'a rien demande : on n'invente aucun defaut.
     thinking_level: str = ""
     reasoning_effort: str = ""
 
@@ -147,6 +150,29 @@ def default_policy() -> LlmPolicy:
     return LlmPolicy(profiles=profiles, on_stall=DEFAULT_STALL_POLICY, source="default")
 
 
+# Vocabulaire NEUTRE des indices de raisonnement, commun a tous les
+# fournisseurs. Un provider traduit ces mots dans SON vocabulaire natif, ou
+# les ignore explicitement : le cerveau n'invente jamais une valeur a la place
+# d'une absence, et ne devine pas ce qu'un fournisseur comprendrait.
+THINKING_LEVELS = ("minimal", "low", "medium", "high")
+REASONING_EFFORTS = ("minimal", "low", "medium", "high")
+
+
+def _coerce_reasoning_hint(value: Any, allowed: Tuple[str, ...], label: str,
+                           kind: str) -> str:
+    """Un indice connu est garde ; inconnu -> absent (jamais un defaut invente)."""
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    if raw in allowed:
+        return raw
+    Logger.info(
+        f"[LlmPolicy] {label}='{raw}' inconnu pour le profil '{kind}' "
+        f"(attendu: {', '.join(allowed)}) : ignore."
+    )
+    return ""
+
+
 def _coerce_stall_policy(value: Any, fallback: str) -> str:
     candidate = str(value or "").strip().lower()
     if not candidate:
@@ -176,7 +202,6 @@ def _coerce_profile(kind: str, raw: Any, default_total: float) -> Optional[CallP
     )
     known = {
         "total_s", "total", "on_stall",
-        # reserves (acceptes, non lus en P0)
         "thinking_level", "reasoning_effort",
     }
     unknown = [key for key in raw if key not in known]
@@ -186,8 +211,12 @@ def _coerce_profile(kind: str, raw: Any, default_total: float) -> Optional[CallP
         kind=kind,
         total_s=total,
         on_stall=_coerce_stall_policy(raw.get("on_stall"), DEFAULT_STALL_POLICY),
-        thinking_level=str(raw.get("thinking_level") or "")[:64],
-        reasoning_effort=str(raw.get("reasoning_effort") or "")[:64],
+        thinking_level=_coerce_reasoning_hint(
+            raw.get("thinking_level"), THINKING_LEVELS, "thinking_level", kind
+        ),
+        reasoning_effort=_coerce_reasoning_hint(
+            raw.get("reasoning_effort"), REASONING_EFFORTS, "reasoning_effort", kind
+        ),
     )
 
 

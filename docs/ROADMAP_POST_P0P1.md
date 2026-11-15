@@ -54,24 +54,31 @@ provider par provider, pas dans le chemin commun.
 
 ---
 
-## 3. `thinking_level` / `reasoning_effort` (C3)
+## 3. `thinking_level` / `reasoning_effort` (C3) — **livré le 15/11**
 
-**État actuel.** `core/llm_policy.py` déclare déjà `thinking_level` et
-`reasoning_effort` dans `CallProfile`, avec les bornes et la validation. Ils
-sont **inertes** : aucun provider ne les lit encore.
+**Cause mesurée.** L'hôte n'avait aucun moyen de demander « réfléchis plus » sur
+une classe d'appel précise, alors que tous les fournisseurs exposent un réglage
+équivalent sous des noms différents.
 
-**Correctif attendu.**
-1. l'hôte les déclare dans son manifeste (`llm_policy.profiles.<classe>`) ;
-2. `Llm._apply_call_policy` les transmet au provider ;
-3. chaque provider les traduit dans son vocabulaire natif, ou les ignore
-   explicitement (jamais un défaut inventé à la place d'une absence).
+**Livré.**
+1. `core/llm_policy.py` valide les deux indices dans un vocabulaire **neutre**
+   (`minimal`, `low`, `medium`, `high`). Une valeur hors vocabulaire est
+   ignorée (log) ; une absence reste une absence, sans défaut inventé.
+2. `Llm._apply_call_policy` pose `call_thinking_level` /
+   `call_reasoning_effort` sur le provider, comme il posait déjà les délais.
+3. `BaseProvider.SUPPORTS_REASONING_HINTS = False` par défaut : un provider qui
+   sait traduire les indices passe le drapeau à `True` et lit les attributs.
+   Les autres les ignorent **explicitement**, et le cerveau l'écrit (debug) au
+   lieu de laisser croire que le réglage a pris.
+4. `llm_call` porte les indices réellement demandés, pour que l'observabilité
+   dise ce qui a été tenté et non ce qu'on espérait.
 
-**Fait quand** : un test montre qu'une valeur déclarée par l'hôte arrive au
-provider, qu'une absence de déclaration laisse le provider tel quel, et qu'une
-valeur inconnue est ignorée sans erreur.
+**Banc.** `tests/test_llm_reasoning_hints.py` : vocabulaire, valeurs inconnues,
+absence, attributs réellement posés, événement `llm_call`, drapeau provider.
 
-**Pourquoi différé** : transverse à tous les providers, sans effet mesurable
-sur le run `dcc9ec4b`.
+**Ce qui reste de ce chantier** : brancher la traduction native provider par
+provider, quand un besoin réel apparaît. Le contrat, lui, est stable : aucun
+provider n'est obligé de comprendre les indices.
 
 ---
 
@@ -189,10 +196,9 @@ preuve). Le wording décrit la sémantique du fait, sans citer une clé d'hôte 
 
 ## Ordre recommandé
 
-1. **§3 thinking_level** — petit, isolé, rend réel un réglage déjà déclaré.
-2. **§2 streaming** — le plus risqué : fournisseur par fournisseur, jamais d'un
+1. **§2 streaming** — le plus risqué : fournisseur par fournisseur, jamais d'un
    coup, avec des bancs qui simulent chaque flux.
-3. **§5 / §7 vérifications de rejeu** — aucun code : on lit les événements et on
+2. **§5 / §7 vérifications de rejeu** — aucun code : on lit les événements et on
    tranche ce qui reste (`budget`, `enumeration`, `invariants` visibles).
-4. **§4 hedging** — seulement si l'hôte exprime un besoin explicite.
-5. **§6 nommage** — en attente d'un producteur côté hôte ; rien à faire ici.
+3. **§4 hedging** — seulement si l'hôte exprime un besoin explicite.
+4. **§6 nommage** — en attente d'un producteur côté hôte ; rien à faire ici.

@@ -532,7 +532,7 @@ nothing is mandatory.
    "stall_interval_s": 30,
    "profiles": {
      "selector": 120,
-     "analysis": {"total_s": 300},
+     "analysis": {"total_s": 300, "thinking_level": "high"},
      "default": 600
    }}}}
 ```
@@ -548,9 +548,14 @@ nothing is mandatory.
 - `on_stall`: only `abort` is active. Other modes (retry, rotation, provider
   failover) belong to a later workstream: they are ignored loudly instead of
   being silently accepted.
-- Reserved, **inert** today: `thinking_level` and `reasoning_effort` (per
-  profile). They are parsed and validated, transmitted to no provider yet.
-  Declaring them breaks nothing and changes nothing.
+- `thinking_level` and `reasoning_effort` (per profile): reasoning hints in a
+  **neutral** vocabulary — `minimal`, `low`, `medium`, `high`. The brain passes
+  them to the provider, which translates them into its native vocabulary when
+  it can. A provider without a native translation ignores them
+  **explicitly**: no value is invented to fill an absence. A value outside the
+  vocabulary is ignored (logged), never guessed. When declared, they appear in
+  the `llm_call` event (`thinking_level`, `reasoning_effort`) so it is visible
+  what was asked for.
 - An invalid manifest never blocks execution: an unreadable key is ignored and
   the default applies.
 - Related events: `llm_call` (duration, outcome), `llm_call.stall` (heartbeat),

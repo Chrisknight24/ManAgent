@@ -221,8 +221,16 @@
                     "properties": {
                       "total_s": { "type": "number", "minimum": 30, "maximum": 1800 },
                       "on_stall": { "type": "string", "enum": ["abort"] },
-                      "thinking_level": { "type": "string", "description": "Reserved, inert today." },
-                      "reasoning_effort": { "type": "string", "description": "Reserved, inert today." }
+                      "thinking_level": {
+                        "type": "string",
+                        "enum": ["minimal", "low", "medium", "high"],
+                        "description": "Neutral reasoning hint. Passed to the provider; ignored explicitly when it has no native translation. Absent = no default invented. See docs/HOST_CONTRACT.md section 3j."
+                      },
+                      "reasoning_effort": {
+                        "type": "string",
+                        "enum": ["minimal", "low", "medium", "high"],
+                        "description": "Neutral reasoning hint. Same rules as thinking_level."
+                      }
                     }
                   }
                 ]

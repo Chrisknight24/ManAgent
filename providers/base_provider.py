@@ -79,6 +79,13 @@ class BaseProvider(ABC):
     Encapsule la gestion native du pool de clés API ordonnées et le cooldown.
     """
 
+    # Capacité DÉCLARÉE, jamais devinée : un provider qui sait traduire les
+    # indices neutres de raisonnement dans SON vocabulaire natif passe ce
+    # drapeau à True et lit `call_thinking_level` / `call_reasoning_effort`.
+    # Défaut False : les indices restent posés mais inertes, et le cerveau le
+    # dit explicitement (aucune valeur inventée à la place d'une absence).
+    SUPPORTS_REASONING_HINTS: bool = False
+
     def __init__(self):
         self.system_prompt: str = ""
         self.provider_name: Optional[str] = None
