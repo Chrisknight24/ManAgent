@@ -315,9 +315,11 @@ async def _run_llm_analysis(data: Any, query: str, runtime_state, tag: str, medi
             schema=AnalysisResult,
             tag=tag,
             media_assets=media_assets,
-            mission_id=explicit_mid
+            mission_id=explicit_mid,
+            call_kind="analysis",
         )
-        msg = getattr(analysis, "message", None) or getattr(analysis, "error_reason", None)
+        raw_msg = getattr(analysis, "message", None) or getattr(analysis, "error_reason", None)
+        msg = raw_msg
         # Un échec sans `message` explicite ne doit pas devenir « Analyse
         # terminée. » (faux succès narratif). L'écart perçu est la meilleure
         # explication disponible, sinon la raison générique reste honnête.
@@ -325,15 +327,26 @@ async def _run_llm_analysis(data: Any, query: str, runtime_state, tag: str, medi
             gap = getattr(analysis, "gap", None)
             if gap:
                 msg = _("Analyse négative : {gap}").format(gap=str(gap)[:300])
-        msg = msg or _("Analyse terminée.")
-        # Canal de repli perception : MÊME en échec, ce que l'on voit doit
-        # survivre dans `data` (le `message` porte « ce qui EST visible »).
-        # Sinon l'info est perdue pour le registre de variables / le RUM et le
-        # replan n'a rien à exploiter.
+        has_real_msg = bool(str(raw_msg or "").strip()) or (
+            not analysis.success and bool(str(getattr(analysis, "gap", None) or "").strip())
+        )
+        if analysis.success:
+            msg = msg or _("Analyse terminée (aucun détail fourni).")
+        else:
+            msg = msg or _("Analyse en échec sans raison fournie.")
+        # Canal de repli perception : ce que l'on voit doit survivre dans
+        # `data` (le `message` porte « ce qui EST visible »), MÊME quand le
+        # modèle n'a rien mis dans `data`. Sinon l'info est perdue pour le
+        # registre de variables / le RUM et le replan n'a rien à exploiter.
+        # Vaut aussi en succès : une observation sans payload structuré reste
+        # une observation (elle ne doit pas disparaître d'une tentative à
+        # l'autre). Jamais de donnée inventée : un message de remplissage ne
+        # devient pas une observation.
         data_out = analysis.data
-        if not analysis.success and (
-            data_out is None or (isinstance(data_out, str) and not data_out.strip())
-        ):
+        if (
+            data_out is None
+            or (isinstance(data_out, str) and not data_out.strip())
+        ) and has_real_msg:
             data_out = msg
         return {
             "result": analysis.success,
