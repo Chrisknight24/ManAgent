@@ -644,6 +644,7 @@ surchargeable, rien n'est obligatoire.
 {"metadata": {"llm_policy": {
    "on_stall": "abort",
    "stall_interval_s": 30,
+   "stream_structured": true,
    "profiles": {
      "selector": 120,
      "analysis": {"total_s": 300, "thinking_level": "high"},
@@ -659,6 +660,13 @@ surchargeable, rien n'est obligatoire.
   `budget_s`, mission/solver quand ils sont connus). Il n'interrompt rien et ne
   raccourcit **jamais** le budget : le profil reste la seule autorité. Défaut
   30 s, bornes 1 s à 300 s ; `0`, `false` ou `"off"` désactivent explicitement.
+- `stream_structured` : lecture en **flux** des réponses structurées (défaut
+  `true`). Le provider consomme son flux natif ; le cerveau publie
+  `llm_call.first_byte_ms` (latence jusqu'au premier contenu réel), sans
+  changer le contrat de sortie (toujours l'objet validé). Un provider qui ne
+  sait pas lire en flux garde son chemin classique et n'annonce **aucun**
+  `first_byte_ms` : on ne mesure pas ce qui n'a pas été observé. `false` coupe
+  le flux partout — coupe-circuit si un fournisseur se comporte mal en flux.
 - `on_stall` : seul `abort` est actif. Les autres modes (reprise, rotation,
   bascule de fournisseur) appartiennent à un chantier ultérieur : ils sont
   ignorés bruyamment plutôt qu'acceptés en silence.

@@ -530,6 +530,7 @@ nothing is mandatory.
 {"metadata": {"llm_policy": {
    "on_stall": "abort",
    "stall_interval_s": 30,
+   "stream_structured": true,
    "profiles": {
      "selector": 120,
      "analysis": {"total_s": 300, "thinking_level": "high"},
@@ -545,6 +546,13 @@ nothing is mandatory.
   plus mission/solver when known). It interrupts nothing and **never** shortens
   the budget: the profile is the only authority. Default 30 s, bounds 1 s to
   300 s; `0`, `false` or `"off"` disable it explicitly.
+- `stream_structured`: **streamed** reading of structured responses (default
+  `true`). The provider consumes its native stream; the brain publishes
+  `llm_call.first_byte_ms` (latency until the first real content), without
+  changing the output contract (still the validated object). A provider that
+  cannot stream keeps its classic path and announces **no** `first_byte_ms`:
+  what was not observed is not measured. `false` disables streaming
+  everywhere — a kill switch if a provider misbehaves in streaming mode.
 - `on_stall`: only `abort` is active. Other modes (retry, rotation, provider
   failover) belong to a later workstream: they are ignored loudly instead of
   being silently accepted.

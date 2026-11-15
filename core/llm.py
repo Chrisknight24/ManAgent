@@ -29,6 +29,7 @@ from pydantic import ValidationError
 from core.constants import LLM_STRUCTURED_MAX_ATTEMPTS, LLM_DISCOVERY_MAX_ITERATIONS
 from core.llm_policy import profile_for as _call_profile_for
 from core.llm_policy import stall_interval_for as _stall_interval_for
+from core.llm_policy import stream_structured_for as _stream_structured_for
 if TYPE_CHECKING:
     from core.entity import Entity
     from core.discovery.data_provider import DataProvider
@@ -110,6 +111,13 @@ class Llm:
             self.model_id = model_id
 
         self.context: List[Dict[str, str]] = []
+
+        # --- OBSERVATION D'UN APPEL (premier contenu) ---
+        # Renseigne par `_begin_call_observation` avant chaque appel structure.
+        # Une instance de Llm traite ses appels en sequence : pas de partage
+        # concurrent de ces deux horodatages.
+        self._call_started_at: Optional[float] = None
+        self._call_first_byte_at: Optional[float] = None
 
         # --- PROGRESSIVE DISCLOSURE ---
         self._discovery_enabled = False
@@ -992,6 +1000,12 @@ class Llm:
         }
         for hint_name, hint_value in self._reasoning_hints_for(call_kind).items():
             event_fields[hint_name] = hint_value
+        first_byte_ms = self._first_byte_ms()
+        if first_byte_ms is not None:
+            if duration_ms is not None:
+                # Arrondis : le premier contenu ne peut pas suivre la fin.
+                first_byte_ms = min(first_byte_ms, int(duration_ms))
+            event_fields["first_byte_ms"] = first_byte_ms
         if schema_name:
             event_fields["schema"] = schema_name
         if response is not None:
@@ -1082,10 +1096,44 @@ class Llm:
                 )
         except Exception as exc:
             Logger.debug(f"[LLM] Indices de raisonnement non transmis ({exc}).")
+        try:
+            provider.call_stream_structured = _stream_structured_for(self.runtime_state)
+        except Exception as exc:
+            Logger.debug(f"[LLM] Option de flux non transmise ({exc}).")
         Logger.debug(
             f"[LLM] Profil d'appel '{profile.kind}' : total={profile.total_s:.0f}s "
             f"on_stall={profile.on_stall}"
         )
+
+    def _begin_call_observation(self, provider: Any) -> None:
+        """Prepare la mesure du premier contenu pour l'appel qui vient.
+
+        Le provider a le droit d'ignorer le hook : dans ce cas rien n'est
+        mesure, et aucun `first_byte_ms` n'est emis (pas de valeur inventee).
+        """
+        self._call_started_at = time.monotonic()
+        self._call_first_byte_at = None
+        try:
+            provider.reset_first_byte()
+        except Exception:
+            pass
+        try:
+            provider.call_first_byte_hook = self._note_first_byte
+        except Exception:
+            pass
+
+    def _note_first_byte(self) -> None:
+        """Premier contenu reel : horodate une seule fois par appel."""
+        if self._call_first_byte_at is None:
+            self._call_first_byte_at = time.monotonic()
+
+    def _first_byte_ms(self) -> Optional[int]:
+        """Latence jusqu'au premier contenu, ou None si non observee."""
+        started = self._call_started_at
+        first = self._call_first_byte_at
+        if started is None or first is None:
+            return None
+        return max(0, int(round((first - started) * 1000)))
 
     def _reasoning_hints_for(self, call_kind: Optional[str]) -> Dict[str, str]:
         """Indices de raisonnement effectifs de la classe, pour l'observabilite."""
@@ -1124,6 +1172,7 @@ class Llm:
         self._apply_call_policy(provider, call_kind)
 
         start_time = time.monotonic()
+        self._begin_call_observation(provider)
         try:
             result = await self._await_cancellable(
                 provider.generate_structured_output(
@@ -1209,6 +1258,7 @@ class Llm:
                 self._emit_active_model(is_fallback=(len(excluded_models) > 0))
 
                 start_time = time.monotonic()
+                self._begin_call_observation(provider)
                 call_epoch = getattr(self.runtime_state, "generation_epoch", 0) if self.runtime_state else 0
                 result = await self._await_cancellable(
                     provider.generate_structured_output(

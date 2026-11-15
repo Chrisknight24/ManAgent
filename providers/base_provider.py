@@ -5,7 +5,7 @@ Classe abstraite de base et exceptions de domaine pour tous les providers IA.
 Gère nativement le pool de clés API et le cooldown par clé.
 """
 
-from typing import Optional, AsyncGenerator, Type, List, Dict, Any
+from typing import Optional, AsyncGenerator, Type, List, Dict, Any, Callable
 from pydantic import BaseModel
 from abc import ABC, abstractmethod
 import asyncio
@@ -86,6 +86,11 @@ class BaseProvider(ABC):
     # dit explicitement (aucune valeur inventée à la place d'une absence).
     SUPPORTS_REASONING_HINTS: bool = False
 
+    # Capacité de flux pour les réponses STRUCTURÉES : un provider qui sait
+    # lire sa réponse en flux (sans changer le contrat de sortie) passe ce
+    # drapeau à True. Défaut False : le chemin non-streaming reste inchangé.
+    STREAMS_STRUCTURED: bool = False
+
     def __init__(self):
         self.system_prompt: str = ""
         self.provider_name: Optional[str] = None
@@ -93,6 +98,12 @@ class BaseProvider(ABC):
         self.model_name: Optional[str] = None
         self.runtime_state: Any = None
         self.call_epoch: Optional[int] = None
+        # Observation optionnelle d'un appel : le cerveau pose un hook, le
+        # provider le déclenche au premier contenu réel. Aucun provider n'est
+        # obligé de l'appeler ; sans appel, rien n'est mesuré (pas de valeur
+        # inventée).
+        self.call_first_byte_hook: Optional[Callable[[], None]] = None
+        self._first_byte_marked: bool = False
         # Dernier usage tokens du dernier appel (normalisé, jamais inventé).
         # {prompt_tokens, completion_tokens, total_tokens, source: real|estimated|none}
         self._last_usage: Optional[Dict[str, Any]] = None
@@ -398,6 +409,26 @@ class BaseProvider(ABC):
         """Un appel a réussi : la rafale est finie, compteurs remis à zéro."""
         self._rate_limit_streak = 0
         self._pool_cooldown_until = 0.0
+
+    # --- Observation du premier contenu (optionnelle) ---
+    def reset_first_byte(self) -> None:
+        """Remet l'observation à zéro avant un nouvel appel."""
+        self._first_byte_marked = False
+
+    def _mark_first_byte(self) -> None:
+        """Signale le premier contenu réel de l'appel (une seule fois).
+
+        Ne lève jamais : une mesure ne doit pas pouvoir casser un appel.
+        """
+        if self._first_byte_marked:
+            return
+        self._first_byte_marked = True
+        hook = getattr(self, "call_first_byte_hook", None)
+        if callable(hook):
+            try:
+                hook()
+            except Exception:
+                pass
 
     @abstractmethod
     async def initialize(self):

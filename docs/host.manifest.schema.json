@@ -211,6 +211,10 @@
               "type": ["number", "string", "boolean"],
               "description": "Heartbeat interval while a call is in flight. Default 30, bounds 1-300; 0/false/'off' disables. Never shortens the call budget."
             },
+            "stream_structured": {
+              "type": ["boolean", "string", "number"],
+              "description": "Stream structured responses (default true). Providers that declare native streaming publish llm_call.first_byte_ms; others keep their classic path. false disables streaming everywhere. See docs/HOST_CONTRACT.md section 3j."
+            },
             "profiles": {
               "type": "object",
               "additionalProperties": {

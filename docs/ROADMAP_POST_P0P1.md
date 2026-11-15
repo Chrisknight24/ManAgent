@@ -35,22 +35,40 @@ disponible et le battement plus fin, mais il n'est pas nécessaire à celui-ci.
 
 ---
 
-## 2. Streaming des réponses structurées (C2-bis)
+## 2. Streaming des réponses structurées (C2-bis) — **en cours : OpenAI livré**
 
-**Cause mesurée.** Le provider attend la réponse complète avant de parser.
-Sur 90 s de latence, l'utilisateur ne voit rien et le watchdog lui-même ne peut
-rien mesurer d'utile.
+**Cause mesurée.** Le provider attend la réponse complète avant de parser. Sur
+90 s de latence, l'utilisateur ne voit rien et le watchdog lui-même ne peut rien
+mesurer d'utile.
 
 **Correctif attendu.** Consommer le flux natif du provider pour :
 - horodater le **premier octet** (`llm_call.first_byte_ms`) — c'est la vraie
   mesure de vivacité ;
 - alimenter le watchdog du point 1 sans changer le contrat de sortie.
 
-**Fait quand** : `llm_call` porte `first_byte_ms`, et la latence perçue est
-attribuable (attente réseau vs génération).
+**Livré pour OpenAI (OpenAI-compatible de référence).**
+- `providers/openai_compatible.py` : accumulateur SSE pur (texte + usage +
+  premier contenu + lignes illisibles comptées + erreur serveur jamais
+  silencieuse) et boucle HTTP en flux avec la même discipline de clés que
+  l'appel classique (rotation 429/503, 401/403, réseau).
+- `BaseProvider` : `STREAMS_STRUCTURED` (capacité déclarée, défaut `False`),
+  `reset_first_byte` / `_mark_first_byte`, hook optionnel posé par le cerveau.
+- `Llm` : `llm_call.first_byte_ms` seulement si un premier contenu a été
+  réellement observé ; sinon absent (aucune valeur inventée).
+- Coupe-circuit hôte : `llm_policy.stream_structured` (défaut `true`, `false`
+  partout). Un provider qui ne déclare pas la capacité garde son chemin
+  classique, à l'octet près.
+- Banc : `tests/test_streaming_structured.py` — SSE coupé, lignes illisibles,
+  usage, erreur serveur, rotation de clés, 401, réseau, flux vide, coupe-circuit,
+  et doc/schéma.
 
-**Pourquoi différé** : chaque provider expose un flux différent. À faire
-provider par provider, pas dans le chemin commun.
+**Reste de ce chantier** : les trois jumeaux OpenAI-compatible (OpenRouter,
+Groq, DeepSeek — même module, labels et endpoints propres), puis Anthropic et
+Gemini (formats de flux différents, à traiter séparément). Chaque provider
+arrive avec le même banc, étendu à son format.
+
+**Pourquoi différé pour les autres** : chaque provider expose un flux différent.
+On ne bascule pas quatre transports d'un coup sans avoir validé le premier.
 
 ---
 

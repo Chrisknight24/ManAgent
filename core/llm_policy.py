@@ -15,6 +15,7 @@ Format accepte pour ``llm_policy`` (tout est optionnel) :
     {
       "on_stall": "abort",
       "stall_interval_s": 30,
+      "stream_structured": true,
       "profiles": {
         "selector": 120,
         "analysis": {"total_s": 300, "on_stall": "abort", "thinking_level": "high"},
@@ -64,6 +65,30 @@ MIN_STALL_INTERVAL_SECONDS = 1.0
 MAX_STALL_INTERVAL_SECONDS = 300.0
 
 _DISABLED_INTERVALS = ("0", "off", "none", "false", "disabled")
+
+# Lecture en flux des reponses STRUCTUREES : le contrat de sortie ne change
+# pas (meme objet Pydantic), seule la latence devient mesurable (premier
+# contenu). Actif par defaut pour les providers qui declarent savoir le faire ;
+# l'hote peut le couper globalement si un fournisseur se comporte mal en flux.
+DEFAULT_STREAM_STRUCTURED = True
+_TRUE_VALUES = ("1", "on", "true", "enabled", "yes")
+_FALSE_VALUES = ("0", "off", "none", "false", "disabled", "no")
+
+
+def _coerce_bool(value: Any, fallback: bool, label: str) -> bool:
+    """Booleen tolerant : illisible -> defaut (jamais une exception)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        raw = value.strip().lower()
+        if raw in _TRUE_VALUES:
+            return True
+        if raw in _FALSE_VALUES:
+            return False
+    Logger.debug(f"[LlmPolicy] {label}='{value}' illisible : defaut {fallback}.")
+    return fallback
 
 
 def _coerce_stall_interval(value: Any, fallback: float) -> float:
@@ -121,6 +146,7 @@ class LlmPolicy:
     profiles: Mapping[str, CallProfile] = field(default_factory=dict)
     on_stall: str = DEFAULT_STALL_POLICY
     stall_interval_s: float = DEFAULT_STALL_INTERVAL_SECONDS
+    stream_structured: bool = DEFAULT_STREAM_STRUCTURED
     source: str = "default"
 
     def profile_for(self, kind: Optional[str]) -> CallProfile:
@@ -230,6 +256,9 @@ def policy_from_mapping(raw: Any, source: str = "manifest") -> LlmPolicy:
     stall_interval = _coerce_stall_interval(
         raw.get("stall_interval_s", base.stall_interval_s), base.stall_interval_s
     )
+    stream_structured = _coerce_bool(
+        raw.get("stream_structured"), base.stream_structured, "stream_structured"
+    )
     raw_profiles = raw.get("profiles")
     profiles: Dict[str, CallProfile] = dict(base.profiles)
 
@@ -245,7 +274,7 @@ def policy_from_mapping(raw: Any, source: str = "manifest") -> LlmPolicy:
                 continue
             profiles[key] = profile
 
-    known_top = {"on_stall", "profiles", "stall_interval_s"}
+    known_top = {"on_stall", "profiles", "stall_interval_s", "stream_structured"}
     unknown_top = [key for key in raw if key not in known_top]
     if unknown_top:
         Logger.debug(f"[LlmPolicy] Cles racine inconnues ignorees {unknown_top}.")
@@ -254,6 +283,7 @@ def policy_from_mapping(raw: Any, source: str = "manifest") -> LlmPolicy:
         profiles=profiles,
         on_stall=global_stall,
         stall_interval_s=stall_interval,
+        stream_structured=stream_structured,
         source=source,
     )
 
@@ -294,3 +324,11 @@ def stall_interval_for(runtime_state: Any = None) -> float:
         return float(resolve_policy(runtime_state).stall_interval_s)
     except Exception:
         return DEFAULT_STALL_INTERVAL_SECONDS
+
+
+def stream_structured_for(runtime_state: Any = None) -> bool:
+    """Lecture en flux des reponses structurees (defaut : True)."""
+    try:
+        return bool(resolve_policy(runtime_state).stream_structured)
+    except Exception:
+        return DEFAULT_STREAM_STRUCTURED
