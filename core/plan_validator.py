@@ -627,7 +627,7 @@ def find_target_plan_problems(plan: Any, tools_mgr: Any = None) -> List[str]:
     return hits
 
 
-def find_unresolved_plan_refs(plan: Any, target_consumers: Optional[Dict[str, Any]] = None) -> List[str]:
+def find_unresolved_plan_refs(plan: Any, target_consumers: Optional[Dict[str, Any]] = None, extra_names: Optional[Any] = None) -> List[str]:
     """Références devinées dans les args (gate anti-devinettes, 100% générique).
 
     Refuse, quel que soit l'outil ou le nom d'argument :
@@ -643,11 +643,25 @@ def find_unresolved_plan_refs(plan: Any, target_consumers: Optional[Dict[str, An
     `target_consumers` ({outil: {paramètres}}) oriente le message vers
     `output_target_name` quand la référence non résolue alimente un
     paramètre consommateur de cible.
+    `extra_names` : noms DÉJÀ connus du runtime (registre de cibles, monde
+    observé). Un nom qui y figure ne peut pas être une devinette — le refuser
+    coûtait une tentative et des tokens pour rien. Accepte un itérable ou un
+    callable sans argument (résolution paresseuse).
     Retourne ["step_id: chemin.argument=valeur", ...].
     """
     hits: List[str] = []
     steps = list(getattr(plan, "steps", []) or [])
     _targets = target_consumers if isinstance(target_consumers, dict) else {}
+    _extra: set = set()
+    try:
+        _resolved = extra_names() if callable(extra_names) else extra_names
+        for name in _resolved or ():
+            text = str(name or "").strip()
+            if not text:
+                continue
+            _extra.add(text if text.startswith("$@_") else f"$@_{text}")
+    except Exception:
+        _extra = set()
 
     def _scan(value: Any, path: str, step_id: str, allowed: set, target_params: set) -> None:
         if isinstance(value, dict):
@@ -695,7 +709,7 @@ def find_unresolved_plan_refs(plan: Any, target_consumers: Optional[Dict[str, An
             args,
             "",
             str(getattr(step, "id", "?")),
-            _plan_declared_ref_names(steps, idx),
+            set(_plan_declared_ref_names(steps, idx)) | _extra,
             _target_params,
         )
     return hits
@@ -1343,6 +1357,7 @@ class PlanValidator:
         tool_returns: Optional[Dict[str, Any]] = None,
         availability_summary: Optional[str] = None,
         tools_manager: Any = None,
+        known_target_names: Optional[Any] = None,
     ):
         self._llm = llm
         self._prompt_loader = prompt_loader
@@ -1357,6 +1372,10 @@ class PlanValidator:
         self._tool_returns = dict(tool_returns) if tool_returns else {}
         self._availability_summary = availability_summary or ""
         self._tools_manager = tools_manager
+        # Noms de cibles déjà connus du runtime au moment de la validation
+        # (registre). Non devinables par définition : les refuser brûlait une
+        # tentative à chaque plan qui réutilisait une cible déjà prouvée.
+        self._known_target_names = known_target_names
 
     def _summarize_human_validation_history(self) -> str:
         """Synthétise l'historique des arbitrages humains survenus durant la mission courante."""
@@ -1870,7 +1889,9 @@ class PlanValidator:
                             _target_consumers[_tname] = _params
         except Exception:
             _target_consumers = {}
-        unresolved = find_unresolved_plan_refs(plan, _target_consumers)
+        unresolved = find_unresolved_plan_refs(
+            plan, _target_consumers, extra_names=self._known_target_names
+        )
         bad_sources = find_invalid_perceive_sources(plan, self._available_tools)
         incomplete_delegation = find_incomplete_delegated_args(plan, self._tools_manager)
         target_problems = find_target_plan_problems(plan, self._tools_manager)

@@ -2171,6 +2171,24 @@ class Orchestrator(Supervisor, Entity):
             pass
         return _known, _prod, _perception, _returns
 
+    def _known_target_local_names(self) -> List[str]:
+        """Noms locaux de cibles déjà publiés par le runtime.
+
+        Sert au validateur : un nom présent ici ne peut pas être une
+        « devinette ». Il reste soumis au gate de preuve avant toute action.
+        """
+        try:
+            registry = getattr(self.runtime_state, "target_registry", None)
+            if registry is None or not hasattr(registry, "all"):
+                return []
+            return [
+                str(entry.local_name)
+                for entry in (registry.all() or [])
+                if getattr(entry, "local_name", "")
+            ]
+        except Exception:
+            return []
+
     async def validate_plan(
         self,
         plan: Plan,
@@ -2231,6 +2249,9 @@ class Orchestrator(Supervisor, Entity):
             tool_returns=_tool_returns,
             availability_summary=_availability_summary,
             tools_manager=getattr(self.runtime_state, "tools_manager", None),
+            # Noms déjà produits par le runtime : les refuser comme
+            # "devinettes" coûtait une tentative par plan (vécu : run dcc9ec4b).
+            known_target_names=self._known_target_local_names,
         )
         # État monde frais pour le juge (contexte non-preuve, cap dur,
         # fail-open : "" si l'hôte ne déclare pas get_world_state).
