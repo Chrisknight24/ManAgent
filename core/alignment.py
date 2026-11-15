@@ -29,12 +29,58 @@ WORLD_STATE_TOOL = "get_world_state"
 # Agnostique : toute liste, quelle que soit sa nature ou sa clé.
 WORLD_SNAPSHOT_MAX_ITEMS = 10
 
+# En dessous, la description ne porte plus l'information utile (le run du
+# 2026-11-14 a tronque a 294/312 caracteres en pleine phrase). Ce n'est pas un
+# refus : c'est un signal d'observabilite pour l'hote.
+WORLD_SNAPSHOT_MIN_USEFUL = 1200
+
 # P2.1 : ordre de lecture du monde. Un modèle qui ne lit qu'un préfixe doit
 # voir d'abord le résumé, puis le focus, puis les fenêtres et les cibles.
 WORLD_SNAPSHOT_PRIORITY = (
-    "summary_text", "summary", "focus", "foreground", "foreground_title",
-    "active_window", "windows", "targets", "cibles",
+    "summary_text", "summary", "focus", "focused", "foreground",
+    "foreground_title", "active_window", "transient", "transients",
+    "well_known", "well_knowns", "surfaces", "windows", "targets", "cibles",
 )
+
+# Vue PLANIFICATEUR : ces champs n'apportent rien à une décision et peuvent
+# la fausser. Deux familles, deux raisons :
+#  - géométrie : un modèle qui voit des coordonnées essaie d'y cliquer ;
+#  - bruit d'implémentation : classe/ids natifs/pid, propres à un hôte.
+# La vue `raw` (outils, debug) n'en perd pas une miette.
+PLANNER_HIDDEN_FIELDS = frozenset({
+    # géométrie
+    "rect", "bounds", "dimensions", "dimension", "screen_rect", "client_rect",
+    "x", "y", "width", "height", "left", "top", "right", "bottom",
+    # bruit d'implémentation
+    "class", "class_name", "automationid", "automation_id",
+    "pid", "process_id", "hwnd",
+})
+
+
+def project_world_for_planner(value: Any) -> Any:
+    """Vue sémantique du monde : ni coordonnées, ni bruit d'implémentation.
+
+    `target` est hissé en tête de chaque entrée : c'est le seul champ dont le
+    planificateur a besoin pour agir sans repasser par le sélecteur. Fonction
+    pure, récursive, tolérante (ne lève jamais).
+    """
+    if isinstance(value, dict):
+        projected: Dict[Any, Any] = {}
+        for key, sub in value.items():
+            try:
+                hidden = str(key).strip().lower() in PLANNER_HIDDEN_FIELDS
+            except Exception:
+                hidden = False
+            if hidden:
+                continue
+            projected[key] = project_world_for_planner(sub)
+        if "target" in projected:
+            target = projected.pop("target")
+            return {"target": target, **projected}
+        return projected
+    if isinstance(value, list):
+        return [project_world_for_planner(item) for item in value]
+    return value
 
 
 def _scalar(value: Any) -> str:
@@ -127,12 +173,16 @@ def derive_world_facts(data: Any) -> List[str]:
     return facts
 
 
-def render_world_snapshot(data: Any, limit: int = 800) -> str:
+def render_world_snapshot(data: Any, limit: int = 800, projection: str = "raw") -> str:
     """Rend le world state en texte capé, sans jamais casser un mot.
 
     Ordre de priorité : résumé > focus > fenêtres > cibles > reste. Les
-    champs entiers qui ne tiennent pas sont OMIS et comptés ; un champ seul
+    champs entiers qui ne tiennent pas sont OMIS et NOMMÉS ; un champ seul
     trop long est coupé au dernier séparateur. Fonction pure.
+
+    `projection="planner"` retire la géométrie et le bruit d'implémentation
+    (voir `project_world_for_planner`). La projection est appliquée AVANT le
+    budget de caractères : on ne gaspille pas le prompt en coordonnées.
     """
     try:
         limit = max(1, int(limit))
@@ -144,6 +194,8 @@ def render_world_snapshot(data: Any, limit: int = 800) -> str:
         return _fit_text(data, limit)
     if not isinstance(data, dict):
         return _fit_text(json.dumps(data, ensure_ascii=False), limit)
+    if str(projection or "").strip().lower() == "planner":
+        data = project_world_for_planner(data)
 
     # 1. Cap des listes : entrées entières + compteur (jamais d'élément coupé).
     capped = dict(data)
@@ -160,7 +212,7 @@ def render_world_snapshot(data: Any, limit: int = 800) -> str:
 
     # 2. Champs entiers tant que le JSON tient ; sinon omis et comptés.
     kept: Dict[str, Any] = {}
-    omitted_fields = 0
+    omitted_fields: List[str] = []
     for key in ordered:
         candidate = dict(kept)
         candidate[key] = capped[key]
@@ -171,15 +223,25 @@ def render_world_snapshot(data: Any, limit: int = 800) -> str:
             # au dernier séparateur (aucun mot cassé).
             return _fit_text(_compact_field(key, capped[key]), limit)
         else:
-            omitted_fields += 1
+            omitted_fields.append(str(key))
 
     text = json.dumps(kept, ensure_ascii=False) if kept else ""
     if omitted_entries:
         text += "\n(" + ", ".join(omitted_entries) + ", query PD pour le détail)"
     if omitted_fields:
-        marker = f" (+{omitted_fields} champs omis)"
+        # Un compteur anonyme ne dit pas QUOI manque : on nomme les champs.
+        _names = ", ".join(omitted_fields[:6])
+        if len(omitted_fields) > 6:
+            _names += "…"
+        marker = f" (+{len(omitted_fields)} champs omis : {_names})"
         if len(text) + len(marker) <= limit:
             text += marker
+        else:
+            # Budget trop serré pour nommer : un compteur vaut mieux que rien.
+            # Le budget reste l'autorité, on ne dépasse jamais pour informer.
+            short = f" (+{len(omitted_fields)} champs omis)"
+            if len(text) + len(short) <= limit:
+                text += short
     # Faits dérivés : seulement s'ils tiennent dans le budget (jamais de
     # troncature qui masquerait le JSON). Ils complètent, ils ne remplacent pas.
     facts = derive_world_facts(capped)
@@ -225,12 +287,16 @@ def _emit_world_snapshot_event(runtime_state, source_tool: str, text: str,
         pass
 
 
-async def fetch_world_state_snapshot(runtime_state, max_chars: int = 800) -> str:
+async def fetch_world_state_snapshot(runtime_state, max_chars: int = 800, projection: str = "raw") -> str:
     """Photo d'état du monde : manifeste déclaré > convention > rien.
 
     Retourne du texte brut capé, ou "" avec un log `snapshot.skip`
     motivé (no_world_state_tool, ...). Jamais d'exception, jamais de
     devinette sur un outil au hasard. Fail-open total.
+
+    `projection="planner"` fournit la vue sans géométrie ni bruit
+    d'implémentation. Le plafond effectif reste celui que l'hôte declare :
+    s'il est trop bas, l'événement `world_snapshot.budget_low` le rend visible.
     """
     from utils.logger import Logger
     try:
@@ -250,6 +316,20 @@ async def fetch_world_state_snapshot(runtime_state, max_chars: int = 800) -> str
         except Exception:
             limit = max_chars
         limit = max(1, min(4000, limit))
+        try:
+            requested = int(max_chars or 0)
+        except Exception:
+            requested = 0
+        if limit < WORLD_SNAPSHOT_MIN_USEFUL and requested > limit:
+            try:
+                Logger.event(
+                    "world_snapshot.budget_low",
+                    requested=requested,
+                    effective=limit,
+                    cause="host world_snapshot.max_chars",
+                )
+            except Exception:
+                pass
         if not source_tool:
             tm = getattr(runtime_state, "tools_manager", None)
             known = set(tm.known_tool_names()) if tm is not None and hasattr(tm, "known_tool_names") else set()
@@ -293,7 +373,7 @@ async def fetch_world_state_snapshot(runtime_state, max_chars: int = 800) -> str
         if data is None:
             return ""
         # P2.1 : rendu priorisé, champs entiers, coupe au dernier séparateur.
-        text = render_world_snapshot(data, limit)
+        text = render_world_snapshot(data, limit, projection=projection)
         _emit_world_snapshot_event(
             runtime_state, source_tool, text, len(str(data)) > limit
         )

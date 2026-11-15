@@ -20,6 +20,7 @@ Reports from past JUDGED missions (the judge can be wrong): suggestive leads, ne
 {% if world_snapshot %}
 ## CURRENT WORLD STATE (fresh context, never proof)
 {{ world_snapshot }}
+`target` handles may appear there: use them as is. No coordinates are provided or invented.
 {% endif %}
 
 ## REGISTRY (names already produced)

@@ -491,7 +491,7 @@ class Planner(Entity):
         try:
             from core.alignment import fetch_world_state_snapshot
             _plan_snapshot = await fetch_world_state_snapshot(
-                self.runtime_state, max_chars=600)
+                self.runtime_state, max_chars=2000, projection="planner")
         except Exception:
             _plan_snapshot = ""
         prompt = loader.load(

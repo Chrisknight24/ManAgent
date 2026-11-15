@@ -2258,7 +2258,8 @@ class Orchestrator(Supervisor, Entity):
         _judge_world = ""
         try:
             from core.alignment import fetch_world_state_snapshot
-            _judge_world = await fetch_world_state_snapshot(self.runtime_state, max_chars=600)
+            _judge_world = await fetch_world_state_snapshot(
+                self.runtime_state, max_chars=2000, projection="planner")
         except Exception:
             _judge_world = ""
         outcome = await validator.validate(

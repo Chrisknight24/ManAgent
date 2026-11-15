@@ -20,6 +20,7 @@ Rapports de missions passées JUGÉES (le juge peut se tromper) : pistes suggest
 {% if world_snapshot %}
 ## ÉTAT ACTUEL DU MONDE (contexte frais, jamais une preuve)
 {{ world_snapshot }}
+Des `target` peuvent y figurer : ce nom s'utilise tel quel. Aucune coordonnée n'est fournie ni inventée.
 {% endif %}
 
 ## REGISTRE (noms déjà produits)
