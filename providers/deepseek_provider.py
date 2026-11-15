@@ -20,9 +20,13 @@ from providers.base_provider import (
     ProviderError
 )
 from utils.logger import Logger
+from providers.openai_compatible import stream_json_completion
 
 
 class DeepSeekProvider(BaseProvider):
+
+    # Reponse structuree lue en flux (meme contrat de sortie, latence mesurable).
+    STREAMS_STRUCTURED = True
 
     def __init__(
         self,
@@ -248,12 +252,26 @@ class DeepSeekProvider(BaseProvider):
         if max_output_tokens:
             payload["max_tokens"] = int(max_output_tokens)
 
-        data = await self._execute_http_request(payload)
-        try:
-            self._set_last_usage(self.normalize_openai_usage(data.get("usage")))
-        except Exception:
-            self._set_last_usage(None)
-        raw_json_str = data["choices"][0]["message"]["content"]
+        if self.STREAMS_STRUCTURED and getattr(self, "call_stream_structured", True):
+            payload["stream"] = True
+            streamed = await stream_json_completion(
+                self,
+                endpoint="https://api.deepseek.com/chat/completions",
+                payload=payload,
+                label="DeepSeek",
+            )
+            try:
+                self._set_last_usage(self.normalize_openai_usage(streamed.usage))
+            except Exception:
+                self._set_last_usage(None)
+            raw_json_str = streamed.text
+        else:
+            data = await self._execute_http_request(payload)
+            try:
+                self._set_last_usage(self.normalize_openai_usage(data.get("usage")))
+            except Exception:
+                self._set_last_usage(None)
+            raw_json_str = data["choices"][0]["message"]["content"]
 
         def clean_none(obj):
             if isinstance(obj, dict):

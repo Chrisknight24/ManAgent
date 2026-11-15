@@ -38,7 +38,20 @@ from providers.base_provider import (
 )
 from providers.openai_compatible import accumulate_json_stream, stream_json_completion
 from providers.openai_provider import OpenAIProvider
+from providers.openrouter_provider import OpenRouterProvider
+from providers.groq_provider import GroqProvider
+from providers.deepseek_provider import DeepSeekProvider
 from utils.logger import Logger
+
+
+# Les quatre providers « OpenAI-compatible » partagent le meme format de flux.
+# Chacun garde son endpoint et son label : le test le verifie explicitement.
+TWINS = [
+    (OpenAIProvider, "https://api.openai.com/v1/chat/completions"),
+    (OpenRouterProvider, "https://openrouter.ai/api/v1/chat/completions"),
+    (GroqProvider, "https://api.groq.com/openai/v1/chat/completions"),
+    (DeepSeekProvider, "https://api.deepseek.com/chat/completions"),
+]
 
 
 class _Answer(BaseModel):
@@ -329,6 +342,28 @@ def test_un_flux_vide_echoue_comme_une_reponse_vide(monkeypatch):
 
     with pytest.raises(json.JSONDecodeError):
         _structured_run(provider, monkeypatch, transport)
+
+
+@pytest.mark.parametrize("provider_cls,endpoint", TWINS)
+def test_chaque_jumeau_lit_son_flux_et_garde_son_endpoint(provider_cls, endpoint, monkeypatch):
+    provider = provider_cls(api_keys=["k1"], model_name="modele-test", system_prompt="systeme")
+    transport = _Transport([_FakeResponse(lines=_sse(
+        _content('{"ok":'),
+        _content(" true}"),
+        "[DONE]",
+    ))])
+
+    result = _structured_run(provider, monkeypatch, transport)
+
+    assert isinstance(result, _Answer) and result.ok is True
+    assert provider._first_byte_marked is True
+    assert transport.requests[0]["endpoint"] == endpoint
+    assert transport.requests[0]["json"]["stream"] is True
+
+
+@pytest.mark.parametrize("provider_cls,_endpoint", TWINS)
+def test_chaque_jumeau_declare_la_capacite_de_flux(provider_cls, _endpoint):
+    assert provider_cls.STREAMS_STRUCTURED is True
 
 
 def test_aucune_cle_disponible_leve_un_quota():

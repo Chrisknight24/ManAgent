@@ -35,7 +35,7 @@ disponible et le battement plus fin, mais il n'est pas nécessaire à celui-ci.
 
 ---
 
-## 2. Streaming des réponses structurées (C2-bis) — **en cours : OpenAI livré**
+## 2. Streaming des réponses structurées (C2-bis) — **livré pour la famille OpenAI-compatible**
 
 **Cause mesurée.** Le provider attend la réponse complète avant de parser. Sur
 90 s de latence, l'utilisateur ne voit rien et le watchdog lui-même ne peut rien
@@ -46,7 +46,7 @@ mesurer d'utile.
   mesure de vivacité ;
 - alimenter le watchdog du point 1 sans changer le contrat de sortie.
 
-**Livré pour OpenAI (OpenAI-compatible de référence).**
+**Livré.**
 - `providers/openai_compatible.py` : accumulateur SSE pur (texte + usage +
   premier contenu + lignes illisibles comptées + erreur serveur jamais
   silencieuse) et boucle HTTP en flux avec la même discipline de clés que
@@ -58,17 +58,19 @@ mesurer d'utile.
 - Coupe-circuit hôte : `llm_policy.stream_structured` (défaut `true`, `false`
   partout). Un provider qui ne déclare pas la capacité garde son chemin
   classique, à l'octet près.
+- Providers branchés : OpenAI, OpenRouter, Groq, DeepSeek — chacun avec son
+  endpoint et son label, mêmes garanties.
 - Banc : `tests/test_streaming_structured.py` — SSE coupé, lignes illisibles,
   usage, erreur serveur, rotation de clés, 401, réseau, flux vide, coupe-circuit,
-  et doc/schéma.
+  et un cas par provider (endpoint vérifié), plus doc/schéma.
 
-**Reste de ce chantier** : les trois jumeaux OpenAI-compatible (OpenRouter,
-Groq, DeepSeek — même module, labels et endpoints propres), puis Anthropic et
-Gemini (formats de flux différents, à traiter séparément). Chaque provider
-arrive avec le même banc, étendu à son format.
+**Reste de ce chantier** : Anthropic et Gemini, dont les formats de flux ne sont
+pas SSE-OpenAI (blocs de contenu / candidates). Ils arriveront avec leur propre
+accumulateur et le même banc, sans modifier le module existant.
 
-**Pourquoi différé pour les autres** : chaque provider expose un flux différent.
-On ne bascule pas quatre transports d'un coup sans avoir validé le premier.
+**Pourquoi différé pour eux** : chaque format a ses pièges (index de blocs,
+`message_stop`, parties de candidates). On ne bascule pas un transport qu'on n'a
+pas simulé fidèlement.
 
 ---
 
