@@ -1,8 +1,13 @@
-"""Vue PLANIFICATEUR du monde : des cibles, pas des coordonnees.
+"""Vue PLANIFICATEUR du monde : de la nature, pas des coordonnees.
 
-Vecu (run dcc9ec4b) : le planner voyait `foreground_class: "WorkerW"`,
-`rect: [0,0,1366,768]` et un focus nomme « Bureau 1 » — de quoi vouloir
-cliquer sur des pixels, et rien pour agir proprement.
+Vecu (run dcc9ec4b) : le bloc monde envoye au planificateur ne contenait que
+294 caracteres de bruit mecanique — `focused: {"name": "", "rect": [...],
+"role": "ComboBox"}`, `foreground_class`, `foreground_ours` — et une liste de
+fenetres entiere qui ne tenait pas, remplacee par « (+1 champs omis) ». Rien
+pour decider, et de quoi vouloir cliquer sur des pixels.
+
+`_WORLD_RUN` reproduit la STRUCTURE reelle de cette charge utile. Les libelles
+sont anonymises : aucun nom d'application hote n'entre dans ce depot.
 """
 
 import json
@@ -19,28 +24,35 @@ from core.alignment import (
 from core.plan_models import Plan, PlanStep, StepType
 from core.plan_validator import find_unresolved_plan_refs
 
-# Etat du monde tel que l'hote l'a reellement envoye (extrait du run).
-_WORLD = {
-    "summary_text": "Avant-plan actif ; focus : Bureau 1.",
-    "foreground_title": "",
+# Structure de la charge utile reellement recue (libelles anonymises) :
+# un resume, un focus avec geometrie et classe, et des fenetres. Aucun champ
+# `target` : l'hote n'en publiait pas. C'est le fait mesure.
+_WORLD_RUN = {
+    "summary_text": "Avant-plan : [main] - Editeur ; focus : ComboBox.",
+    "foreground_title": "[main] - Editeur",
     "focused": {
-        "name": "Bureau 1",
-        "rect": [0, 0, 1366, 768],
-        "role": "Pane",
-        "class": "WorkerW",
-        "automationId": "42",
-        "pid": 2548,
-        "target": "$@_desktop",
+        "name": "",
+        "rect": [39, 47, 146, 28],
+        "role": "ComboBox",
     },
+    "foreground_class": "ClasseNoyau",
+    "foreground_ours": False,
     "windows": [
         {
-            "title": "CondiFlow - Qt Creator",
+            "title": "Document sans titre",
             "state": "background",
             "rect": [10, 20, 800, 600],
-            "class": "Qt5152QWindowIcon",
-            "target": "$@_window_3",
+            "class": "ClasseFenetre",
         }
     ],
+}
+
+# Charge utile SYNTHETIQUE : elle sert a figer la regle « un handle du monde
+# s'utilise tel quel ». Ce n'est pas une observation du run.
+_WORLD_HANDLES = {
+    "summary_text": "Avant-plan actif ; focus : Bureau 1.",
+    "focused": {"name": "Bureau 1", "role": "Pane", "target": "$@_desktop"},
+    "windows": [{"title": "Document", "target": "$@_window_3"}],
 }
 
 
@@ -49,26 +61,32 @@ _WORLD = {
 # --------------------------------------------------------------------------
 
 def test_projection_retire_geometrie_et_bruit():
-    out = render_world_snapshot(_WORLD, limit=4000, projection="planner")
-    for interdit in ("rect", "1366", "2548", "automationId", "WorkerW", "Qt5152QWindowIcon"):
+    out = render_world_snapshot(_WORLD_RUN, limit=4000, projection="planner")
+    for interdit in ("rect", "39", "146", "ClasseNoyau", "ClasseFenetre"):
         assert interdit not in out, f"{interdit!r} ne doit pas atteindre le planner"
 
 
 def test_la_prose_de_l_hote_n_est_pas_reécrite():
     """Le résumé est une phrase de l'hôte : on ne la réécrit pas, on la garde."""
     out = render_world_snapshot(
-        {"summary_text": "Avant-plan : WorkerW ; focus : Bureau 1."},
+        {"summary_text": "Avant-plan : ClasseNoyau ; focus : Bureau 1."},
         limit=400,
         projection="planner",
     )
-    assert "Avant-plan : WorkerW" in out
+    assert "Avant-plan : ClasseNoyau" in out
 
 
 def test_projection_garde_le_sens():
-    out = render_world_snapshot(_WORLD, limit=4000, projection="planner")
-    assert "Bureau 1" in out
-    assert "CondiFlow - Qt Creator" in out
+    out = render_world_snapshot(_WORLD_RUN, limit=4000, projection="planner")
+    assert "ComboBox" in out
+    assert "[main] - Editeur" in out
+    assert "Document sans titre" in out
+
+
+def test_projection_garde_les_handles_du_monde():
+    out = render_world_snapshot(_WORLD_HANDLES, limit=4000, projection="planner")
     assert "$@_desktop" in out
+    assert "$@_window_3" in out
 
 
 def test_projection_hisse_la_cible_en_tete():
@@ -77,10 +95,10 @@ def test_projection_hisse_la_cible_en_tete():
 
 
 def test_vue_raw_intacte():
-    raw = render_world_snapshot(_WORLD, limit=4000)
+    raw = render_world_snapshot(_WORLD_RUN, limit=4000)
     assert "rect" in raw
-    assert "1366" in raw
-    assert "WorkerW" in raw
+    assert "39" in raw
+    assert "ClasseNoyau" in raw
 
 
 def test_projection_recursive():
@@ -115,11 +133,73 @@ def test_aucun_nom_de_champ_invente_dans_le_marqueur():
 
 
 # --------------------------------------------------------------------------
+# Regle des champs composes : `foreground_class` est du bruit comme `class`
+# --------------------------------------------------------------------------
+
+def test_champs_composes_de_bruit_caches():
+    data = {
+        "foreground_class": "ClasseNoyau",
+        "foreground_title": "Document sans titre",
+        "window_rect": [0, 0, 10, 10],
+        "process_id": 4242,
+        "client_handle": "0x1",
+        "classification_hint": "garde-moi",
+    }
+    out = render_world_snapshot(data, limit=4000, projection="planner")
+    assert "ClasseNoyau" not in out
+    assert "4242" not in out
+    assert "0x1" not in out
+    assert "Document sans titre" in out
+    # Un mot qui CONTIENT un segment ne doit pas etre cache par accident.
+    assert "garde-moi" in out
+
+
+def test_champs_semantiques_jamais_caches():
+    data = {
+        "name": "Bureau 1",
+        "label": "Bureau",
+        "role": "Pane",
+        "title": "Document",
+        "target": "$@_bureau",
+        "state": "background",
+        "enumerable": False,
+    }
+    projected = project_world_for_planner(data)
+    assert set(projected) == set(data)
+
+
+# --------------------------------------------------------------------------
+# `well_known` : des lieux, pas des cibles
+# --------------------------------------------------------------------------
+
+def test_well_known_ne_montre_que_le_libelle():
+    data = {
+        "well_known": [
+            {"name": "bureau", "label": "Bureau (espace de travail)"},
+            {"name": "barre", "label": "Barre des tâches"},
+            {"name": "orphelin"},
+        ]
+    }
+    out = render_world_snapshot(data, limit=4000, projection="planner")
+    assert "Bureau (espace de travail)" in out
+    assert "Barre des tâches" in out
+    # Un nom qui n'est pas une cible ne doit pas ressembler à une cible.
+    assert "$@_" not in out
+    assert '"bureau"' not in out
+
+
+def test_well_known_reste_intact_en_vue_raw():
+    data = {"well_known": [{"name": "bureau", "label": "Bureau"}]}
+    raw = render_world_snapshot(data, limit=4000)
+    assert '"bureau"' in raw
+
+
+# --------------------------------------------------------------------------
 # B2 : la cible du monde s'utilise TELLE QUELLE
 # --------------------------------------------------------------------------
 
 def test_target_du_monde_accepte_par_le_validateur():
-    projected = project_world_for_planner(_WORLD)
+    projected = project_world_for_planner(_WORLD_HANDLES)
     noms = [
         entry["target"]
         for entry in [projected["focused"]] + projected["windows"]

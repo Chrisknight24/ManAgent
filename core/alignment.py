@@ -56,6 +56,40 @@ PLANNER_HIDDEN_FIELDS = frozenset({
     "pid", "process_id", "hwnd",
 })
 
+# Un champ composé (`foreground_class`, `window_rect`, `process_id`) porte le
+# même bruit qu'un champ simple : on teste donc aussi les SEGMENTS du nom.
+# Sans cela, `foreground_class` traversait la projection alors que `class` non
+# — vérifié sur une charge utile réelle.
+PLANNER_HIDDEN_TOKENS = frozenset({
+    "rect", "bounds", "dimensions", "dimension", "geometry",
+    "class", "automationid", "automation", "pid", "process", "hwnd", "handle",
+})
+
+
+def _is_planner_hidden(key: Any) -> bool:
+    """Ce champ est-il du bruit mécanique pour un planificateur ? (pur)"""
+    try:
+        name = str(key).strip().lower()
+    except Exception:
+        return False
+    if not name:
+        return False
+    if name in PLANNER_HIDDEN_FIELDS:
+        return True
+    try:
+        segments = [seg for seg in re.split(r"[_\W]+", name) if seg]
+    except Exception:
+        return False
+    return any(seg in PLANNER_HIDDEN_TOKENS for seg in segments)
+
+
+# Surfaces stables déclarées par l'hôte (`well_known`) : ce sont des LIEUX,
+# pas des cibles. Leur `name` ressemble à un nom de cible (`$@_<nom>`) sans en
+# être un : rien ne peut le résoudre à l'exécution. On ne montre donc au
+# planificateur que le libellé — assez pour situer, jamais assez pour inventer
+# une référence. La vue `raw` conserve tout.
+PLANNER_SURFACE_KEYS = frozenset({"well_known", "well_knowns", "surfaces"})
+
 
 def project_world_for_planner(value: Any) -> Any:
     """Vue sémantique du monde : ni coordonnées, ni bruit d'implémentation.
@@ -67,11 +101,19 @@ def project_world_for_planner(value: Any) -> Any:
     if isinstance(value, dict):
         projected: Dict[Any, Any] = {}
         for key, sub in value.items():
+            if _is_planner_hidden(key):
+                continue
+            label = ""
             try:
-                hidden = str(key).strip().lower() in PLANNER_HIDDEN_FIELDS
+                label = str(key).strip().lower()
             except Exception:
-                hidden = False
-            if hidden:
+                label = ""
+            if label in PLANNER_SURFACE_KEYS and isinstance(sub, list):
+                projected[key] = [
+                    {"label": item.get("label")}
+                    for item in sub
+                    if isinstance(item, dict) and str(item.get("label") or "").strip()
+                ]
                 continue
             projected[key] = project_world_for_planner(sub)
         if "target" in projected:
