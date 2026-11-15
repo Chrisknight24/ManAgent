@@ -27,6 +27,7 @@ from core.prompt_loader import get_prompt_loader
 from core.i18n import _
 from pydantic import ValidationError
 from core.constants import LLM_STRUCTURED_MAX_ATTEMPTS, LLM_DISCOVERY_MAX_ITERATIONS
+from core.llm_policy import profile_for as _call_profile_for
 if TYPE_CHECKING:
     from core.entity import Entity
     from core.discovery.data_provider import DataProvider
@@ -627,13 +628,18 @@ class Llm:
         mission_id: Optional[str] = None,
         with_discovery: bool = True,
         media_assets: Optional[List[Any]] = None,
-        max_output_tokens: Optional[int] = None
+        max_output_tokens: Optional[int] = None,
+        call_kind: Optional[str] = None,
     ) -> BaseModel:
         """
         Génère une réponse structurée selon un schéma Pydantic.
         Active la Progressive Disclosure si le schéma possède un champ 'discovery_request'
         (hérité via BaseDiscoverySchema ou défini explicitement).
         Gère automatiquement les boucles de découverte (redondance) et le dépassement d'itérations.
+
+        `call_kind` sélectionne le profil de délai (`core.llm_policy`) : une
+        sélection de cible n'a pas le même droit au temps qu'un plan. Défaut :
+        profil « default », jamais plus court que l'ancien timeout fixe.
         """
         from core.base_schema import BaseDiscoverySchema
 
@@ -643,7 +649,10 @@ class Llm:
 
         if not (with_discovery and (has_discovery_inheritance or has_discovery_field)):
             Logger.debug(f"[LLM] Schéma {schema.__name__} (PD active: {with_discovery}) -> Mode legacy.")
-            return await self._generate_structured_legacy(prompt, schema, tag, mission_id, media_assets=media_assets)
+            return await self._generate_structured_legacy(
+                prompt, schema, tag, mission_id, media_assets=media_assets,
+                call_kind=call_kind,
+            )
 
         # P5 : routeur de scope actif => pas de boucle de découverte. Une
         # seule ligne indique les scopes ; l'entité passe par `investigate`.
@@ -654,6 +663,7 @@ class Llm:
             return await self._generate_structured_legacy(
                 full_prompt, schema, tag, mission_id,
                 media_assets=media_assets, max_output_tokens=max_output_tokens,
+                call_kind=call_kind,
             )
 
         discovery_history = self._discovery_history
@@ -672,7 +682,8 @@ class Llm:
             )
             return await self._generate_structured_legacy(
                 prompt, schema, tag, mission_id, media_assets=media_assets,
-                max_output_tokens=max_output_tokens
+                max_output_tokens=max_output_tokens,
+                call_kind=call_kind,
             )
 
         iteration = 0
@@ -699,7 +710,8 @@ class Llm:
                 tag=tag,
                 mission_id=mission_id,
                 media_assets=media_assets,
-                max_output_tokens=max_output_tokens
+                max_output_tokens=max_output_tokens,
+                call_kind=call_kind,
             )
 
             if hasattr(result, 'discovery_request') and result.discovery_request is not None:
@@ -797,7 +809,8 @@ class Llm:
                 tag=tag,
                 mission_id=mission_id,
                 media_assets=media_assets,
-                max_output_tokens=max_output_tokens
+                max_output_tokens=max_output_tokens,
+                call_kind=call_kind,
             )
             if hasattr(final_result, 'discovery_request'):
                 final_result.discovery_request = None
@@ -966,6 +979,29 @@ class Llm:
 
         Logger.event("llm_call", **event_fields)
         
+    def _apply_call_policy(self, provider: Any, call_kind: Optional[str]) -> None:
+        """Applique le profil de delai de la classe d'appel au provider.
+
+        Agnostique : on ne pose que deux attributs, lus par le provider s'il le
+        souhaite (``getattr`` cote provider). Aucun provider n'est requis de les
+        implementer, et un provider qui les ignore garde son comportement.
+        """
+        try:
+            profile = _call_profile_for(self.runtime_state, call_kind)
+        except Exception as exc:
+            Logger.debug(f"[LLM] Politique d'appel indisponible ({exc}) : defauts du provider.")
+            return
+        try:
+            provider.call_timeout_seconds = profile.total_s
+            provider.failover_budget_seconds = profile.total_s
+        except Exception as exc:
+            Logger.debug(f"[LLM] Profil '{profile.kind}' non applicable ({exc}).")
+            return
+        Logger.debug(
+            f"[LLM] Profil d'appel '{profile.kind}' : total={profile.total_s:.0f}s "
+            f"on_stall={profile.on_stall}"
+        )
+
     async def _generate_structured_legacy(
         self,
         prompt: str,
@@ -973,7 +1009,8 @@ class Llm:
         tag: Optional[str] = None,
         mission_id: Optional[str] = None,
         media_assets: Optional[List[Any]] = None,
-        max_output_tokens: Optional[int] = None
+        max_output_tokens: Optional[int] = None,
+        call_kind: Optional[str] = None,
     ) -> BaseModel:
         provider = self.provider_manager.get_provider(self.provider_id)
         if not provider:
@@ -986,6 +1023,7 @@ class Llm:
         if self.runtime_state:
             provider.runtime_state = self.runtime_state
             provider.call_epoch = getattr(self.runtime_state, "generation_epoch", 0)
+        self._apply_call_policy(provider, call_kind)
 
         start_time = time.monotonic()
         try:
@@ -1039,7 +1077,8 @@ class Llm:
         tag: Optional[str] = None,
         mission_id: Optional[str] = None,
         media_assets: Optional[List[Any]] = None,
-        max_output_tokens: Optional[int] = None
+        max_output_tokens: Optional[int] = None,
+        call_kind: Optional[str] = None,
     ) -> BaseModel:
         from pydantic import ValidationError
         max_attempts = LLM_STRUCTURED_MAX_ATTEMPTS
@@ -1060,6 +1099,7 @@ class Llm:
                 if self.runtime_state:
                     provider.runtime_state = self.runtime_state
                     provider.call_epoch = getattr(self.runtime_state, "generation_epoch", 0)
+                self._apply_call_policy(provider, call_kind)
                 self._emit_active_model(is_fallback=(len(excluded_models) > 0))
 
                 start_time = time.monotonic()

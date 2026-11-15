@@ -31,7 +31,8 @@ def test_vide_et_rien():
 
 def _llm(calls):
     async def fake_legacy(self, prompt, schema, tag=None, mission_id=None,
-                          media_assets=None, max_output_tokens=None):
+                          media_assets=None, max_output_tokens=None,
+                          call_kind=None):
         calls["cap"] = max_output_tokens
         return ConvergenceDecision(is_convergent=True, reason="ok")
 

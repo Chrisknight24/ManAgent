@@ -21,7 +21,7 @@ class _FakeLLM:
         self._res = res
 
     async def generate_structured(self, prompt=None, schema=None, tag="",
-                                   media_assets=None, mission_id=None):
+                                  media_assets=None, mission_id=None, **kwargs):
         return self._res
 
 
