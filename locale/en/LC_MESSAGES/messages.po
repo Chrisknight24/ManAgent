@@ -141,6 +141,9 @@ msgstr ""
 msgid "(donnée masquée – utilisez Progressive Disclosure pour inspecter)"
 msgstr ""
 
+msgid "(données: {facts})"
+msgstr ""
+
 msgid "(historique vide)"
 msgstr ""
 
@@ -243,6 +246,9 @@ msgstr ""
 msgid "Analyse CONJOINTE de plusieurs variables à l'aide d'un LLM : comparaison, cohérence, calcul croisé entre DEUX variables ou plus. Requiert 'sources' (liste d'AU MOINS DEUX noms de variables) et 'query' (question en langage naturel portant sur l'ensemble des sources). N'utilisez PAS cet outil pour une seule variable : dans ce cas, utilisez 'llm_analyze_data' à la place."
 msgstr ""
 
+msgid "Analyse en échec sans raison fournie."
+msgstr ""
+
 msgid "Analyse négative : {gap}"
 msgstr ""
 
@@ -253,6 +259,9 @@ msgid "Analyse sémantique globale de l'arbre d'exécution d'une mission. Param�
 msgstr ""
 
 msgid "Analyse technique de la convergence ou explication précise de la divergence constatée."
+msgstr ""
+
+msgid "Analyse terminée (aucun détail fourni)."
 msgstr ""
 
 msgid "Analyse terminée."
@@ -307,6 +316,9 @@ msgid "Arguments de l'outil, en JSON d'objet valide : {\"button\": \"left\"}. Un
 msgstr ""
 
 msgid "Arrêt : divergence persistante après recul stratégique. Replanifier à l'identique ne la réparera pas."
+msgstr ""
+
+msgid "Arrêt : fournisseur IA injoignable 3 fois de suite. Ce n'est pas le plan qui est en cause — réessayez quand le service répond."
 msgstr ""
 
 msgid "Arrêt : outil(s) en échec répété ({tools}) malgré 3 tentatives — le problème vient des outils, pas du plan."
@@ -484,6 +496,15 @@ msgid "Cible '{label}' ecartee : {why}"
 msgstr ""
 
 msgid "Cible '{label}' ecartee par verification : {why}. Aucune cible promue (approfondir ou replanifier)."
+msgstr ""
+
+msgid "Cible '{label}' non prouvee : {why}"
+msgstr ""
+
+msgid "Cible '{label}' non prouvee : {why}. Aucune action sans preuve positive."
+msgstr ""
+
+msgid "Cible '{label}' non prouvee pour « {q} » : {why}. Aucune action sans preuve positive."
 msgstr ""
 
 msgid "Cible '{target}' invalide pour registry."
@@ -792,6 +813,9 @@ msgstr ""
 msgid "L'action '{tool}' est mal appelée : {err}"
 msgstr ""
 
+msgid "L'ancre '{value}' ({kind}) a ete inspectee : ne la consomme que si son contenu satisfait vraiment la question. Sinon choisis une cible interne prouvee ou discovery_request."
+msgstr ""
+
 msgid "L'arbre d'exécution de cette mission est vide."
 msgstr ""
 
@@ -1027,6 +1051,9 @@ msgid "Le routeur de scope a échoué : {err}"
 msgstr ""
 
 msgid "Le routeur de scope est désactivé (enable_scope_router=false)."
+msgstr ""
+
+msgid "Le selecteur n'a pas pu repondre ({code}) : ce n'est pas une absence de cible."
 msgstr ""
 
 msgid "Le service d'IA a mis trop de temps à répondre (délai dépassé)."
@@ -1809,6 +1836,9 @@ msgstr ""
 msgid "[GeminiProvider] Clé API invalide ou accès refusé : {}"
 msgstr ""
 
+msgid "[GeminiProvider] Flux interrompu apres contenu : pas de rejeu silencieux."
+msgstr ""
+
 msgid "[GeminiProvider] Quota épuisé : {}"
 msgstr ""
 
@@ -2101,6 +2131,9 @@ msgid "Étape {idx} de type 'semantic' sans question"
 msgstr ""
 
 msgid "Étape {idx} de type 'tool' sans tool_name"
+msgstr ""
+
+msgid "Étape {sid} : frappe du caractère unique {char!r}. Un raccourci n'est prouvé que si le menu est ouvert par une étape et si l'élément visé est nommé dans une observation ; sinon préférez une cible nommée."
 msgstr ""
 
 msgid "Étape(s) cruciale(s) sautée(s) : {} — pas de convergence."
