@@ -33,6 +33,10 @@ class GeminiProvider(BaseProvider):
     Résilience multi-clés native basée sur BaseProvider.
     """
 
+    # Réponse structurée lue en flux : le JSON complet est accumulé puis validé,
+    # le premier fragment est horodaté (latence mesurable).
+    STREAMS_STRUCTURED = True
+
     def __init__(self, api_keys: Any, model_name: str, system_prompt: str):
         super().__init__()
         self.provider_name = "gemini"
@@ -162,6 +166,10 @@ class GeminiProvider(BaseProvider):
 
                     self.check_cancelled()
 
+                    if self._first_byte_marked:
+                        raise ProviderServiceUnavailableError(
+                            _("[GeminiProvider] Flux interrompu apres contenu : pas de rejeu silencieux.")
+                        )
                     if self.has_available_keys():
                         await asyncio.sleep(_wait)
                         continue
@@ -182,6 +190,10 @@ class GeminiProvider(BaseProvider):
                     _wait = self.note_rate_limit(current_key)
                     self.client = None
                     self._current_client_key = None
+                    if self._first_byte_marked:
+                        raise ProviderServiceUnavailableError(
+                            _("[GeminiProvider] Flux interrompu apres contenu : pas de rejeu silencieux.")
+                        )
                     if self.has_available_keys():
                         await asyncio.sleep(_wait)
                         continue
@@ -304,13 +316,37 @@ class GeminiProvider(BaseProvider):
             if self.system_prompt and self.system_prompt.strip():
                 config.system_instruction = self.system_prompt
 
-            response = await client.aio.models.generate_content(
-                model=self._get_clean_model_id(),
-                contents=contents,
-                config=config
-            )
+            if self.STREAMS_STRUCTURED and getattr(self, "call_stream_structured", True):
+                stream = await client.aio.models.generate_content_stream(
+                    model=self._get_clean_model_id(),
+                    contents=contents,
+                    config=config
+                )
+                collected = []
+                response = None
+                usage_metadata = None
+                async for chunk in stream:
+                    response = chunk
+                    text = getattr(chunk, "text", None)
+                    if text:
+                        if not collected:
+                            self._mark_first_byte()
+                        collected.append(text)
+                    meta = getattr(chunk, "usage_metadata", None)
+                    if meta is not None:
+                        usage_metadata = meta
+                raw_text = "".join(collected)
+            else:
+                response = await client.aio.models.generate_content(
+                    model=self._get_clean_model_id(),
+                    contents=contents,
+                    config=config
+                )
+                raw_text = response.text if response is not None else ""
+                usage_metadata = getattr(response, "usage_metadata", None)
+
             try:
-                self._set_last_usage(self.normalize_gemini_usage(getattr(response, "usage_metadata", None)))
+                self._set_last_usage(self.normalize_gemini_usage(usage_metadata))
             except Exception:
                 self._set_last_usage(None)
 
@@ -326,7 +362,7 @@ class GeminiProvider(BaseProvider):
                     "sortie structurée incomplète — le JSON peut être invalide."
                 )
 
-            return response_schema.model_validate_json(response.text)
+            return response_schema.model_validate_json(raw_text)
 
         return await self._execute_with_failover(_run)
     

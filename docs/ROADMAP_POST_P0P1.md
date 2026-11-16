@@ -35,7 +35,7 @@ disponible et le battement plus fin, mais il n'est pas nécessaire à celui-ci.
 
 ---
 
-## 2. Streaming des réponses structurées (C2-bis) — **livré pour la famille OpenAI-compatible**
+## 2. Streaming des réponses structurées (C2-bis) — **livré le 16/11**
 
 **Cause mesurée.** Le provider attend la réponse complète avant de parser. Sur
 90 s de latence, l'utilisateur ne voit rien et le watchdog lui-même ne peut rien
@@ -47,10 +47,16 @@ mesurer d'utile.
 - alimenter le watchdog du point 1 sans changer le contrat de sortie.
 
 **Livré.**
-- `providers/openai_compatible.py` : accumulateur SSE pur (texte + usage +
-  premier contenu + lignes illisibles comptées + erreur serveur jamais
-  silencieuse) et boucle HTTP en flux avec la même discipline de clés que
-  l'appel classique (rotation 429/503, 401/403, réseau).
+- `providers/sse_transport.py` : **une seule** discipline de clés pour tous les
+  flux (rotation 429/503, erreurs typées, annulation) et surtout : aucun rejeu
+  silencieux après avoir livré du contenu.
+- `providers/openai_compatible.py` : accumulateur SSE JSON (texte, usage,
+  premier contenu, lignes illisibles comptées, erreur serveur jamais
+  silencieuse). Branché sur OpenAI, OpenRouter, Groq, DeepSeek.
+- `providers/anthropic_stream.py` : accumulateur des fragments d'outil forcé
+  (`input_json_delta`), avec vérification du nom d'outil. Branché sur Anthropic.
+- Gemini : flux SDK (`generate_content_stream`) accumulé puis validé, dans le
+  provider (le format n'est pas SSE).
 - `BaseProvider` : `STREAMS_STRUCTURED` (capacité déclarée, défaut `False`),
   `reset_first_byte` / `_mark_first_byte`, hook optionnel posé par le cerveau.
 - `Llm` : `llm_call.first_byte_ms` seulement si un premier contenu a été
@@ -58,19 +64,13 @@ mesurer d'utile.
 - Coupe-circuit hôte : `llm_policy.stream_structured` (défaut `true`, `false`
   partout). Un provider qui ne déclare pas la capacité garde son chemin
   classique, à l'octet près.
-- Providers branchés : OpenAI, OpenRouter, Groq, DeepSeek — chacun avec son
-  endpoint et son label, mêmes garanties.
-- Banc : `tests/test_streaming_structured.py` — SSE coupé, lignes illisibles,
-  usage, erreur serveur, rotation de clés, 401, réseau, flux vide, coupe-circuit,
-  et un cas par provider (endpoint vérifié), plus doc/schéma.
+- Bancs : `tests/test_streaming_structured.py` (famille OpenAI-compatible, un
+  cas par provider avec endpoint vérifié) et
+  `tests/test_streaming_anthropic_gemini.py` (fragments d'outil, chunks SDK,
+  pas de rejeu après contenu, coupe-circuit). Aucune requête réseau réelle.
 
-**Reste de ce chantier** : Anthropic et Gemini, dont les formats de flux ne sont
-pas SSE-OpenAI (blocs de contenu / candidates). Ils arriveront avec leur propre
-accumulateur et le même banc, sans modifier le module existant.
-
-**Pourquoi différé pour eux** : chaque format a ses pièges (index de blocs,
-`message_stop`, parties de candidates). On ne bascule pas un transport qu'on n'a
-pas simulé fidèlement.
+**Ce qui reste de ce chantier** : rien côté code. La mesure devient utile au
+prochain rejeu réel : on pourra distinguer attente réseau et génération.
 
 ---
 
@@ -216,9 +216,9 @@ preuve). Le wording décrit la sémantique du fait, sans citer une clé d'hôte 
 
 ## Ordre recommandé
 
-1. **§2 streaming** — le plus risqué : fournisseur par fournisseur, jamais d'un
-   coup, avec des bancs qui simulent chaque flux.
-2. **§5 / §7 vérifications de rejeu** — aucun code : on lit les événements et on
-   tranche ce qui reste (`budget`, `enumeration`, `invariants` visibles).
-3. **§4 hedging** — seulement si l'hôte exprime un besoin explicite.
-4. **§6 nommage** — en attente d'un producteur côté hôte ; rien à faire ici.
+1. **§5 / §7 vérifications de rejeu** — aucun code : on lit les événements et on
+   tranche ce qui reste (`budget`, `enumeration`, `invariants` visibles,
+   `first_byte_ms`).
+2. **§4 hedging** — seulement si l'hôte exprime un besoin explicite.
+3. **§6 nommage** — en attente d'un producteur côté hôte ; rien à faire ici.
+4. **Rejeu réel** — dès que l'hôte a rebuild et une mission fraîche.

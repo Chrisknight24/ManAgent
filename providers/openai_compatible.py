@@ -4,35 +4,21 @@ Module du **calque fournisseur**. Il ne connait que le format de flux le plus
 repandu (lignes ``data: {json}`` terminees par ``[DONE]``) et rien d'autre :
 aucun nom d'hote, aucun outil, aucune classe metier.
 
-Deux responsabilites, separees pour etre testables sans reseau :
-
-1. ``accumulate_json_stream`` : transforme un flux de lignes en texte complet
-   et en usage, en signalant l'instant du **premier contenu** ;
-2. ``stream_json_completion`` : meme boucle HTTP que les appels classiques
-   (rotation de cles, 429/503, erreurs typ茅es), mais en lecture de flux.
-
-Le contrat de sortie ne change pas : l'appelant recoit toujours le texte JSON
-complet, exactement ce qu'il aurait recu sans streaming. Seule la latence
-devient mesurable.
+La discipline d'appel (rotation de cles, 429/503, erreurs typees) vit dans
+``providers.sse_transport`` : un seul endroit, tous formats confondus. Ici, on
+ne garde que ce qui est propre au format : le texte, l'usage et le premier
+contenu.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Optional
 
-import aiohttp
-
-from providers.base_provider import (
-    ProviderAuthError,
-    ProviderError,
-    ProviderQuotaExhaustedError,
-    ProviderServiceUnavailableError,
-)
-from utils.logger import Logger
+from providers.base_provider import ProviderError
+from providers.sse_transport import stream_completion
 
 
 @dataclass
@@ -128,6 +114,17 @@ async def accumulate_json_stream(
     return outcome
 
 
+def _bearer_headers(key: str) -> dict:
+    return {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+
+
+async def _parse_json_stream(lines: Any, on_first_content=None) -> StreamedJson:
+    return await accumulate_json_stream(lines, on_first_content=on_first_content)
+
+
 async def stream_json_completion(
     provider: Any,
     *,
@@ -135,81 +132,12 @@ async def stream_json_completion(
     payload: dict,
     label: str,
 ) -> StreamedJson:
-    """POST en flux, avec la meme discipline de cles que l'appel classique.
-
-    ``provider`` est duck-type : il doit exposer les helpers de
-    ``BaseProvider`` (pool de cles, cooldowns, annulation). Aucun etat n'est
-    duplique ici.
-    """
-    total_keys = max(1, len(getattr(provider, "api_keys_pool", []) or []))
-    attempts = 0
-    while attempts < total_keys:
-        provider.check_cancelled()
-        active_key = provider.get_active_api_key()
-        if not active_key:
-            raise ProviderQuotaExhaustedError(
-                f"[{label}] Aucune cle API active ou disponible pour le flux."
-            )
-        headers = {
-            "Authorization": f"Bearer {active_key}",
-            "Content-Type": "application/json",
-        }
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(endpoint, headers=headers, json=payload) as response:
-                    if response.status == 200:
-                        outcome = await accumulate_json_stream(
-                            response.content,
-                            on_first_content=getattr(provider, "_mark_first_byte", None),
-                        )
-                        provider.promote_key(active_key)
-                        try:
-                            provider.note_provider_success()
-                        except Exception:
-                            pass
-                        return outcome
-
-                    error_text = await response.text()
-                    masked = active_key[:8] if len(active_key) >= 8 else active_key
-                    lowered = error_text.lower()
-                    if (
-                        response.status in (429, 503)
-                        or "rate_limit" in lowered
-                        or "quota" in lowered
-                    ):
-                        attempts += 1
-                        wait = provider.note_rate_limit(
-                            active_key, response.headers.get("Retry-After")
-                        )
-                        Logger.warning(
-                            f"[{label} Stream Failover] Erreur {response.status} sur cle "
-                            f"[{masked}...]. Rotation ({attempts}/{total_keys})."
-                        )
-                        if provider.has_available_keys():
-                            await asyncio.sleep(wait)
-                            continue
-                        raise ProviderQuotaExhaustedError(
-                            f"[{label}] Quota epuise sur toutes les cles : {error_text}"
-                        )
-                    if response.status in (401, 403):
-                        provider.mark_key_in_cooldown(active_key, 3600.0)
-                        raise ProviderAuthError(
-                            f"[{label}] Cle invalide (401/403) : {error_text}"
-                        )
-                    raise ProviderError(
-                        f"{label} API error {response.status}: {error_text}"
-                    )
-        except asyncio.CancelledError:
-            raise
-        except aiohttp.ClientError as ce:
-            attempts += 1
-            provider.mark_key_in_cooldown(active_key, 30.0)
-            if provider.has_available_keys():
-                await asyncio.sleep(0.5)
-                continue
-            raise ProviderServiceUnavailableError(
-                f"{label} stream network error: {ce}"
-            ) from ce
-    raise ProviderQuotaExhaustedError(
-        f"[{label}] Quota epuise sur toutes les cles."
+    """POST en flux OpenAI-compatible (discipline de cles partagee)."""
+    return await stream_completion(
+        provider,
+        endpoint=endpoint,
+        payload=payload,
+        label=label,
+        headers_for_key=_bearer_headers,
+        parse=_parse_json_stream,
     )

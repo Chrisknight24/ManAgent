@@ -20,9 +20,14 @@ from providers.base_provider import (
     ProviderError
 )
 from utils.logger import Logger
+from providers.anthropic_stream import stream_tool_use_completion
 
 
 class AnthropicProvider(BaseProvider):
+
+    # Appel d'outil force lu en flux : meme objet Pydantic a l'arrivee, mais
+    # le premier fragment JSON est horodate (latence mesurable).
+    STREAMS_STRUCTURED = True
 
     def __init__(
         self,
@@ -290,6 +295,25 @@ class AnthropicProvider(BaseProvider):
             "tools": [tool_spec],
             "tool_choice": {"type": "tool", "name": "record_response"}
         }
+
+        if self.STREAMS_STRUCTURED and getattr(self, "call_stream_structured", True):
+            payload["stream"] = True
+            streamed = await stream_tool_use_completion(
+                self,
+                endpoint="https://api.anthropic.com/v1/messages",
+                payload=payload,
+                label="Anthropic",
+                expected_tool="record_response",
+            )
+            try:
+                self._set_last_usage(self.normalize_anthropic_usage(streamed.usage))
+            except Exception:
+                self._set_last_usage(None)
+            if not streamed.json_text.strip():
+                raise ProviderError(
+                    "Anthropic did not return the expected structured output tool call."
+                )
+            return response_schema.model_validate_json(streamed.json_text)
 
         data = await self._execute_http_request(payload)
         try:

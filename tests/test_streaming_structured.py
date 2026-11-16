@@ -24,6 +24,7 @@ from pydantic import BaseModel
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import providers.openai_compatible as compatible
+import providers.sse_transport as sse_transport
 from core.llm import Llm
 from core.llm_policy import (
     DEFAULT_STREAM_STRUCTURED,
@@ -128,8 +129,8 @@ class _Transport:
                     return _FakePost(error=item)
                 return _FakePost(response=item)
 
-        monkeypatch.setattr(compatible.aiohttp, "ClientSession", _Session)
-        monkeypatch.setattr(compatible.asyncio, "sleep", _no_sleep)
+        monkeypatch.setattr(sse_transport.aiohttp, "ClientSession", _Session)
+        monkeypatch.setattr(sse_transport.asyncio, "sleep", _no_sleep)
         return transport
 
 
