@@ -45,7 +45,12 @@
                       "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$"
                     },
                     "required": { "type": "boolean", "default": true },
-                    "raw": { "type": "string", "enum": ["deny", "allow"], "default": "deny" }
+                    "raw": {
+                      "type": "string",
+                      "enum": ["deny", "allow"],
+                      "default": "deny",
+                      "description": "allow = this parameter also accepts a host literal (e.g. surface=bureau): a known local name is still resolved, an unknown literal is forwarded unchanged. Required for a literal entry to survive egress."
+                    }
                   },
                   "additionalProperties": true
                 }

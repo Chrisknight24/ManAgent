@@ -244,10 +244,11 @@ def test_sans_declaration_aucun_filtre_ni_refus():
 
 
 def test_ancre_brute_disponible_empeche_le_refus_anticipe():
-    """`kind_scopes` ne parle que des cibles locales : une ancre brute reste
-    une entree possible, donc on filtre sans fermer la porte."""
+    """`kind_scopes` ne parle que des cibles locales : une ancre OFFERTE par
+    l'hote (`disclosure.anchors`) reste une entree possible, donc on filtre
+    sans fermer la porte."""
     producer = _contract({"ui": ["tile"], "image": []})
-    source = _candidates_contract()
+    source = _anchor_candidates_contract("raw_cell")
     registry = TargetRegistry()
     world = _world(source, registry)
     llm = _SilentLlm()
@@ -268,6 +269,53 @@ def test_ancre_brute_disponible_empeche_le_refus_anticipe():
 
     assert llm.calls >= 1
     assert result.error_code != "TARGET_KIND_MISMATCH"
+
+
+def test_ancre_non_offerte_ne_justifie_pas_de_laisser_filer_la_table():
+    """Un type d'ancre absent de `disclosure.anchors` n'est pas une porte
+    ouverte : il ne doit pas transformer un refus net en selection hasardeuse."""
+    producer = _contract({"ui": ["tile"], "image": []})
+    source = _anchor_candidates_contract("other_anchor")
+    registry = TargetRegistry()
+    world = _world(source, registry)
+    llm = _SilentLlm()
+
+    result = asyncio.run(resolve_target(
+        llm=llm,
+        question="une zone libre",
+        world=world,
+        contract=source,
+        registry=registry,
+        tools_mgr=_Manager(),
+        allow_anchor=True,
+        anchor_kinds=["raw_cell"],
+        max_rounds=0,
+        kind_policy=kind_policy(producer, {"kind": "image"}),
+        producer_name="act",
+    ))
+
+    assert result.error_code == "TARGET_KIND_MISMATCH"
+    assert llm.calls == 0
+
+
+def _anchor_candidates_contract(*anchor_kinds):
+    parsed = parse_target_contract({
+        "version": 1,
+        "produces": [{
+            "path": "data.candidates",
+            "mode": "candidates",
+            "scope": "tile",
+            "fields": {"ref": "id", "description": "name"},
+        }],
+        "disclosure": {
+            "version": 1,
+            "anchors": [
+                {"kind": kind, "param": "cell"} for kind in anchor_kinds
+            ],
+        },
+    }, tool_name="scan")
+    assert parsed.contract is not None, parsed.errors
+    return parsed.contract
 
 
 def test_scope_dynamique_empeche_le_refus_anticipe():

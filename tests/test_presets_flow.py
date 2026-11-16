@@ -427,3 +427,84 @@ def test_kind_scopes_compatible_laisse_le_producteur_travailler():
     target_call = _calls(sim, "target")[0]
     assert target_call["arguments"]["kind"] == "ui"
     assert target_call["arguments"]["preset"] == "t1"
+
+
+# ---------------------------------------------------------------------------
+# Entree deja fournie par le plan : un consommateur DECLARE dont le scope n'est
+# pas offert par la source (surface, rafraichissement...) ne designe aucun
+# candidat. Il n'y a alors rien a selectionner : `kind_scopes` n'a rien a
+# filtrer et le producteur recoit exactement les args du plan.
+# ---------------------------------------------------------------------------
+
+
+def _entry_manifest(*, entry_param="surface", entry_scope="surface", kind_scopes=None):
+    manifest = _kind_manifest(
+        kind_scopes or {"ui": ["ui_preset"], "image": ["cell", "target"]}
+    )
+    target_tool = next(t for t in manifest["tools"] if t["name"] == "target")
+    target_tool["parameters"]["properties"][entry_param] = {"type": "string"}
+    target_tool["target_contract"]["consumes"].append({
+        "param": entry_param,
+        "scope": entry_scope,
+        "required": False,
+        # Litteral hote autorise (`raw: allow`) : la valeur n'est pas un nom
+        # local, elle est transmise telle quelle quand le registre l'ignore.
+        "raw": "allow",
+    })
+    return manifest
+
+
+def test_entree_declaree_fournie_ne_selectionne_rien_ni_ne_filtre():
+    """`kind=image` + entree declaree : pas de selection, donc pas de refus."""
+    sim = _sim(
+        _host_results(names=("OK", "Annuler")),
+        manifest=_entry_manifest(),
+    )
+    llm = _PickByDescriptionLLM("OK")
+    sim.runtime_state._tools_llm = llm
+
+    out = asyncio.run(IT.perceive_action(
+        _composite_call(target_args={"kind": "image", "surface": "bureau"}),
+        sim.runtime_state,
+    ))
+
+    assert out["result"] is True, out
+    assert llm.prompts == [], "aucune selection ne doit etre demandee"
+    target_call = _calls(sim, "target")[0]
+    assert target_call["arguments"]["surface"] == "bureau"
+    assert "preset" not in target_call["arguments"]
+
+
+def test_entree_declaree_absente_laisse_la_selection_et_le_refus():
+    """Sans valeur fournie, la table s'applique comme avant."""
+    sim = _sim(
+        _host_results(names=("OK", "Annuler")),
+        manifest=_entry_manifest(),
+    )
+    llm = _PickByDescriptionLLM("OK")
+    sim.runtime_state._tools_llm = llm
+
+    out = asyncio.run(IT.perceive_action(
+        _composite_call(target_args={"kind": "image"}), sim.runtime_state
+    ))
+
+    assert out["result"] is False
+    assert out["error"]["code"] == "TARGET_KIND_MISMATCH"
+    assert _calls(sim, "target") == []
+
+
+def test_consommateur_de_candidat_n_est_jamais_une_entree_autonome():
+    """`preset` partage le scope de la source : c'est la selection, pas une entree."""
+    sim = _sim(
+        _host_results(names=("OK", "Annuler")),
+        manifest=_kind_manifest({"ui": ["ui_preset"], "image": []}),
+    )
+    llm = _PickByDescriptionLLM("OK")
+    sim.runtime_state._tools_llm = llm
+
+    out = asyncio.run(IT.perceive_action(
+        _composite_call(target_args={"kind": "ui"}), sim.runtime_state
+    ))
+
+    assert out["result"] is True, out
+    assert llm.prompts, "la selection doit avoir lieu pour un consommateur de candidat"

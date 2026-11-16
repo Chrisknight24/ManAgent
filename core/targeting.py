@@ -1477,10 +1477,20 @@ async def resolve_target(
             not getattr(producer, "has_static_scope", True)
             for producer in getattr(contract, "producers", ())
         )
+        # Une ancre n'ouvre une porte que si l'hote l'OFFRE au selecteur
+        # (`disclosure.anchors`). Un consommateur brut peut n'etre qu'un
+        # litteral d'entree (jamais selectionnable) : il ne justifie pas de
+        # laisser filer une table qui exclut tout.
+        _disclosure = getattr(contract, "disclosure", None)
+        _offered_anchors = {
+            str(getattr(anchor, "kind", "") or "")
+            for anchor in (getattr(_disclosure, "anchors", ()) or ())
+        }
+        _anchor_escape = bool(_offered_anchors.intersection(set(anchor_kinds or ())))
         if (
             _original_candidates
             and not _kept
-            and not anchor_kinds
+            and not _anchor_escape
             and not _scope_is_dynamic
         ):
             _observed_scopes = [

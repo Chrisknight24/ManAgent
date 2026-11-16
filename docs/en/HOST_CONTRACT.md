@@ -299,6 +299,13 @@ Validation rules (a contract is all-or-nothing):
 - `usable_as` (optional) widens consumable scopes: a target in this scope may
   fill a slot of each listed scope. Default: `[scope]`. The relation is not
   transitive.
+- Entry already supplied (composite flow): if the plan fills a **declared**
+  consumer whose `scope` is not offered by the source (a surface, a refresh, a
+  cell...), that value cannot designate a candidate: selection is **skipped**
+  (no model call, no `preset` injected) and the producer receives exactly the
+  plan's arguments. A `raw: allow` on that consumer permits a host literal
+  (e.g. `surface=bureau`); without it the value is treated as a local name and
+  refused when unknown.
 - `kind_param` (optional) names the producer parameter that selects the
   **produced target type** (`kind` by convention when present). The brain knows
   no type: it forwards the value as-is.
@@ -413,10 +420,11 @@ names.
   evaluated on the **candidates offered to the selector**: the source's ones in a
   composite flow, the producer's own only in a simple flow (where no other input
   exists). It is **never** evaluated on the producer's output payload. An early
-  refusal is only issued when no other input exists: a declared raw anchor
-  (`disclosure.anchors`) or a per-item scope (`fields.scope`) let selection run.
-  `kind_scopes` only governs **local target scopes**; raw anchors stay governed
-  by `disclosure.anchors` and `consumes[].raw`.
+  refusal is only issued when no other input exists: an anchor **offered** to the
+  selector (`disclosure.anchors`, not a bare `raw: allow` consumer), or a
+  per-item scope (`fields.scope`), lets selection run. `kind_scopes` only governs
+  **local target scopes**; raw anchors stay governed by `disclosure.anchors` and
+  `consumes[].raw`.
 - `occlusion.blocked_by` / `occlusion.covers` name attributes **already
   published** through `fields.attributes`. A mute attribute (`""`, `[]`,
   `false`, `0`) triggers nothing. An attribute missing from `fields.attributes`

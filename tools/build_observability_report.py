@@ -885,6 +885,7 @@ SOLVER_LIFECYCLE_EVENTS = (
     "target.verification",
     "target.gate",
     "target.kind_compat",
+    "target.entry_declared",
     "target.resolve_failed",
     "convergence.check",
 )
@@ -1029,6 +1030,7 @@ TARGET_EVENTS = (
     "target.verification",
     "target.gate",
     "target.kind_compat",
+    "target.entry_declared",
     "target.resolve_failed",
     "target.invalidated",
     "target.purged",
@@ -3000,6 +3002,7 @@ function renderCentralTargets(ep) {
     'target.verification': '✅ vérifiée',
     'target.gate': '🛡️ gate de preuve',
     'target.kind_compat': '🧬 compatibilité de type',
+    'target.entry_declared': '🚪 entrée déjà fournie',
     'target.resolve_failed': '⛔ résolution échouée',
     'target.invalidated': '🗑️ invalidée',
     'target.purged': '🧹 purgée',
@@ -3097,6 +3100,7 @@ const SOLVER_EVENT_META = {
   'target.verification': { label: '✅ Vérification de cible', color: 'var(--primary)' },
   'target.gate': { label: '🛡️ Gate de preuve', color: 'var(--primary)' },
   'target.kind_compat': { label: '🧬 Compatibilité de type', color: 'var(--text-muted)' },
+  'target.entry_declared': { label: '🚪 Entrée déjà fournie', color: 'var(--text-muted)' },
   'target.resolve_failed': { label: '⛔ Résolution de cible échouée', color: 'var(--failure)' },
   'convergence.check': { label: '🎯 Vérification de convergence', color: 'var(--primary)' },
 };
@@ -3160,6 +3164,12 @@ function lifecycleSummary(ev) {
         ev.declared === true ? 'déclaré' : 'non déclaré',
         ev.status || '',
         Array.isArray(ev.allowed_scopes) ? ev.allowed_scopes.join(', ') : '',
+      ].filter(Boolean).join(' · ');
+    case 'target.entry_declared':
+      return [
+        ev.param ? 'entrée ' + ev.param : '',
+        'sélection sautée',
+        ev.producer || '',
       ].filter(Boolean).join(' · ');
     case 'target.resolve_failed':
       return [ev.code || '', ev.reason || ''].filter(Boolean).join(' · ');

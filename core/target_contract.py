@@ -256,6 +256,51 @@ def declared_target_kind(contract: Optional[TargetContract], args: Any) -> str:
     return ""
 
 
+def _value_is_provided(value: Any) -> bool:
+    """Vrai si le plan a reellement fourni une valeur (jamais `False`/vide)."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, dict, set)):
+        return bool(value)
+    return True
+
+
+def provided_entry_param(
+    producer: Any,
+    args: Any,
+    *,
+    offered_scopes: Any = (),
+    offered_known: bool = True,
+) -> str:
+    """Parametre qui fournit DEJA l'entree de l'etape (donc aucune selection).
+
+    Une entree est « deja fournie » quand le plan renseigne un consommateur
+    **declare** dont le scope n'est pas offert par la source : cette valeur ne
+    peut donc pas designer un des candidats a selectionner, elle EST l'entree.
+    C'est une lecture stricte de declarations : aucun nom de parametre, de scope
+    ni d'outil n'est code en dur.
+
+    `offered_known=False` (source a scope dynamique) interdit toute conclusion :
+    on retourne "" et la selection suit son cours.
+
+    Retourne "" quand la selection reste necessaire : aucune entree fournie, ou
+    uniquement des consommateurs de candidats.
+    """
+    if not isinstance(args, dict) or not offered_known:
+        return ""
+    offered = {str(scope) for scope in (offered_scopes or ()) if scope}
+    for consumer in getattr(producer, "consumers", ()) or ():
+        scope = str(getattr(consumer, "scope", "") or "")
+        param = str(getattr(consumer, "param", "") or "")
+        if not scope or not param or scope in offered:
+            continue
+        if _value_is_provided(args.get(param)):
+            return param
+    return ""
+
+
 _REFERENCE_TOKEN_RE = re.compile(r"(\$@_|@\$_)[A-Za-z0-9_-]+")
 
 

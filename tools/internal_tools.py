@@ -16,7 +16,7 @@ from core.target_ingress import (
     project_target_payload,
     selection_from_payload,
 )
-from core.target_contract import declared_target_kind
+from core.target_contract import declared_target_kind, provided_entry_param
 from core.target_kind import kind_policy
 from core.targets import TargetEntry, TargetSelection
 from core.targeting import (
@@ -1787,7 +1787,11 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
         # qu'il accepte en entree. On l'evalue sur les candidats reellement
         # offerts (la source en composite), jamais sur sa propre sortie.
         _kind_policy = kind_policy(_producer_contract, _producer_args)
-        if _kind_policy is not None and _kind_policy.kind:
+
+        def _trace_kind_compat(scope: str = "", *, skipped: bool = False) -> None:
+            """Trace la politique, y compris inerte (angle mort de la tentative 3)."""
+            if _kind_policy is None or not _kind_policy.kind:
+                return
             try:
                 Logger.event(
                     "target.kind_compat",
@@ -1795,11 +1799,12 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
                     param=_kind_policy.param,
                     declared=_kind_policy.declared,
                     allowed_scopes=list(_kind_policy.allowed_scopes),
-                    status=_kind_policy.compat(""),
+                    status="skipped" if skipped else _kind_policy.compat(scope),
                     step_id=str(args.get("_step_id") or ""),
                 )
             except Exception:
                 pass
+
         if _composite:
             if _registry is None:
                 return _target_error(
@@ -1807,6 +1812,43 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
                     _("Registre de cibles indisponible pour la selection."),
                 )
             _source_selection = selection_from_payload(_registry, _contract, parsed)
+            # Entree deja fournie par le plan : un consommateur DECLARE dont le
+            # scope n'est pas offert par la source ne peut pas designer un
+            # candidat (surface materialisee, rafraichissement d'une cible...).
+            # Il n'y a alors rien a selectionner : `kind_scopes` n'a rien a
+            # filtrer et le producteur recoit EXACTEMENT les args du plan.
+            _offered_scopes = {
+                str(getattr(producer, "scope", "") or "")
+                for producer in getattr(_contract, "producers", ()) or ()
+            }
+            _offered_scopes.update(
+                str(getattr(entry, "scope", "") or "")
+                for entry in _source_selection.entries
+            )
+            _offered_scopes.discard("")
+            _scope_known = all(
+                getattr(producer, "has_static_scope", True)
+                for producer in getattr(_contract, "producers", ()) or ()
+            )
+            _entry_param = provided_entry_param(
+                _producer_contract,
+                _producer_args,
+                offered_scopes=_offered_scopes,
+                offered_known=_scope_known,
+            )
+            if _entry_param:
+                try:
+                    Logger.event(
+                        "target.entry_declared",
+                        param=_entry_param,
+                        source=source_tool,
+                        producer=target_producer,
+                        skipped_selection=True,
+                        step_id=str(args.get("_step_id") or ""),
+                    )
+                except Exception:
+                    pass
+            _trace_kind_compat(skipped=bool(_entry_param))
             _source_query = target_description or question
             _candidate = None
             _anchor_target = None  # (anchor_kind, valeur brute) si choisi
@@ -1815,7 +1857,8 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
                 _contract, _producer_contract
             )
             if (
-                _source_selection.kind == "single"
+                not _entry_param
+                and _source_selection.kind == "single"
                 and not _has_disclosure
                 and not _strict
             ):
@@ -1824,7 +1867,9 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
                     runtime_state, _candidate, strategy="single",
                     source="perceive_understand",
                 )
-            elif _source_selection.kind in ("single", "candidates") or _has_disclosure:
+            elif not _entry_param and (
+                _source_selection.kind in ("single", "candidates") or _has_disclosure
+            ):
                 _target_result, _cand_err = await _resolve_target_with_llm(
                     runtime_state,
                     contract=_contract,
@@ -1898,6 +1943,10 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
                         out={"data": str(parsed)[:500], "message": msg},
                     )
                     return _target_error("TARGET_ANCHOR_UNSUPPORTED", msg)
+            elif _entry_param:
+                # Entree deja fournie : aucune selection, le producteur recoit
+                # les args du plan tels quels (aucune injection de candidat).
+                _candidate = None
             else:
                 msg = _(
                     "La source '{tool}' n'a produit aucune cible locale ancrable."
@@ -1932,7 +1981,7 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
                     return _target_error("TARGET_ANCHOR_UNSUPPORTED", msg)
                 if _anchor_consumer.param not in _producer_args:
                     _producer_args[_anchor_consumer.param] = _anchor_value
-            else:
+            elif _candidate is not None:
                 _consumer = _consumer_spec_for_candidate(
                     _producer_contract, _candidate
                 )
@@ -2111,6 +2160,8 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
             # Politique deja calculee au producteur (et deja tracee). En flux
             # simple sans producteur explicite, elle reste `None` : aucun
             # filtre, comportement historique.
+            if _kind_policy is not None:
+                _trace_kind_compat()
             _target_result, _sel_err = await _resolve_target_with_llm(
                 runtime_state,
                 contract=_selection_contract,

@@ -345,6 +345,13 @@ Règles de validation (le contrat est tout ou rien) :
 - `usable_as` (optionnel) élargit les scopes consommables : une cible de ce
   scope peut remplir un slot de chaque scope listé. Défaut : `[scope]`.
   La relation n'est pas transitive.
+- Entrée déjà fournie (flux composite) : si le plan renseigne un consommateur
+  **déclaré** dont le `scope` n'est pas offert par la source (surface,
+  rafraîchissement, case...), cette valeur ne peut pas désigner un candidat :
+  la sélection est **sautée** (aucun appel de modèle, aucun `preset` injecté) et
+  le producteur reçoit exactement les arguments du plan. Un `raw: allow` sur ce
+  consommateur autorise un littéral hôte (ex. `surface=bureau`) : sans lui, la
+  valeur est traitée comme un nom local et refusée si inconnue.
 - `kind_param` (optionnel) nomme le paramètre du producteur qui choisit le
   **type de cible produite** (`kind` par convention s'il est présent). Le
   cerveau ne connaît aucun type : il transmet la valeur telle quelle.
@@ -462,10 +469,11 @@ partir de positions ou de noms de champs.
   composite, ceux du producteur seulement en flux simple (où il n'existe pas
   d'autre entrée). Elle ne s'évalue **jamais** sur le payload de sortie du
   producteur. Un refus anticipé n'est prononcé que si aucune autre entrée
-  n'existe : une ancre brute déclarée (`disclosure.anchors`) ou un scope lu par
-  item (`fields.scope`) laissent la sélection se dérouler. `kind_scopes` ne
-  régit que les **scopes de cibles locales** ; les ancres brutes restent
-  régies par `disclosure.anchors` et `consumes[].raw`.
+  n'existe : une ancre **offerte** au sélecteur (`disclosure.anchors`, et non un
+  simple consommateur `raw: allow`), ou un scope lu par item (`fields.scope`),
+  laissent la sélection se dérouler. `kind_scopes` ne régit que les **scopes de
+  cibles locales** ; les ancres brutes restent régies par `disclosure.anchors` et
+  `consumes[].raw`.
 - `occlusion.blocked_by` / `occlusion.covers` nomment des attributs **déjà
   publiés** via `fields.attributes`. Un attribut muet (`""`, `[]`, `false`,
   `0`) ne déclenche rien. Un attribut absent de `fields.attributes` rend la
