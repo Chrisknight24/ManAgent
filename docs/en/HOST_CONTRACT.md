@@ -299,6 +299,23 @@ Validation rules (a contract is all-or-nothing):
 - `usable_as` (optional) widens consumable scopes: a target in this scope may
   fill a slot of each listed scope. Default: `[scope]`. The relation is not
   transitive.
+- `kind_param` (optional) names the producer parameter that selects the
+  **produced target type** (`kind` by convention when present). The brain knows
+  no type: it forwards the value as-is.
+- `kind_scopes` (optional) declares the
+  `produced type -> accepted input scopes` table, e.g.
+  `{"ui": ["ui_preset"], "image": []}`. An empty list is a **strong**
+  declaration: no observed candidate can produce that type. A missing table, or
+  a table silent about that type, means **no conclusion**: behaviour is exactly
+  unchanged and only the `target.kind_compat` trace reports it. A refusal
+  (`TARGET_KIND_MISMATCH`) is issued only on an explicit declaration.
+- `occlusion` (optional) declares which **published** attributes carry the
+  occlusion fact: `{"blocked_by": ["covered_by"], "covers": ["occludes"]}`.
+  A non-empty/non-false `blocked_by` gives a deterministic refusal (`mismatch`)
+  without a model call; `covers` means never `match` (`uncertain`). Every name
+  must exist in `fields.attributes`, otherwise the declaration is inapplicable
+  (warning). The brain **never** infers occlusion from geometry or field names:
+  the host asserts, the brain applies.
 - No `enum` on a consumer parameter, and no legacy `targets` without
   `target_contract`: lint reports it and targets stay inert.
 
@@ -363,6 +380,41 @@ Identity and freshness:
   `TARGET_SCHEMA_INVALID` (diagnostic, item skipped);
 - descriptions are **untrusted data**, capped at 200 characters, never
   instructions.
+
+### Declared type compatibility and occlusion
+
+Both declarations are **optional** and non-breaking. They serve one principle:
+the host asserts what its world contains, the brain applies it. The brain infers
+neither the meaning of a target type nor an occlusion from positions or field
+names.
+
+```json
+"produces": [{
+  "path": "data.candidates",
+  "mode": "candidates",
+  "scope": "ui_preset",
+  "kind_param": "kind",
+  "kind_scopes": {"ui": ["ui_preset"], "image": []},
+  "fields": {
+    "ref": "id",
+    "description": "name",
+    "attributes": {"covered_by": "covered_by", "occludes": "occludes"}
+  },
+  "occlusion": {"blocked_by": ["covered_by"], "covers": ["occludes"]}
+}]
+```
+
+- `kind_scopes` is consulted **before** any selection call: candidates whose
+  scope is not accepted for the requested type are dropped, and if none remain
+  the answer is `TARGET_KIND_MISMATCH` with the observed scopes and the declared
+  alternative types. No type is hard-coded in the brain: changing vocabulary
+  requires no code change.
+- `occlusion.blocked_by` / `occlusion.covers` name attributes **already
+  published** through `fields.attributes`. A mute attribute (`""`, `[]`,
+  `false`, `0`) triggers nothing. An attribute missing from `fields.attributes`
+  makes the declaration inapplicable and produces a contract warning.
+- Without these keys, behaviour matches the previous version: no regression, no
+  new refusal.
 
 ### Declared inspections (`disclosure`) and anchors
 

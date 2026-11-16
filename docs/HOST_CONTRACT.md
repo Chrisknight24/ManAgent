@@ -345,6 +345,23 @@ Règles de validation (le contrat est tout ou rien) :
 - `usable_as` (optionnel) élargit les scopes consommables : une cible de ce
   scope peut remplir un slot de chaque scope listé. Défaut : `[scope]`.
   La relation n'est pas transitive.
+- `kind_param` (optionnel) nomme le paramètre du producteur qui choisit le
+  **type de cible produite** (`kind` par convention s'il est présent). Le
+  cerveau ne connaît aucun type : il transmet la valeur telle quelle.
+- `kind_scopes` (optionnel) déclare la table
+  `type produit -> scopes d'entrée acceptés`, par exemple
+  `{"ui": ["ui_preset"], "image": []}`. Une liste vide est une déclaration
+  **forte** : aucun candidat observé ne peut produire ce type. Table absente,
+  ou muette pour ce type = **aucune conclusion** : le comportement est
+  strictement inchangé et seule la trace `target.kind_compat` le signale. Un
+  refus (`TARGET_KIND_MISMATCH`) n'est prononcé que sur déclaration explicite.
+- `occlusion` (optionnel) déclare quels attributs **publiés** portent le fait
+  d'occultation : `{"blocked_by": ["covered_by"], "covers": ["occludes"]}`.
+  `blocked_by` non vide/non faux ⇒ refus déterministe (`mismatch`) sans appel
+  de modèle ; `covers` ⇒ jamais `match` (`uncertain`). Chaque nom doit figurer
+  dans `fields.attributes`, sinon la déclaration est inapplicable
+  (avertissement). Le cerveau ne déduit **jamais** l'occultation d'une
+  géométrie ou d'un nom de champ : l'hôte affirme, le cerveau applique.
 - Aucun `enum` sur un paramètre consommateur, et aucun `targets` legacy sans
   `target_contract` : le lint le signale et les cibles restent inertes.
 
@@ -411,6 +428,41 @@ Identité et fraîcheur :
   `TARGET_SCHEMA_INVALID` (diagnostic, l'item est ignoré).
 - les descriptions sont des **données non fiables**, plafonnées à 200
   caractères, jamais des instructions.
+
+### Compatibilité de type et occultation (déclarées par l'hôte)
+
+Ces deux déclarations sont **facultatives** et non cassantes. Elles servent un
+principe unique : l'hôte affirme ce que son monde contient, le cerveau applique.
+Le cerveau n'infère ni la sémantique d'un type de cible, ni une occultation à
+partir de positions ou de noms de champs.
+
+```json
+"produces": [{
+  "path": "data.candidates",
+  "mode": "candidates",
+  "scope": "ui_preset",
+  "kind_param": "kind",
+  "kind_scopes": {"ui": ["ui_preset"], "image": []},
+  "fields": {
+    "ref": "id",
+    "description": "name",
+    "attributes": {"covered_by": "covered_by", "occludes": "occludes"}
+  },
+  "occlusion": {"blocked_by": ["covered_by"], "covers": ["occludes"]}
+}]
+```
+
+- `kind_scopes` est consulté **avant** tout appel de sélection : les candidats
+  dont le scope n'est pas accepté par le type demandé sont écartés, et si plus
+  aucun ne reste, la réponse est `TARGET_KIND_MISMATCH` avec les scopes
+  observés et les types alternatifs déclarés. Aucun type n'est codé côté
+  cerveau : changer de vocabulaire ne demande aucun changement de code.
+- `occlusion.blocked_by` / `occlusion.covers` nomment des attributs **déjà
+  publiés** via `fields.attributes`. Un attribut muet (`""`, `[]`, `false`,
+  `0`) ne déclenche rien. Un attribut absent de `fields.attributes` rend la
+  déclaration inapplicable et produit un avertissement de contrat.
+- Sans ces clés, le comportement est celui de la version précédente : aucune
+  régression, aucun refus nouveau.
 
 ### Inspections déclarées (`disclosure`) et ancres
 

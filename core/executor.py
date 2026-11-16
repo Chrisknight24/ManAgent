@@ -887,12 +887,27 @@ class Executor:
         except Exception:
             return set()
 
+    def _value_source(self, value: Any) -> str:
+        """Origine d'une valeur d'argument (pure, jamais bloquante)."""
+        if not isinstance(value, str):
+            return "non_string"
+        match = re.fullmatch(r'(\$@_|@\$_)([a-zA-Z0-9_-]+)', value.strip())
+        if not match:
+            return "literal"
+        _matched_key, entry = self._find_var_in_registry(match.group(2))
+        if isinstance(entry, dict):
+            return f"alias:{match.group(2)}"
+        return f"unresolved:{match.group(2)}"
+
     def _describe_consumer_values(self, tool_name: str, args: Any) -> Dict[str, str]:
         """Origine de chaque argument consommateur de cible, pour la trace.
 
         `alias:<nom>` = reference locale resolue, `unresolved:<nom>` = alias
         declare mais absent du registre, `literal` = valeur brute (aucun
         ancrage), `missing` = argument absent, `non_string` = type inattendu.
+        Les arguments **non declares** par le contrat sont traces aussi
+        (`undeclared:<origine>`) : un parametre exotique qui change le
+        comportement de l'outil ne doit jamais etre invisible au rejeu.
         Pur (lecture registre), jamais bloquant.
         """
         keys = self._target_consumer_keys(tool_name)
@@ -903,19 +918,11 @@ class Executor:
             if key not in args:
                 sources[key] = "missing"
                 continue
-            value = args.get(key)
-            if not isinstance(value, str):
-                sources[key] = "non_string"
+            sources[key] = self._value_source(args.get(key))
+        for key in sorted(str(k) for k in args.keys()):
+            if key in keys or key.startswith("_"):
                 continue
-            match = re.fullmatch(r'(\$@_|@\$_)([a-zA-Z0-9_-]+)', value.strip())
-            if not match:
-                sources[key] = "literal"
-                continue
-            _matched_key, entry = self._find_var_in_registry(match.group(2))
-            if isinstance(entry, dict):
-                sources[key] = f"alias:{match.group(2)}"
-            else:
-                sources[key] = f"unresolved:{match.group(2)}"
+            sources[key] = f"undeclared:{self._value_source(args.get(key))}"
         return sources
 
     def _target_arg_sources(self, step: Any, args: Any) -> List[str]:

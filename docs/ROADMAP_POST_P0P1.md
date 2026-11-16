@@ -224,6 +224,36 @@ fraîche, sans juger le métier : il ouvre une question, il ne condamne pas.
 
 ---
 
+## 9. Vague cerveau 1 (B1–B5) — **livrée le 16/11**
+
+Issue du rejeu raté `22a92120`. Cinq correctifs, tous **déclaration-gated** :
+sans déclaration hôte, le comportement est strictement inchangé.
+
+| # | Correctif | Module | Effet |
+|---|---|---|---|
+| B1 | Compatibilité `type produit -> scopes` | `core/target_kind.py`, `core/targeting.py` | `produces[].kind_scopes` filtre les candidats **avant** tout appel ; refus `TARGET_KIND_MISMATCH` sur déclaration explicite seule. |
+| B2 | Occultation **déclarée** | `core/target_occlusion.py`, `core/targeting.py` | `produces[].occlusion.{blocked_by,covers}` : `blocked_by` ⇒ refus déterministe, `covers` ⇒ jamais `match`. Aucune heuristique géométrique. |
+| B3 | Faits scalaires du registre | `core/solver.py` | `_scalar_facts` publie ≤ 8 scalaires bornés (64 car./champ, 280 car.) au planner. |
+| B4 | Trace des args non déclarés | `core/executor.py` | `target_args_source` publie aussi `undeclared:<origine>` : plus d'angle mort sur un paramètre exotique. |
+| B5 | Garde « marche de frappes » | `core/plan_validator.py` | 3 caractères isolés consécutifs, même outil, sans observation ⇒ refus ; caractère isolé ⇒ avertissement non bloquant. |
+
+**Traces ajoutées** : `target.kind_compat` (compatibilité, y compris inerte) et
+`coverage` dans `target.verification` (faits d'occultation). Les deux sont
+lisibles dans `tools/build_observability_report.py`.
+
+**Bancs** : `tests/test_target_kind_policy.py` (8),
+`tests/test_target_occlusion_gate.py` (9),
+`tests/test_registry_scalar_facts.py` (6),
+`tests/test_target_args_source_undeclared.py` (6),
+`tests/test_plan_keystroke_guard.py` (8).
+
+**Dépendance hôte (H6)** : B1 et B2 ne mordent qu'une fois `kind_scopes` et
+`occlusion` déclarés dans le contrat cible. Sans H6, ils tracent seulement.
+Détail du schéma : `docs/HOST_CONTRACT.md` §« Compatibilité de type et
+occultation ».
+
+---
+
 ## Ordre recommandé
 
 1. **§5 / §7 vérifications de rejeu** — aucun code : on lit les événements et on

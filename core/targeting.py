@@ -45,6 +45,8 @@ from core.target_contract import (
     ProbeSpec,
     TargetContract,
 )
+from core.target_kind import filter_candidates, mismatch_message
+from core.target_occlusion import declared_occlusion
 from core.target_ingress import (
     apply_target_updates,
     collect_projected_targets,
@@ -416,13 +418,16 @@ class VerificationOutcome:
     # Cle locale de la candidate verifiee : indispensable pour rattacher
     # chaque verdict a sa cible quand la boucle en verifie plusieurs.
     local_name: str = ""
+    # Faits d'occultation calcules (vide si rien de notable) : publies dans
+    # la trace pour que le rejeu montre POURQUOI un match a ete refuse.
+    coverage: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def matches(self) -> bool:
         return self.verdict == "match"
 
     def as_dict(self) -> Dict[str, Any]:
-        return {
+        out = {
             "verdict": self.verdict,
             "confidence": self.confidence,
             "reason": self.reason[:300],
@@ -432,6 +437,9 @@ class VerificationOutcome:
             "verified": self.verified,
             "local_name": self.local_name,
         }
+        if self.coverage:
+            out["coverage"] = self.coverage
+        return out
 
 
 def _payload_data(payload: Any) -> Any:
@@ -1144,6 +1152,35 @@ async def _verify_target(
             local_name=local_name,
         )
 
+    # Occultation declaree : l'hote affirme qu'une cible est cachee ou qu'elle
+    # recouvre autre chose. Le cerveau n'inferre rien (aucune geometrie, aucun
+    # nom de champ) : il applique la declaration, avant tout appel de modele.
+    #   - cachee  -> refus deterministe (`mismatch`) ;
+    #   - recouvrante -> jamais `match` (`uncertain`), la preuve positive manque.
+    _occlusion = declared_occlusion(contract, entry)
+    if _occlusion.verdict == "mismatch":
+        return VerificationOutcome(
+            verdict="mismatch",
+            confidence="high",
+            reason=_occlusion.reason,
+            next="replan",
+            reliability=reliability,
+            verified=True,
+            local_name=local_name,
+            coverage=_occlusion.as_dict(),
+        )
+    if _occlusion.verdict:
+        return VerificationOutcome(
+            verdict="uncertain",
+            confidence="medium",
+            reason=_occlusion.reason,
+            next="accept",
+            reliability=reliability,
+            verified=True,
+            local_name=local_name,
+            coverage=_occlusion.as_dict(),
+        )
+
     evidence = build_target_evidence(entry, world, disclosure)
     prompt = _build_verification_prompt(
         question=question,
@@ -1378,6 +1415,8 @@ async def resolve_target(
     strict: bool = False,
     anchor_is_locator: bool = False,
     evidence_disclosure: Optional[DisclosureSpec] = None,
+    kind_policy: Optional[Any] = None,
+    producer_name: str = "",
 ) -> TargetingResult:
     """Choisit une cible visible, avec inspections bornees.
 
@@ -1417,6 +1456,30 @@ async def resolve_target(
     # reste global ; l'observabilite les rattache au dernier verdict.
     verifications: List[Dict[str, Any]] = []
     verifier_hint = ""
+
+    # Compatibilite declaree `type produit -> scopes d'entree` : on ecarte les
+    # candidats qu'une declaration explicite de l'hote exclut, AVANT tout
+    # appel de selection. Sans declaration, rien n'est filtre (aucune
+    # regression) et la trace le dit.
+    if kind_policy is not None and getattr(kind_policy, "active", False):
+        _original_candidates = list(world.candidates)
+        _kept, _kind_excluded = filter_candidates(kind_policy, _original_candidates)
+        world.candidates = _kept
+        if _original_candidates and not _kept:
+            _observed_scopes = [
+                str(getattr(c, "scope", "") or "") for c in _original_candidates
+            ]
+            return TargetingResult(
+                kind="none",
+                world=world,
+                error_code="TARGET_KIND_MISMATCH",
+                error_message=mismatch_message(
+                    kind_policy,
+                    _observed_scopes,
+                    producer_name=producer_name,
+                ),
+                verifications=verifications,
+            )
 
     # P2-10 : une correspondance exacte ET unique avec la question (ou un
     # attribut declare) est resolue sans appel de selection. Conserve le

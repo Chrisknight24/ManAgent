@@ -70,6 +70,17 @@ class ProducerSpec:
     # Nom du parametre du producteur qui choisit le type de cible produite
     # (ex: "kind"). `None` = "kind" par convention si present dans l'appel.
     kind_param: Optional[str] = None
+    # Table declaree `type produit -> scopes d'entree acceptes` (ex:
+    # {"ui": ["ui_preset"], "image": []}). Vide = non declaree : le cerveau ne
+    # filtre rien et le trace seulement. Aucun nom de type n'est code en dur :
+    # tout vient de cette table, donc d'un autre hote peut avoir un autre
+    # vocabulaire sans changer une ligne de code.
+    kind_scopes: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+    # Declaration d'occultation : quels attributs publies par l'hote portent le
+    # fait « cette cible est cachee » (`blocked_by`) ou « elle en recouvre une
+    # autre » (`covers`). Vide = aucune declaration : le gate ne change rien.
+    # Le cerveau ne devine jamais l'occultation : il lit ces attributs.
+    occlusion: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
     # Surcharge de fiabilite pour les cibles de ce producteur (sinon global).
     reliability: Optional[str] = None
 
@@ -1032,6 +1043,81 @@ def _parse_producer(
         else:
             kind_param = kind_param_raw.strip()
 
+    kind_scopes_raw = item.get("kind_scopes")
+    kind_scopes: Dict[str, Tuple[str, ...]] = {}
+    if kind_scopes_raw is not None:
+        if not isinstance(kind_scopes_raw, dict):
+            error(f"produces[{index}].kind_scopes must be an object")
+        else:
+            for kind_name, scopes_raw in kind_scopes_raw.items():
+                if not isinstance(kind_name, str) or not kind_name.strip():
+                    error(
+                        f"produces[{index}].kind_scopes has an invalid kind name"
+                    )
+                    continue
+                if not isinstance(scopes_raw, list):
+                    error(
+                        f"produces[{index}].kind_scopes.{kind_name} must be a list"
+                    )
+                    continue
+                cleaned_scopes: List[str] = []
+                for value in scopes_raw:
+                    if not _valid_scope(value):
+                        error(
+                            f"produces[{index}].kind_scopes.{kind_name} has "
+                            f"invalid scope: {value!r}"
+                        )
+                        continue
+                    normalized = value.strip()
+                    if normalized not in cleaned_scopes:
+                        cleaned_scopes.append(normalized)
+                kind_scopes[kind_name.strip()] = tuple(cleaned_scopes)
+            if kind_scopes and not kind_param:
+                warning(
+                    f"produces[{index}].kind_scopes is declared without "
+                    "kind_param: no argument can select a kind"
+                )
+
+    occlusion_raw = item.get("occlusion")
+    occlusion: Dict[str, Tuple[str, ...]] = {}
+    if occlusion_raw is not None:
+        if not isinstance(occlusion_raw, dict):
+            error(f"produces[{index}].occlusion must be an object")
+        else:
+            for role_name in ("blocked_by", "covers"):
+                names_raw = occlusion_raw.get(role_name)
+                if names_raw is None:
+                    continue
+                if not isinstance(names_raw, list):
+                    error(
+                        f"produces[{index}].occlusion.{role_name} must be a list"
+                    )
+                    continue
+                cleaned_names: List[str] = []
+                for value in names_raw:
+                    if not isinstance(value, str) or not value.strip():
+                        error(
+                            f"produces[{index}].occlusion.{role_name} has an "
+                            f"invalid attribute name: {value!r}"
+                        )
+                        continue
+                    name = value.strip()
+                    if name not in cleaned_names:
+                        cleaned_names.append(name)
+                    # Un attribut d'occultation doit etre publie par l'hote,
+                    # sinon la declaration est inapplicable : on le dit.
+                    if name not in cleaned_attributes:
+                        warning(
+                            f"produces[{index}].occlusion.{role_name} refers "
+                            f"to unpublished attribute: {name!r}"
+                        )
+                occlusion[role_name] = tuple(cleaned_names)
+            for extra in occlusion_raw.keys():
+                if extra not in ("blocked_by", "covers"):
+                    warning(
+                        f"produces[{index}].occlusion has unknown key: {extra!r}"
+                    )
+
     reliability = _parse_reliability(
         item.get("reliability"),
         field_name=f"produces[{index}].reliability",
@@ -1046,5 +1132,7 @@ def _parse_producer(
         attributes=cleaned_attributes,
         usable_as=usable,
         kind_param=kind_param,
+        kind_scopes=kind_scopes,
+        occlusion=occlusion,
         reliability=reliability,
     )

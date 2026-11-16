@@ -997,6 +997,119 @@ def find_embedded_control_chars(plan: Any, tools_mgr: Any = None) -> List[str]:
     return hits
 
 
+def _is_keyboard_like(tools_mgr: Any, tool_name: str) -> bool:
+    """Signature d'un clavier : le schéma déclare `key` ou `hotkey`."""
+    params = _tool_parameters(tools_mgr, tool_name)
+    properties = params.get("properties") if isinstance(params, dict) else None
+    return isinstance(properties, dict) and (
+        "key" in properties or "hotkey" in properties
+    )
+
+
+def _single_char_text(args: Any) -> str:
+    """Caractère unique envoyé via un argument texte, sinon "" (pur)."""
+    if not isinstance(args, dict):
+        return ""
+    mode = str(args.get("mode") or "").strip().lower()
+    text = args.get("text")
+    if mode and mode != "text":
+        return ""
+    if not isinstance(text, str):
+        return ""
+    candidate = text.strip()
+    if len(candidate) != 1 or candidate.isspace():
+        return ""
+    return candidate
+
+
+def find_blind_keystroke_runs(plan: Any, tools_mgr: Any = None) -> List[str]:
+    """Refuse une **marche de frappes** : 3+ caractères isolés d'affilée.
+
+    Un caractère unique envoyé à un clavier est ambigu : il peut être une
+    saisie légitime ou un accélérateur deviné (menu contextuel). Une séquence
+    de trois frappes d'un caractère, sur le même outil, sans aucune étape
+    d'observation intercalée, n'est jamais une saisie : c'est une supposition
+    sur des raccourcis (mission bureau : `"o"`, `"n"`, `"b"` — l'un d'eux
+    ouvrait un programme).
+
+    Détection structurelle : aucune liste de touches, aucun nom d'outil. Une
+    saisie réelle dépasse un caractère ; un enchaînement de trois n'est
+    accepté que s'il est entrecoupé d'observation ou de cible nommée.
+    Fonction pure.
+    """
+    steps = [
+        step
+        for step in (getattr(plan, "steps", []) or [])
+        if str(
+            getattr(getattr(step, "type", None), "value", getattr(step, "type", None))
+        )
+        == "tool_call"
+    ]
+    hits: List[str] = []
+    # Une marche = 3 frappes d'un caractère consécutives sur le même outil.
+    # Toute autre étape (observation, action sur cible) remet le compteur à 0 :
+    # c'est l'absence de preuve intercalée qui est fautive, pas la frappe.
+    run: List[str] = []
+    run_tool = ""
+    for step in steps:
+        tool_name = str(getattr(step, "tool_name", "") or "")
+        args = _parse_step_args(getattr(step, "tool_args_json", "{}"))
+        char = _single_char_text(args) if _is_keyboard_like(tools_mgr, tool_name) else ""
+        sid = str(getattr(step, "id", "?"))
+        if char and (not run or tool_name == run_tool):
+            run.append(char)
+            run_tool = tool_name
+            if len(run) == 3:
+                hits.append(
+                    f"{sid}: trois frappes d'un caractère d'affilée "
+                    f"({', '.join(repr(c) for c in run)}) sur '{tool_name}' sans "
+                    "observation intercalée — ce sont des raccourcis supposés, "
+                    "pas une saisie. Ouvrez d'abord le menu dans une étape "
+                    "prouvée, puis agissez sur une cible nommée."
+                )
+            continue
+        if char:
+            run = [char]
+            run_tool = tool_name
+        else:
+            run = []
+            run_tool = ""
+    return hits
+
+
+def find_unguarded_keystroke_warnings(plan: Any, tools_mgr: Any = None) -> List[str]:
+    """Signale (sans refuser) une frappe d'un caractère unique.
+
+    Une saisie d'un caractère est légitime (champ de recherche, lettre de
+    conduite). On ne la refuse pas : on rappelle au juge du plan qu'un
+    accélérateur n'est prouvé que par une observation, jamais par le texte de
+    l'étape. Fonction pure.
+    """
+    out: List[str] = []
+    for step in (getattr(plan, "steps", []) or []):
+        stype = str(
+            getattr(getattr(step, "type", None), "value", getattr(step, "type", None))
+        )
+        if stype != "tool_call":
+            continue
+        tool_name = str(getattr(step, "tool_name", "") or "")
+        if not _is_keyboard_like(tools_mgr, tool_name):
+            continue
+        args = _parse_step_args(getattr(step, "tool_args_json", "{}"))
+        char = _single_char_text(args)
+        if not char:
+            continue
+        out.append(
+            _(
+                "Étape {sid} : frappe du caractère unique {char!r}. Un "
+                "raccourci n'est prouvé que si le menu est ouvert par une "
+                "étape et si l'élément visé est nommé dans une observation ; "
+                "sinon préférez une cible nommée."
+            ).format(sid=str(getattr(step, "id", "?")), char=char)
+        )
+    return out
+
+
 def find_target_kind_mismatches(plan: Any, tools_mgr: Any = None) -> List[str]:
     """Refuse un consommateur qui exige un type de cible non prouvé.
 
@@ -1914,6 +2027,9 @@ class PlanValidator:
         problems += [f"délégation incomplète {u}" for u in incomplete_delegation]
         problems += [f"cible invalide {u}" for u in target_problems]
         problems += find_target_kind_mismatches(plan, self._tools_manager)
+        # Une marche de frappes (3+ caractères isolés sans observation) est un
+        # pari sur des raccourcis, jamais une saisie : refus déterministe.
+        problems += find_blind_keystroke_runs(plan, self._tools_manager)
         # P1-4 : un saut de ligne dans `text` est un risque réel, mais l'outil
         # expose légitimement `text` ; un refus déterministe brûlait des plans
         # valides (ex. commande shell terminée par \n). Signal au juge, pas mur.
@@ -1953,6 +2069,9 @@ class PlanValidator:
         # Le juge du plan ne tranche JAMAIS l'ancrage : il reçoit ces signaux
         # et la convergence finale les évalue. `warnings` est le canal unique.
         deterministic_warnings: List[str] = []
+        deterministic_warnings.extend(
+            find_unguarded_keystroke_warnings(plan, self._tools_manager)
+        )
         if unconsumed:
             deterministic_warnings.append(
                 _("Perception non consommée : {ids}. Sa sortie n'est réutilisée "

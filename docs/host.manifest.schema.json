@@ -89,6 +89,36 @@
                       "items": { "type": "string" },
                       "description": "Consumable scopes; default [scope]. Not transitive."
                     },
+                    "kind_param": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_]+$",
+                      "description": "Optional name of the producer parameter selecting the produced target type (default convention: kind). The brain knows no type; it forwards the value."
+                    },
+                    "kind_scopes": {
+                      "type": "object",
+                      "description": "Optional declared table `produced type -> accepted input scopes` (e.g. {\"ui\": [\"ui_preset\"], \"image\": []}). An empty list is a strong declaration: no observed candidate can produce that type. Missing table, or table silent about the requested type = no conclusion; behaviour is unchanged and only target.kind_compat traces it. A refusal (TARGET_KIND_MISMATCH) is issued only on an explicit declaration.",
+                      "additionalProperties": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                      }
+                    },
+                    "occlusion": {
+                      "type": "object",
+                      "description": "Optional declaration of published attributes carrying the occlusion fact. Names must exist in fields.attributes (otherwise the declaration is inapplicable and a contract warning is emitted). blocked_by => deterministic refusal (mismatch) without a model call; covers => never match (uncertain). The brain never infers occlusion from geometry or field names.",
+                      "properties": {
+                        "blocked_by": {
+                          "type": "array",
+                          "items": { "type": "string" },
+                          "description": "Attribute names whose non-empty/non-false value means the target is hidden."
+                        },
+                        "covers": {
+                          "type": "array",
+                          "items": { "type": "string" },
+                          "description": "Attribute names whose non-empty/non-false value means the target covers another owner's content (never match, at best uncertain)."
+                        }
+                      },
+                      "additionalProperties": true
+                    },
                     "reliability": {
                       "type": "string",
                       "enum": ["high", "medium", "low"],

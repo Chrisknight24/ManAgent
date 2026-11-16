@@ -17,6 +17,7 @@ from core.target_ingress import (
     selection_from_payload,
 )
 from core.target_contract import declared_target_kind
+from core.target_kind import kind_policy
 from core.targets import TargetEntry, TargetSelection
 from core.targeting import (
     PROVIDER_QUOTA_EXHAUSTED,
@@ -910,6 +911,8 @@ async def _resolve_target_with_llm(
     tag: str,
     media_assets: Optional[List[Any]] = None,
     requested_kind: str = "",
+    kind_policy: Any = None,
+    producer_name: str = "",
     strict: bool = False,
     anchor_is_locator: bool = False,
     evidence_disclosure=None,
@@ -927,6 +930,8 @@ async def _resolve_target_with_llm(
     consommée par un producteur (elle est donc inspectée avant usage).
     `evidence_disclosure` permet de vérifier la cible produite avec les
     preuves du contrat SOURCE, pas avec celles du producteur.
+    `kind_policy` applique la table déclarée `kind_scopes` (aucun filtre sans
+    déclaration) ; `producer_name` ne sert qu'au message de refus.
     """
     registry = _target_registry(runtime_state)
     if registry is None or contract is None:
@@ -966,6 +971,8 @@ async def _resolve_target_with_llm(
         strict=bool(strict),
         anchor_is_locator=bool(anchor_is_locator),
         evidence_disclosure=evidence_disclosure,
+        kind_policy=kind_policy,
+        producer_name=producer_name,
     )
     if not result.ok:
         rich = str(getattr(result, "reason", "") or "").strip()
@@ -2077,6 +2084,25 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
         elif (
             _selection.kind == "candidates" or _selection_disclosure is not None
         ) and (_output_alias or target_producer):
+            # Compatibilite declaree `type produit -> scopes` : tracee meme
+            # quand elle est inerte, pour que l'absence de declaration soit
+            # visible au rejeu (angle mort de la tentative 3).
+            _kind_policy = kind_policy(
+                _producer_contract or _selection_contract, _producer_args
+            )
+            if _kind_policy.kind:
+                try:
+                    Logger.event(
+                        "target.kind_compat",
+                        kind=_kind_policy.kind,
+                        param=_kind_policy.param,
+                        declared=_kind_policy.declared,
+                        allowed_scopes=list(_kind_policy.allowed_scopes),
+                        status=_kind_policy.compat(""),
+                        step_id=str(args.get("_step_id") or ""),
+                    )
+                except Exception:
+                    pass
             _target_result, _sel_err = await _resolve_target_with_llm(
                 runtime_state,
                 contract=_selection_contract,
@@ -2090,6 +2116,8 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
                 requested_kind=declared_target_kind(
                     _producer_contract, _producer_args
                 ),
+                kind_policy=_kind_policy,
+                producer_name=target_producer or "",
                 strict=_strict,
                 anchor_is_locator=False,
                 evidence_disclosure=_evidence_disclosure,

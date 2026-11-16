@@ -400,8 +400,44 @@ class Solver(Supervisor, Entity):
         providers.pop("history", None)
         return providers
 
+    # Faits scalaires d'une donnee structuree, pour le registre du planner.
+    # Objectif : le planner doit VOIR une valeur courte et decisive (titre de
+    # fenetre, booleen, compteur) sans payer le JSON complet ni dependre d'un
+    # champ particulier. Regle purement structurelle : scalaires seulement,
+    # bornes en nombre et en longueur, aucun nom de champ privilegie.
+    _SCALAR_MAX_FIELDS = 8
+    _SCALAR_MAX_CHARS = 64
+    _SCALAR_MAX_TOTAL = 280
+
+    def _scalar_facts(self, value: Any) -> str:
+        if not isinstance(value, dict):
+            return ""
+        parts: List[str] = []
+        used = 0
+        for name in sorted(value.keys(), key=lambda k: str(k)):
+            item = value.get(name)
+            if isinstance(item, bool):
+                text = "true" if item else "false"
+            elif isinstance(item, (int, float)):
+                text = str(item)
+            elif isinstance(item, str):
+                text = item.strip().replace("\n", " ")
+            else:
+                continue
+            if not text:
+                continue
+            text = text[: self._SCALAR_MAX_CHARS]
+            piece = f"{name}={text}"
+            if used + len(piece) > self._SCALAR_MAX_TOTAL:
+                break
+            parts.append(piece)
+            used += len(piece) + 3
+            if len(parts) >= self._SCALAR_MAX_FIELDS:
+                break
+        return " · ".join(parts)
+
     def _get_registry_metadata_view(self) -> Dict[str, Any]:
-        view = {}
+        view: Dict[str, Any] = {}
         target_registry = getattr(self.runtime_state, "target_registry", None)
         current_attempt_no = getattr(
             getattr(self, "current_attempt", None), "attempt_number", None
@@ -419,7 +455,11 @@ class Solver(Supervisor, Entity):
                 uri_str = asset_obj.get_uri() if asset_obj else str(value)
                 hint = _("(DataAsset: {})").format(uri_str)
             elif var_type == "data":
-                hint = _("(donnée masquée – utilisez Progressive Disclosure pour inspecter)")
+                facts = self._scalar_facts(value)
+                if facts:
+                    hint = _("(données: {facts})").format(facts=facts)
+                else:
+                    hint = _("(donnée masquée – utilisez Progressive Disclosure pour inspecter)")
             elif var_type == "target":
                 scope = str(info.get("scope") or "?")
                 kind = str(info.get("target_kind") or "").strip()
