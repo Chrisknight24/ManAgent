@@ -1395,8 +1395,8 @@ def find_incomplete_delegated_args(plan: Any, tools_mgr: Any = None) -> List[str
                 hits.append(f"{sid} : sous-appel `{source_tool}` mal formé : {e}")
                 continue
             from core.alignment import invalid_enum_value
-            from core.target_contract import declared_consumer_params
-            consumer_keys = declared_consumer_params(tools_mgr, source_tool)
+            from core.target_contract import reference_consumer_params
+            consumer_keys = reference_consumer_params(tools_mgr, source_tool)
             enum_args = (
                 {k: v for k, v in source_args.items() if k not in consumer_keys}
                 if isinstance(source_args, dict) else source_args

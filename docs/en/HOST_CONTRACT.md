@@ -279,8 +279,16 @@ Validation rules (a contract is all-or-nothing):
 
 - `version` is `1`; missing or invalid = contract rejected, tool still usable
   but **inert** for targets (diagnostic in the logs).
-- `consumes[].param` must exist in `parameters.properties`, be unique, and
-  must not declare an `enum` (the LLM passes a local name, not a host value).
+- `consumes[].param` must exist in `parameters.properties` and be unique. An
+  `enum` is forbidden **unless** `raw: allow` is set: an ordinary consumer
+  receives a local name (an `enum` would contradict it), whereas a `raw: allow`
+  consumer also accepts a host literal, and the `enum` then describes exactly
+  that closed vocabulary — it is validated at plan time, not contradicted.
+  Without this exception a host had to choose between validating its vocabulary
+  and declaring the parameter as a consumer.
+- Contract is all-or-nothing: a single error makes it **inactive** (no target
+  can be anchored by that tool) and the log says so explicitly. A partially
+  applied contract would fabricate false proofs.
 - Reserved parameters, forbidden as consumers: `source`, `source_data`,
   `sources` (they keep their variable-reference meaning).
 - `produces[].path` is a dotted path **relative to the full result**:

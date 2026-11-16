@@ -611,6 +611,15 @@ class ToolsManager(Entity):
                 self._target_contracts.pop(name, None)
                 for error in result.errors:
                     Logger.error(f"[ToolsManager] target_contract: {error}")
+                # Un contrat est tout ou rien : une seule erreur le rend
+                # INACTIF (aucune cible ancrable par cet outil). On le dit une
+                # fois, sans ambiguite, pour que l'absence de `target.*` dans la
+                # trace ne soit jamais confondue avec un gate silencieux.
+                Logger.error(
+                    f"[ToolsManager] target_contract INACTIF pour '{name}' : "
+                    f"{len(result.errors)} erreur(s), cibles desactivees pour "
+                    "cet outil."
+                )
         Logger.debug(f"[ToolsManager] Outil enregistré : {name} (source={source}, kind={kind})")
 
     def get_tool_timeout_ms(self, tool_name: str) -> Optional[int]:

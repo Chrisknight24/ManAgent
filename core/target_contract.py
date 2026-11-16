@@ -235,6 +235,28 @@ def declared_consumer_params(tools_mgr: Any, tool_name: str) -> set:
     return contract.consumer_param_names() if contract else set()
 
 
+def reference_consumer_params(tools_mgr: Any, tool_name: str) -> set:
+    """Consommateurs qui recoivent un NOM LOCAL (`raw: deny`), donc exclus du
+    controle `enum` : leur valeur n'est pas une valeur hote.
+
+    Un consommateur `raw: allow` accepte aussi un litteral de l'hote ; s'il
+    declare un `enum`, ce vocabulaire ferme doit rester verifie au plan. Le
+    filtrer par precaution transformerait l'exception en trou.
+    """
+    try:
+        contract = tools_mgr.get_target_contract(tool_name)
+    except Exception:
+        return set()
+    if contract is None:
+        return set()
+    return {
+        consumer.param
+        for consumer in (getattr(contract, "consumers", ()) or ())
+        if not getattr(consumer, "raw_allow", False)
+        and getattr(consumer, "param", "")
+    }
+
+
 def producer_specs(contract: TargetContract) -> Tuple[ProducerSpec, ...]:
     return contract.producer_specs()
 
@@ -939,9 +961,18 @@ def _parse_consumer(
                 if isinstance(spec, dict):
                     enum = spec.get("enum")
                     if isinstance(enum, (list, tuple)) and enum:
-                        error(
-                            f"consumer parameter '{param}' must not declare enum"
-                        )
+                        # Un consommateur ordinaire recoit un NOM LOCAL : un
+                        # `enum` le contredirait. Mais un consommateur
+                        # `raw: allow` accepte AUSSI un litteral hote, et un
+                        # `enum` decrit alors exactement ce vocabulaire ferme :
+                        # c'est une declaration, pas une contradiction. Le plan
+                        # est valide contre le schema, le cerveau transmet la
+                        # valeur telle quelle.
+                        if not raw_allow:
+                            error(
+                                f"consumer parameter '{param}' must not declare "
+                                "enum (declare raw: allow to accept host literals)"
+                            )
                     declared_type = spec.get("type")
                     if isinstance(declared_type, str) and declared_type.strip():
                         wire_type = declared_type.strip()

@@ -324,8 +324,16 @@ Règles de validation (le contrat est tout ou rien) :
 
 - `version` vaut `1` ; absent ou invalide = contrat refusé, outil utilisable
   mais **inerte** côté cibles (diagnostic dans les logs).
-- `consumes[].param` doit exister dans `parameters.properties`, être unique, et
-  ne pas déclarer d'`enum` (le LLM passe un nom local, pas une valeur hôte).
+- `consumes[].param` doit exister dans `parameters.properties` et être unique.
+  Un `enum` y est interdit **sauf** avec `raw: allow` : un consommateur
+  ordinaire reçoit un nom local (un `enum` le contredirait), alors qu'un
+  consommateur `raw: allow` accepte aussi un littéral hôte, et l'`enum` décrit
+  exactement ce vocabulaire fermé — il est alors validé au plan, pas contredit.
+  Sans cette exception, un hôte devrait choisir entre valider son vocabulaire et
+  déclarer le paramètre comme consommateur.
+- Contrat tout ou rien : une seule erreur rend le contrat **inactif** (aucune
+  cible ancrable par cet outil) et le log le dit explicitement. Un contrat
+  partiellement appliqué fabriquerait de fausses preuves.
 - Paramètres réservés, interdits comme consommateur : `source`, `source_data`,
   `sources` (ils gardent leur sens de référence de variable).
 - `produces[].path` est un chemin pointé **relatif au résultat complet** :

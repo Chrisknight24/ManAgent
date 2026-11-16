@@ -38,7 +38,7 @@
                   "properties": {
                     "param": {
                       "type": "string",
-                      "description": "Top-level tool parameter. Reserved: source, source_data, sources. Must not declare an enum."
+                      "description": "Top-level tool parameter. Reserved: source, source_data, sources. Must not declare an enum unless raw is 'allow' (then the enum describes the accepted host literals and is validated at plan time)."
                     },
                     "scope": {
                       "type": "string",
