@@ -1624,6 +1624,10 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
     _producer_payload = None
     _producer_contract = None
     _producer_args: Dict[str, Any] = {}
+    # Politique `kind_scopes` du producteur qui choisit le type : elle
+    # s'applique aux candidats OFFERTS au selecteur (ceux de la source en flux
+    # composite), pas a la sortie du producteur. `None` = inert.
+    _kind_policy: Any = None
     # P0-3 : une analyse peut échouer parce qu'elle ne voit qu'un crop choisi
     # par le sélecteur. On garde la première observation (frame complète)
     # avant tout écrasement par `TargetWorld.raw`, pour pouvoir élargir UNE
@@ -1778,6 +1782,24 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
             return _target_error("TARGET_SCHEMA_INVALID", msg)
 
         _producer_args = dict(target_args)
+        # Compatibilite declaree `type produit -> scopes d'entree` : le
+        # producteur qui OCUPE le parametre de type (ex. `target`) declare ce
+        # qu'il accepte en entree. On l'evalue sur les candidats reellement
+        # offerts (la source en composite), jamais sur sa propre sortie.
+        _kind_policy = kind_policy(_producer_contract, _producer_args)
+        if _kind_policy is not None and _kind_policy.kind:
+            try:
+                Logger.event(
+                    "target.kind_compat",
+                    kind=_kind_policy.kind,
+                    param=_kind_policy.param,
+                    declared=_kind_policy.declared,
+                    allowed_scopes=list(_kind_policy.allowed_scopes),
+                    status=_kind_policy.compat(""),
+                    step_id=str(args.get("_step_id") or ""),
+                )
+            except Exception:
+                pass
         if _composite:
             if _registry is None:
                 return _target_error(
@@ -1815,6 +1837,8 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
                     media_assets=media_assets,
                     strict=_strict,
                     anchor_is_locator=bool(target_producer),
+                    kind_policy=_kind_policy,
+                    producer_name=target_producer,
                 )
                 if _cand_err:
                     _cand_err = await _enrich_failed_target_error(
@@ -2084,25 +2108,9 @@ async def perceive_understand(args: Dict[str, Any], runtime_state) -> Dict[str, 
         elif (
             _selection.kind == "candidates" or _selection_disclosure is not None
         ) and (_output_alias or target_producer):
-            # Compatibilite declaree `type produit -> scopes` : tracee meme
-            # quand elle est inerte, pour que l'absence de declaration soit
-            # visible au rejeu (angle mort de la tentative 3).
-            _kind_policy = kind_policy(
-                _producer_contract or _selection_contract, _producer_args
-            )
-            if _kind_policy.kind:
-                try:
-                    Logger.event(
-                        "target.kind_compat",
-                        kind=_kind_policy.kind,
-                        param=_kind_policy.param,
-                        declared=_kind_policy.declared,
-                        allowed_scopes=list(_kind_policy.allowed_scopes),
-                        status=_kind_policy.compat(""),
-                        step_id=str(args.get("_step_id") or ""),
-                    )
-                except Exception:
-                    pass
+            # Politique deja calculee au producteur (et deja tracee). En flux
+            # simple sans producteur explicite, elle reste `None` : aucun
+            # filtre, comportement historique.
             _target_result, _sel_err = await _resolve_target_with_llm(
                 runtime_state,
                 contract=_selection_contract,

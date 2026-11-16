@@ -96,7 +96,7 @@
                     },
                     "kind_scopes": {
                       "type": "object",
-                      "description": "Optional declared table `produced type -> accepted input scopes` (e.g. {\"ui\": [\"ui_preset\"], \"image\": []}). An empty list is a strong declaration: no observed candidate can produce that type. Missing table, or table silent about the requested type = no conclusion; behaviour is unchanged and only target.kind_compat traces it. A refusal (TARGET_KIND_MISMATCH) is issued only on an explicit declaration.",
+                      "description": "Optional declared table `produced type -> accepted input scopes` (e.g. {\"ui\": [\"ui_preset\"], \"image\": []}). An empty list is a strong declaration: no observed candidate can produce that type. Missing table, or table silent about the requested type = no conclusion; behaviour is unchanged and only target.kind_compat traces it. A refusal (TARGET_KIND_MISMATCH) is issued only on an explicit declaration, and only when no other input exists (no declared raw anchor, no per-item scope). The table is carried by the producer owning kind_param but evaluated on the candidates offered to the selector (the source's ones in a composite flow); never on the producer's own output payload. It governs local target scopes only.",
                       "additionalProperties": {
                         "type": "array",
                         "items": { "type": "string" }

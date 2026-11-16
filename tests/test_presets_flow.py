@@ -376,3 +376,54 @@ def test_le_plan_composite_est_refuse_si_le_producteur_ne_consomme_rien():
     problems = find_target_plan_problems(_composite_plan(), tm)
     assert problems
     assert any("consommateur" in problem for problem in problems)
+
+
+# ---------------------------------------------------------------------------
+# Compatibilite declaree `kind_scopes` : le producteur qui choisit le type
+# (target) declare ce qu'il accepte en ENTREE ; le cerveau evalue la table sur
+# les candidates de la SOURCE, avant d'appeler ce producteur.
+# ---------------------------------------------------------------------------
+
+
+def _kind_manifest(kind_scopes):
+    manifest = _manifest()
+    target_tool = next(t for t in manifest["tools"] if t["name"] == "target")
+    target_tool["parameters"]["properties"]["kind"] = {"type": "string"}
+    producer = target_tool["target_contract"]["produces"][0]
+    producer["kind_param"] = "kind"
+    producer["kind_scopes"] = kind_scopes
+    return manifest
+
+
+def test_kind_scopes_refuse_image_depuis_un_preset_sans_appeler_le_producteur():
+    sim = _sim(
+        _host_results(names=("OK", "Annuler")),
+        manifest=_kind_manifest({"ui": ["ui_preset"], "image": []}),
+    )
+    sim.runtime_state._tools_llm = _PickByDescriptionLLM("OK")
+
+    out = asyncio.run(IT.perceive_action(
+        _composite_call(target_args={"kind": "image"}), sim.runtime_state
+    ))
+
+    assert out["result"] is False
+    assert out["error"]["code"] == "TARGET_KIND_MISMATCH"
+    assert _calls(sim, "target") == []
+    assert _calls(sim, "mouse") == []
+
+
+def test_kind_scopes_compatible_laisse_le_producteur_travailler():
+    sim = _sim(
+        _host_results(names=("OK", "Annuler")),
+        manifest=_kind_manifest({"ui": ["ui_preset"], "image": []}),
+    )
+    sim.runtime_state._tools_llm = _PickByDescriptionLLM("OK")
+
+    out = asyncio.run(IT.perceive_action(
+        _composite_call(target_args={"kind": "ui"}), sim.runtime_state
+    ))
+
+    assert out["result"] is True, out
+    target_call = _calls(sim, "target")[0]
+    assert target_call["arguments"]["kind"] == "ui"
+    assert target_call["arguments"]["preset"] == "t1"

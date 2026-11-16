@@ -241,3 +241,81 @@ def test_sans_declaration_aucun_filtre_ni_refus():
     assert llm.calls >= 1
     assert result.error_code != "TARGET_KIND_MISMATCH"
     assert world.candidates  # le monde n'a pas ete vide par la politique
+
+
+def test_ancre_brute_disponible_empeche_le_refus_anticipe():
+    """`kind_scopes` ne parle que des cibles locales : une ancre brute reste
+    une entree possible, donc on filtre sans fermer la porte."""
+    producer = _contract({"ui": ["tile"], "image": []})
+    source = _candidates_contract()
+    registry = TargetRegistry()
+    world = _world(source, registry)
+    llm = _SilentLlm()
+
+    result = asyncio.run(resolve_target(
+        llm=llm,
+        question="une zone libre",
+        world=world,
+        contract=source,
+        registry=registry,
+        tools_mgr=_Manager(),
+        allow_anchor=True,
+        anchor_kinds=["raw_cell"],
+        max_rounds=0,
+        kind_policy=kind_policy(producer, {"kind": "image"}),
+        producer_name="act",
+    ))
+
+    assert llm.calls >= 1
+    assert result.error_code != "TARGET_KIND_MISMATCH"
+
+
+def test_scope_dynamique_empeche_le_refus_anticipe():
+    """Un producteur a scope lu par item peut reveler un scope accepte via une
+    inspection : refuser avant le selecteur serait une conclusion prematuree."""
+    source = _dynamic_scope_contract()
+    producer = _contract({"ui": ["other"], "image": []})
+    registry = TargetRegistry()
+    projected = project_target_payload(
+        registry,
+        source,
+        {"result": True, "data": {"candidates": [
+            {"id": "ref-1", "name": "zone libre", "scope": "tile"},
+        ]}},
+    )[0]
+    world = ObservedWorld.from_payload(registry, source, projected)
+    llm = _SilentLlm()
+
+    result = asyncio.run(resolve_target(
+        llm=llm,
+        question="une zone libre",
+        world=world,
+        contract=source,
+        registry=registry,
+        tools_mgr=_Manager(),
+        allow_anchor=False,
+        max_rounds=0,
+        kind_policy=kind_policy(producer, {"kind": "image"}),
+        producer_name="act",
+    ))
+
+    assert llm.calls >= 1
+    assert result.error_code != "TARGET_KIND_MISMATCH"
+    assert world.candidates == []  # le candidat exclu reste ecarte
+
+
+def _dynamic_scope_contract():
+    parsed = parse_target_contract({
+        "version": 1,
+        "produces": [{
+            "path": "data.candidates",
+            "mode": "candidates",
+            "fields": {
+                "ref": "id",
+                "description": "name",
+                "scope": "scope",
+            },
+        }],
+    }, tool_name="scan")
+    assert parsed.contract is not None, parsed.errors
+    return parsed.contract

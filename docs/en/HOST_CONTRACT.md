@@ -409,6 +409,14 @@ names.
   the answer is `TARGET_KIND_MISMATCH` with the observed scopes and the declared
   alternative types. No type is hard-coded in the brain: changing vocabulary
   requires no code change.
+- The table is carried by the producer that owns `kind_param`, but it is
+  evaluated on the **candidates offered to the selector**: the source's ones in a
+  composite flow, the producer's own only in a simple flow (where no other input
+  exists). It is **never** evaluated on the producer's output payload. An early
+  refusal is only issued when no other input exists: a declared raw anchor
+  (`disclosure.anchors`) or a per-item scope (`fields.scope`) let selection run.
+  `kind_scopes` only governs **local target scopes**; raw anchors stay governed
+  by `disclosure.anchors` and `consumes[].raw`.
 - `occlusion.blocked_by` / `occlusion.covers` name attributes **already
   published** through `fields.attributes`. A mute attribute (`""`, `[]`,
   `false`, `0`) triggers nothing. An attribute missing from `fields.attributes`

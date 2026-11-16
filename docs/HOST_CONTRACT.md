@@ -457,6 +457,15 @@ partir de positions ou de noms de champs.
   aucun ne reste, la réponse est `TARGET_KIND_MISMATCH` avec les scopes
   observés et les types alternatifs déclarés. Aucun type n'est codé côté
   cerveau : changer de vocabulaire ne demande aucun changement de code.
+- La table est portée par le producteur qui possède `kind_param`, mais elle est
+  évaluée sur les **candidats offerts au sélecteur** : ceux de la source en flux
+  composite, ceux du producteur seulement en flux simple (où il n'existe pas
+  d'autre entrée). Elle ne s'évalue **jamais** sur le payload de sortie du
+  producteur. Un refus anticipé n'est prononcé que si aucune autre entrée
+  n'existe : une ancre brute déclarée (`disclosure.anchors`) ou un scope lu par
+  item (`fields.scope`) laissent la sélection se dérouler. `kind_scopes` ne
+  régit que les **scopes de cibles locales** ; les ancres brutes restent
+  régies par `disclosure.anchors` et `consumes[].raw`.
 - `occlusion.blocked_by` / `occlusion.covers` nomment des attributs **déjà
   publiés** via `fields.attributes`. Un attribut muet (`""`, `[]`, `false`,
   `0`) ne déclenche rien. Un attribut absent de `fields.attributes` rend la

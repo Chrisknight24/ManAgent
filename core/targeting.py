@@ -1461,11 +1461,28 @@ async def resolve_target(
     # candidats qu'une declaration explicite de l'hote exclut, AVANT tout
     # appel de selection. Sans declaration, rien n'est filtre (aucune
     # regression) et la trace le dit.
+    #
+    # Refus anticipe UNIQUEMENT quand aucune autre entree n'est possible :
+    # - une ancre brute declaree (`anchor_kinds`) peut produire le type sans
+    #   passer par un candidat local (`kind_scopes` ne parle que des scopes de
+    #   cibles locales) ;
+    # - un producteur a scope DYNAMIQUE (`fields.scope`) peut reveler, via une
+    #   inspection, un candidat de scope accepte. Refuser ici fermerait la
+    #   porte a une preuve legitime.
     if kind_policy is not None and getattr(kind_policy, "active", False):
         _original_candidates = list(world.candidates)
         _kept, _kind_excluded = filter_candidates(kind_policy, _original_candidates)
         world.candidates = _kept
-        if _original_candidates and not _kept:
+        _scope_is_dynamic = any(
+            not getattr(producer, "has_static_scope", True)
+            for producer in getattr(contract, "producers", ())
+        )
+        if (
+            _original_candidates
+            and not _kept
+            and not anchor_kinds
+            and not _scope_is_dynamic
+        ):
             _observed_scopes = [
                 str(getattr(c, "scope", "") or "") for c in _original_candidates
             ]
