@@ -146,6 +146,180 @@ def test_filtre_par_mission(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Vitalite : agregats, alertes, integration
+# ---------------------------------------------------------------------------
+
+
+def _call(**fields):
+    return _event("llm_call", **fields)
+
+
+def test_vitalite_agrege_les_appels():
+    events = [
+        _call(duration_ms=1000, first_byte_ms=200, success=True),
+        _call(duration_ms=3000, first_byte_ms=600, success=True),
+        _call(duration_ms=2000, first_byte_ms=400, success=True),
+    ]
+    vitality = A.read_vitality(events)
+    assert vitality["calls"] == 3
+    assert vitality["failed"] == 0
+    assert vitality["duration_ms"] == {"max": 3000, "median": 2000}
+    assert vitality["first_byte_ms"] == {
+        "count": 3,
+        "min": 200,
+        "median": 400,
+        "max": 600,
+    }
+    assert vitality["flags"] == []
+
+
+def test_vitalite_alerte_quand_aucun_premier_contenu_n_est_mesure():
+    vitality = A.read_vitality([_call(duration_ms=9000, success=True)])
+    assert vitality["first_byte_ms"]["count"] == 0
+    assert vitality["first_byte_ms"]["median"] is None
+    assert "AUCUN FIRST BYTE" in vitality["flags"]
+
+
+def test_vitalite_alerte_sur_echec_et_battement():
+    events = [
+        _call(duration_ms=1000, first_byte_ms=100, success=False),
+        _event("llm_call.stall", kind="structured", tick=1, elapsed_s=30, budget_s=120),
+        _event("llm_call.stall", kind="structured", tick=2, elapsed_s=60, budget_s=120),
+    ]
+    vitality = A.read_vitality(events)
+    assert vitality["failed"] == 1
+    assert vitality["stalls"] == {"count": 2, "max_elapsed_s": 60}
+    assert "APPELS EN ECHEC" in vitality["flags"]
+
+
+def test_vitalite_lit_le_budget_du_monde():
+    events = [
+        _event("world_snapshot", chars=1800, budget=2000),
+        _event("world_snapshot", chars=2400, budget=2000, truncated=True),
+        _event("world_snapshot.budget_low", budget=800),
+    ]
+    vitality = A.read_vitality(events)
+    assert vitality["world"] == {
+        "snapshots": 2,
+        "chars_min": 1800,
+        "chars_max": 2400,
+        "budgets": [2000],
+        "budget_low": 1,
+    }
+    assert "BUDGET BAS" in vitality["flags"]
+    assert "SNAPSHOT COURT ?" not in vitality["flags"]
+
+
+def test_vitalite_signale_un_snapshot_court():
+    vitality = A.read_vitality([_event("world_snapshot", chars=900, budget=900)])
+    assert "SNAPSHOT COURT ?" in vitality["flags"]
+
+
+def test_vitalite_compare_premier_contenu_et_duree_du_meme_appel():
+    events = [
+        _call(duration_ms=5000, first_byte_ms=300, success=True),
+        _call(duration_ms=300, first_byte_ms=900, success=True),
+    ]
+    vitality = A.read_vitality(events)
+    # Seul le second appel est incoherent ; le premier (300 < 5000) ne l'est pas.
+    assert "MESURE INCOHERENTE" in vitality["flags"]
+
+
+def test_vitalite_ne_prend_pas_un_booleen_pour_une_mesure():
+    vitality = A.read_vitality([_call(duration_ms=True, first_byte_ms=False)])
+    assert vitality["duration_ms"]["max"] is None
+    assert vitality["first_byte_ms"]["count"] == 0
+    # Sans premiere mesure reelle, l'alerte reste due.
+    assert "AUCUN FIRST BYTE" in vitality["flags"]
+
+
+def test_vitalite_vide_est_honnete():
+    vitality = A.read_vitality([])
+    assert vitality["calls"] == 0
+    assert vitality["duration_ms"] == {"max": None, "median": None}
+    assert vitality["first_byte_ms"] == {
+        "count": 0,
+        "min": None,
+        "median": None,
+        "max": None,
+    }
+    assert vitality["stalls"] == {"count": 0, "max_elapsed_s": None}
+    assert vitality["world"]["snapshots"] == 0
+    assert vitality["flags"] == []
+
+
+def test_render_vitalite_dit_ce_qui_manque():
+    text = A.render_vitality(A.read_vitality([_call(duration_ms=1200, success=True)]))
+    assert "appels          : 1" in text
+    assert "aucun premier contenu mesure" in text
+    assert "AUCUN FIRST BYTE" in text
+
+
+def test_render_vitalite_lisible_quand_tout_va_bien():
+    events = [
+        _call(duration_ms=1500, first_byte_ms=250, success=True),
+        _event("world_snapshot", chars=1900, budget=2000),
+        _event("llm_call.stall", kind="structured", tick=1, elapsed_s=30, budget_s=120),
+    ]
+    text = A.render_vitality(A.read_vitality(events))
+    assert "1 mesure(s), min=250 ms median=250 ms max=250 ms" in text
+    assert "1 battement(s), max 30 s" in text
+    assert "chars 1900..1900" in text
+    assert "alertes         : aucune" in text
+
+
+def test_main_texte_ajoute_la_vitalite(tmp_path):
+    path = _write(
+        tmp_path,
+        _event("target.gate", **_base(status="proven", verdict="match")),
+        _call(duration_ms=900, first_byte_ms=120, success=True, **_base()),
+    )
+    text = _capture(lambda: A.main([path]))
+    assert "vitalite" in text
+    assert "1 mesure(s), min=120 ms" in text
+
+
+def test_json_machine_contient_la_vitalite(tmp_path):
+    path = _write(
+        tmp_path,
+        _event("target.gate", **_base(status="proven", verdict="match")),
+        _call(duration_ms=900, first_byte_ms=120, success=True, **_base()),
+    )
+    payload = json.loads(_capture(lambda: A.main([path, "--json"])))
+    assert payload["vitality"]["calls"] == 1
+    assert payload["vitality"]["first_byte_ms"]["median"] == 120
+
+
+def test_run_sans_tentative_mais_avec_appels_reste_analysable(tmp_path):
+    path = _write(
+        tmp_path,
+        _call(duration_ms=800, first_byte_ms=90, success=True, **_base()),
+    )
+    assert A.main([path]) == 0
+    payload = json.loads(_capture(lambda: A.main([path, "--json"])))
+    assert payload["attempts"] == []
+    assert payload["vitality"]["calls"] == 1
+
+
+def test_filtre_par_mission_s_applique_a_la_vitalite(tmp_path):
+    path = _write(
+        tmp_path,
+        _call(duration_ms=800, first_byte_ms=90, success=True, **_base()),
+        _call(
+            duration_ms=5000,
+            first_byte_ms=4800,
+            success=True,
+            **_base(mission_id="m2"),
+        ),
+    )
+    payload = json.loads(
+        _capture(lambda: A.main([path, "--json", "--mission-id", "m2"]))
+    )
+    assert payload["vitality"]["calls"] == 1
+    assert payload["vitality"]["duration_ms"]["max"] == 5000
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

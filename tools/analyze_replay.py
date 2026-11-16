@@ -3,8 +3,9 @@
 
 Lit un (ou plusieurs) sink JSONL d'evenements et imprime, par tentative puis
 par etape, la chaine `selection -> gate -> liaison -> action`, avec un verdict
-explicite par etape. L'objectif est qu'un rejeu se lise en une page, sans
-fouiller le log brut.
+explicite par etape. Il ajoute une section « vitalite » : durees d'appel,
+premier contenu mesure, battements d'attente et budget du monde. L'objectif est
+qu'un rejeu se lise en une page, sans fouiller le log brut.
 
 Aucun nom d'hote, d'outil ou d'application n'est code en dur : seuls les noms
 d'evenements du cerveau sont connus (`target.*`, `alignment_failure`).
@@ -293,6 +294,155 @@ def summarize(attempts: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {"gates": gates, "verdicts": verdicts, "flags": flags}
 
 
+# ---------------------------------------------------------------------------
+# Vitalite : ce que le cerveau a mesure pendant les appels
+# ---------------------------------------------------------------------------
+
+
+def _ints(events: Iterable[Dict[str, Any]], key: str) -> List[int]:
+    values: List[int] = []
+    for event in events:
+        raw = event.get(key)
+        if isinstance(raw, bool) or raw is None:
+            continue
+        try:
+            values.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    return values
+
+
+def _median(values: List[int]) -> Optional[int]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return int(round((ordered[middle - 1] + ordered[middle]) / 2))
+
+
+def read_vitality(events: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+    """Resume les signaux de vivacite d'un rejeu, sans juger le metier.
+
+    Lecture pure : aucun seuil n'est applique en dur sans le dire. Les alertes
+    servent a ouvrir une question, pas a condamner un run.
+    """
+    events = list(events)
+    calls = [event for event in events if event.get("event") == "llm_call"]
+    stalls = [event for event in events if event.get("event") == "llm_call.stall"]
+    snapshots = [event for event in events if event.get("event") == "world_snapshot"]
+    budget_low = [
+        event for event in events if event.get("event") == "world_snapshot.budget_low"
+    ]
+
+    durations = _ints(calls, "duration_ms")
+    first_bytes = _ints(calls, "first_byte_ms")
+    chars = _ints(snapshots, "chars")
+    budgets = _ints(snapshots, "budget")
+    stalled_elapsed = _ints(stalls, "elapsed_s")
+
+    failed = sum(1 for event in calls if event.get("success") is False)
+
+    # Une mesure incoherente se lit appel par appel : comparer le maximum des
+    # premiers contenus au maximum des durees melangerait deux appels distincts.
+    incoherent = 0
+    for event in calls:
+        first = event.get("first_byte_ms")
+        duration = event.get("duration_ms")
+        if isinstance(first, bool) or isinstance(duration, bool):
+            continue
+        if first is None or duration is None:
+            continue
+        try:
+            if int(first) > int(duration):
+                incoherent += 1
+        except (TypeError, ValueError):
+            continue
+
+    flags: List[str] = []
+    if calls and not first_bytes:
+        flags.append("AUCUN FIRST BYTE")
+    if failed:
+        flags.append("APPELS EN ECHEC")
+    if budget_low:
+        flags.append("BUDGET BAS")
+    if chars and max(chars) <= 1200:
+        flags.append("SNAPSHOT COURT ?")
+    if incoherent:
+        flags.append("MESURE INCOHERENTE")
+
+    return {
+        "calls": len(calls),
+        "failed": failed,
+        "duration_ms": {
+            "max": max(durations) if durations else None,
+            "median": _median(durations),
+        },
+        "first_byte_ms": {
+            "count": len(first_bytes),
+            "min": min(first_bytes) if first_bytes else None,
+            "median": _median(first_bytes),
+            "max": max(first_bytes) if first_bytes else None,
+        },
+        "stalls": {
+            "count": len(stalls),
+            "max_elapsed_s": max(stalled_elapsed) if stalled_elapsed else None,
+        },
+        "world": {
+            "snapshots": len(snapshots),
+            "chars_min": min(chars) if chars else None,
+            "chars_max": max(chars) if chars else None,
+            "budgets": sorted(set(budgets)),
+            "budget_low": len(budget_low),
+        },
+        "flags": flags,
+    }
+
+
+def render_vitality(vitality: Dict[str, Any]) -> str:
+    first = vitality["first_byte_ms"]
+    if first["count"]:
+        first_line = (
+            f"{first['count']} mesure(s), min={first['min']} ms "
+            f"median={first['median']} ms max={first['max']} ms"
+        )
+    else:
+        first_line = "aucun premier contenu mesure (flux inactif ou provider sans capacite)"
+    duration = vitality["duration_ms"]
+    duration_line = (
+        f"max={duration['max']} ms median={duration['median']} ms"
+        if duration["max"] is not None
+        else "aucune duree"
+    )
+    world = vitality["world"]
+    if world["snapshots"]:
+        world_line = (
+            f"{world['snapshots']} snapshot(s), chars "
+            f"{world['chars_min']}..{world['chars_max']}, budget "
+            + (", ".join(str(value) for value in world["budgets"]) or "?")
+            + f", budget_low={world['budget_low']}"
+        )
+    else:
+        world_line = "aucun snapshot"
+    stalls = vitality["stalls"]
+    stall_line = (
+        f"{stalls['count']} battement(s), max {stalls['max_elapsed_s']} s"
+        if stalls["count"]
+        else "aucun battement"
+    )
+    return "\n".join([
+        "",
+        "vitalite",
+        "-" * 40,
+        f"  appels          : {vitality['calls']} (echecs: {vitality['failed']}), {duration_line}",
+        f"  premier contenu : {first_line}",
+        f"  attente         : {stall_line}",
+        f"  monde           : {world_line}",
+        f"  alertes         : {', '.join(vitality['flags']) or 'aucune'}",
+    ])
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Analyse compacte de la chaine d'ancrage des cibles."
@@ -325,6 +475,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"aucun evenement lisible dans : {', '.join(paths)}")
         return 2
 
+    selected = events
+    if args.mission_id:
+        selected = [
+            event
+            for event in events
+            if str(event.get("mission_id") or "").startswith(args.mission_id)
+        ]
+    vitality = read_vitality(selected)
+
     attempts = split_attempts(events)
     if args.mission_id:
         attempts = [
@@ -332,7 +491,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             for attempt in attempts
             if attempt["mission_id"].startswith(args.mission_id)
         ]
-    if not attempts:
+    has_vitality = bool(vitality["calls"] or vitality["world"]["snapshots"])
+    if not attempts and not has_vitality:
         print("aucune tentative correspondante.")
         return 2
 
@@ -362,6 +522,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 for item in analysed
             ],
             "summary": summarize(analysed),
+            "vitality": vitality,
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
@@ -382,6 +543,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
         )
         print("alertes         : " + (", ".join(total["flags"]) or "aucune"))
+        print(render_vitality(vitality))
 
     if args.strict:
         blocked = {"LIEN SANS PREUVE", "GATE ABSENT"}

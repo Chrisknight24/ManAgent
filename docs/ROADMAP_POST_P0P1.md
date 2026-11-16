@@ -202,6 +202,15 @@ preuve). Le wording décrit la sémantique du fait, sans citer une clé d'hôte 
 - `uia_no_cover` (pas de couverture) et `uia_no_node` (rien trouvé) ne doivent
   pas produire le même verdict.
 
+**Lecture au rejeu (outil).** `tools/analyze_replay.py` imprime désormais une
+section « vitalité » à côté de la chaîne d'ancrage : nombre d'appels et
+d'échecs, durée max/médiane, premier contenu mesuré (min/médiane/max), nombre de
+battements d'attente, snapshots du monde (`chars`, `budget`, `budget_low`) et
+alertes explicites (`AUCUN FIRST BYTE`, `APPELS EN ECHEC`, `BUDGET BAS`,
+`SNAPSHOT COURT ?`, `MESURE INCOHERENTE`). La même lecture est disponible en
+`--json` (`vitality`). C'est l'outil qui tranchera §5 et §7 sur une mission
+fraîche, sans juger le métier : il ouvre une question, il ne condamne pas.
+
 ---
 
 ## 8. Divers — dettes identifiées, non bloquantes
