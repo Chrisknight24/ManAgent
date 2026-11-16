@@ -218,6 +218,7 @@ fraîche, sans juger le métier : il ouvre une question, il ne condamne pas.
 | Dette | Où | Pourquoi ce n'est pas fait |
 |---|---|---|
 | `TARGET_ERROR_CODES` n'est utilisé nulle part | `core/targets.py:25` | Les codes vivent désormais dans `TargetingResult.error_code`. La constante est morte : soit on la branche comme validation, soit on la supprime. Aucun impact runtime. |
+| `Llm.stream` est mort | `core/llm.py:624` | Il appelle `provider.stream`, qui n'existe pas (les providers exposent `stream_response`) et aucun appelant du dépôt ne l'utilise. Le supprimer ou le rebrancher est un chantier séparé, avec banc ; le laisser en l'état ne change rien au runtime. |
 | `render_world_snapshot` projette avant de borner | `core/alignment.py` | C'est le comportement voulu (ne pas gaspiller le prompt en coordonnées). À documenter si un jour une vue « raw bornée » est demandée. |
 | Deux formes de bundle d'échec (`dict` / objet) | `core/executor.py`, `core/solver.py` | `_failure_error_code` et `_record_failure` lisent les deux. Unifier demanderait de toucher tous les producteurs d'échec : hors périmètre d'un correctif de stabilité. |
 
