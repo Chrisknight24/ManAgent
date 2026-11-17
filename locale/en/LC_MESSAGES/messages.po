@@ -729,6 +729,9 @@ msgstr ""
 msgid "Fin du solver"
 msgstr ""
 
+msgid "Fournisseur IA indisponible : {}"
+msgstr ""
+
 msgid "Gemini initialization failed: {}"
 msgstr ""
 

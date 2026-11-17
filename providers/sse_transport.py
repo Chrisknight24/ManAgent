@@ -85,9 +85,11 @@ async def stream_completion(
                             f"[{label} Stream Failover] Erreur {response.status} sur cle "
                             f"[{masked}...]. Rotation ({attempts}/{total_keys})."
                         )
-                        # Du contenu a deja ete livre : on ne rejoue pas en
-                        # silence un appel partiellement consomme.
-                        if getattr(provider, "_first_byte_marked", False):
+                        # Du contenu a deja ete LIVRE au consommateur : on ne
+                        # rejoue pas en silence un appel partiellement consomme.
+                        # Un tampon interne (reponse accumulee puis jetee) ne
+                        # compte pas : le rejeu y est sans consequence.
+                        if getattr(provider, "_content_delivered", False):
                             raise ProviderServiceUnavailableError(
                                 f"[{label}] Flux interrompu apres contenu : pas de rejeu silencieux."
                             )
@@ -110,7 +112,7 @@ async def stream_completion(
         except aiohttp.ClientError as ce:
             attempts += 1
             provider.mark_key_in_cooldown(active_key, 30.0)
-            if getattr(provider, "_first_byte_marked", False) or not provider.has_available_keys():
+            if getattr(provider, "_content_delivered", False) or not provider.has_available_keys():
                 raise ProviderServiceUnavailableError(
                     f"{label} stream network error: {ce}"
                 ) from ce

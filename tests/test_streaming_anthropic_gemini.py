@@ -6,7 +6,13 @@ contrat de sortie ne change pas (objet Pydantic valide) et le premier contenu
 est horodate.
 
 On verifie aussi le garde-fou le plus important : **aucun rejeu silencieux**
-apres avoir livre du contenu. Un flux interrompu doit echouer franchement.
+apres avoir *livre* du contenu au consommateur. Un flux interrompu doit echouer
+franchement.
+
+Mais une reponse structuree accumulee en memoire n'est pas « livree » : la
+sortie partielle est jetee avec le buffer, donc la rejouer sur la cle suivante
+est sans consequence. Confondre les deux transformait un 503 de surcharge en
+mission morte (run 16/11 : abandon a l'essai 1/9, huit cles jamais essayees).
 """
 
 import asyncio
@@ -246,11 +252,39 @@ def test_anthropic_un_529_fait_tourner_la_cle(monkeypatch):
     assert transport.requests[1]["headers"]["x-api-key"] == "k2"
 
 
-def test_anthropic_pas_de_rejeu_apres_contenu(monkeypatch):
+def test_anthropic_un_flux_coupe_est_rejoue_sur_la_cle_suivante(monkeypatch):
+    """Tampon interne interrompu -> rejeu : rien n'a ete livre."""
     provider = _anthropic(keys=["k1", "k2"])
+    transport = _Transport([
+        _FakeResponse(
+            lines=_anthropic_lines(),
+            raise_after=5,  # apres le premier fragment
+            error=aiohttp.ClientError("coupure"),
+        ),
+        _FakeResponse(lines=_anthropic_lines()),
+    ])
+    transport.install(monkeypatch)
+
+    result = asyncio.run(provider.generate_structured_output("prompt", _Answer))
+
+    assert result.ok is True
+    assert len(transport.requests) == 2
+    assert transport.requests[1]["headers"]["x-api-key"] == "k2"
+    assert provider._first_byte_marked is True
+
+
+def test_anthropic_pas_de_rejeu_apres_contenu_livre(monkeypatch):
+    """Contenu deja livre au consommateur -> echec franc, aucun rejeu.
+
+    Aucun chemin actuel ne livre un flux structure avant la fin ; ce test
+    fige l'invariant pour le jour ou un tel chemin existera. Le drapeau est
+    pose a la main : c'est exactement ce que ferait ce chemin.
+    """
+    provider = _anthropic(keys=["k1", "k2"])
+    provider._content_delivered = True
     transport = _Transport([_FakeResponse(
         lines=_anthropic_lines(),
-        raise_after=5,  # apres le premier fragment
+        raise_after=5,
         error=aiohttp.ClientError("coupure"),
     )])
     transport.install(monkeypatch)
@@ -385,13 +419,45 @@ def test_gemini_coupe_circuit_hote(monkeypatch):
     assert provider._first_byte_marked is False
 
 
-def test_gemini_pas_de_rejeu_apres_contenu(monkeypatch):
+def test_gemini_un_flux_coupe_est_rejoue_sur_la_cle_suivante(monkeypatch):
+    """503 en cours de flux, sortie encore en memoire -> rejeu propre."""
+    class _FailOnceModels(_FakeModels):
+        def __init__(self):
+            super().__init__()
+            self._first = True
+
+        async def generate_content_stream(self, model, contents, config):
+            self.stream_calls += 1
+            self.last_config = config
+            if self._first:
+                self._first = False
+                return _ChunkStream(
+                    [_chunk('{"ok":')],
+                    raise_after=1,
+                    error=RuntimeError("429 RESOURCE_EXHAUSTED"),
+                )
+            return _ChunkStream([_chunk('{"ok": true}')])
+
+    models = _FailOnceModels()
+    provider = _gemini(models, monkeypatch, keys=("k1", "k2"))
+    monkeypatch.setattr(provider, "note_rate_limit", lambda *a, **k: 0.0)
+
+    result = asyncio.run(provider.generate_structured_output("prompt", _Answer))
+
+    assert result.ok is True
+    assert models.stream_calls == 2  # la cle suivante a bien ete essayee
+    assert provider._first_byte_marked is True
+
+
+def test_gemini_pas_de_rejeu_quand_le_contenu_a_ete_livre(monkeypatch):
+    """Contenu deja livre -> echec franc. Le drapeau dit « livre », pas « vu »."""
     models = _FakeModels(
         chunks=[_chunk('{"ok":')],
         raise_after=1,
         error=RuntimeError("429 RESOURCE_EXHAUSTED"),
     )
     provider = _gemini(models, monkeypatch, keys=("k1", "k2"))
+    provider._content_delivered = True
 
     with pytest.raises(ProviderServiceUnavailableError):
         asyncio.run(provider.generate_structured_output("prompt", _Answer))

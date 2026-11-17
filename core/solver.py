@@ -37,6 +37,10 @@ from core.prompt_loader import get_prompt_loader
 from core.i18n import _
 from core.id_generator import make_step_id, make_plan_id
 from core.execution_models import ExecutionTree, PlanAttempt, FailureClass
+from providers.base_provider import (
+    ProviderQuotaExhaustedError,
+    ProviderServiceUnavailableError,
+)
 from core.retriever import Retriever
 from core.signature_extractor import SignatureExtractor
 from core.mission_compactor import MissionCompactor
@@ -981,6 +985,39 @@ class Solver(Supervisor, Entity):
                             self._preexecution_failures += 1
                             if self._preexecution_failures >= MAX_PREEXECUTION_FAILURES:
                                 break
+                            continue
+
+                        except (
+                            ProviderServiceUnavailableError,
+                            ProviderQuotaExhaustedError,
+                        ) as provider_error:
+                            # Panne du fournisseur IA (503 de surcharge, quota,
+                            # budget de failover épuisé) : ce n'est pas le plan
+                            # qui est en cause, et le provider a déjà exercé ses
+                            # rotations de clés. On la compte comme un échec
+                            # d'INFRASTRUCTURE : l'arbre la voit, et les
+                            # disjoncteurs existants (quota ×2, infra ×3)
+                            # arrêtent proprement au lieu de spiraler.
+                            # Avant : l'exception s'échappait de la boucle et
+                            # tuait la mission sur-le-champ, sans consommer le
+                            # budget de tentatives (run 16/11 : un 503 au Plan
+                            # = mission morte, 8 clés jamais essayées).
+                            _why = _("Fournisseur IA indisponible : {}").format(
+                                provider_error
+                            )
+                            self.current_attempt.ended_at = time.time()
+                            self.current_attempt.outcome = "failed"
+                            self.current_attempt.failure_class = FailureClass.INFRA_FAILURE
+                            self.current_attempt.failure_reason = _why
+                            self._record_failure(
+                                fail_history, FailureClass.INFRA_FAILURE, _why, 0
+                            )
+                            Logger.warning(
+                                f"[Solver:{self.id}] 🔌 {_why} — tentative "
+                                f"{attempt_counter} classée infrastructure, "
+                                "replanification tentée."
+                            )
+                            self.context += _("\n[Échec] {}.").format(_why)
                             continue
 
                         if self.runtime_state.cancel_requested:

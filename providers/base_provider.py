@@ -104,6 +104,15 @@ class BaseProvider(ABC):
         # inventée).
         self.call_first_byte_hook: Optional[Callable[[], None]] = None
         self._first_byte_marked: bool = False
+        # « Contenu deja LIVRE » est distinct de « contenu observe ».
+        # `_first_byte_marked` ne dit qu'une chose : un fragment est arrive
+        # (mesure de latence). Il est vrai pour une reponse structuree
+        # accumulee en memoire, dont personne n'a jamais rien vu. Rejouer un
+        # tel appel est sans risque : la sortie partielle est jetee avec le
+        # buffer. Seul un flux reellement livre au consommateur rend le rejeu
+        # dangereux (texte affiche, appel d'outil deja agi). Ce drapeau-la est
+        # donc le seul que les garde-fous de failover doivent consulter.
+        self._content_delivered: bool = False
         # Dernier usage tokens du dernier appel (normalisé, jamais inventé).
         # {prompt_tokens, completion_tokens, total_tokens, source: real|estimated|none}
         self._last_usage: Optional[Dict[str, Any]] = None
@@ -414,6 +423,22 @@ class BaseProvider(ABC):
     def reset_first_byte(self) -> None:
         """Remet l'observation à zéro avant un nouvel appel."""
         self._first_byte_marked = False
+        self._content_delivered = False
+
+    def _mark_content_delivered(self) -> None:
+        """Signale que du contenu a atteint le consommateur (irréversible).
+
+        À appeler uniquement par un chemin qui rend le contenu visible
+        pendant l'appel (texte affiché, outil déjà exécuté). Un appel qui
+        accumule sa réponse en mémoire avant de la rendre ne doit jamais
+        l'appeler : son rejeu est sûr.
+
+        Ne lève jamais : une mesure ne doit pas pouvoir casser un appel.
+        """
+        try:
+            self._content_delivered = True
+        except Exception:
+            pass
 
     def _mark_first_byte(self) -> None:
         """Signale le premier contenu réel de l'appel (une seule fois).

@@ -166,7 +166,7 @@ class GeminiProvider(BaseProvider):
 
                     self.check_cancelled()
 
-                    if self._first_byte_marked:
+                    if self._content_delivered:
                         raise ProviderServiceUnavailableError(
                             _("[GeminiProvider] Flux interrompu apres contenu : pas de rejeu silencieux.")
                         )
@@ -190,7 +190,7 @@ class GeminiProvider(BaseProvider):
                     _wait = self.note_rate_limit(current_key)
                     self.client = None
                     self._current_client_key = None
-                    if self._first_byte_marked:
+                    if self._content_delivered:
                         raise ProviderServiceUnavailableError(
                             _("[GeminiProvider] Flux interrompu apres contenu : pas de rejeu silencieux.")
                         )
